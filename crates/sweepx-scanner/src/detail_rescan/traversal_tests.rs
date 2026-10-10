@@ -17,6 +17,7 @@ struct Probe {
     roots: AtomicUsize,
     denied: AtomicUsize,
     native_lengths: AtomicUsize,
+    boundary_descendants: AtomicUsize,
     #[cfg(unix)]
     directories: BTreeSet<(u64, u64)>,
     #[cfg(unix)]
@@ -31,12 +32,19 @@ impl Drop for Lease {
 struct Handle {
     // Native owner closes before test instrumentation counts a released capability.
     native: NativeHandle,
+    path: PathBuf,
     _lease: Lease,
 }
 struct ProbedPlatform {
     native: HostPlatformScanner,
     probe: Arc<Probe>,
     bad_batch: bool,
+    mount_boundaries: BTreeSet<PathBuf>,
+    changed_root_mount: bool,
+    force_full_file_observations: bool,
+    unavailable_mount_comparison: bool,
+    child_io_errors: std::collections::BTreeMap<PathBuf, std::io::ErrorKind>,
+    enumeration_io_errors: std::collections::BTreeMap<PathBuf, std::io::ErrorKind>,
 }
 impl ProbedPlatform {
     fn new(probe: Arc<Probe>) -> Self {
@@ -44,13 +52,20 @@ impl ProbedPlatform {
             native: HostPlatformScanner::new(),
             probe,
             bad_batch: false,
+            mount_boundaries: BTreeSet::new(),
+            changed_root_mount: false,
+            force_full_file_observations: false,
+            unavailable_mount_comparison: false,
+            child_io_errors: std::collections::BTreeMap::new(),
+            enumeration_io_errors: std::collections::BTreeMap::new(),
         }
     }
-    fn handle(&self, native: NativeHandle) -> Handle {
+    fn handle(&self, native: NativeHandle, path: PathBuf) -> Handle {
         let live = self.probe.live.fetch_add(1, Ordering::SeqCst) + 1;
         self.probe.peak.fetch_max(live, Ordering::SeqCst);
         let handle = Handle {
             native,
+            path,
             _lease: Lease(Arc::clone(&self.probe)),
         };
         self.observe();
@@ -59,8 +74,8 @@ impl ProbedPlatform {
     fn observed(&self, entry: WalkEntry<NativeHandle>) -> WalkEntry<Handle> {
         let entry = match entry {
             WalkEntry::Directory(opened) => WalkEntry::Directory(OpenedDirectory {
+                handle: self.handle(opened.handle, opened.metadata.path.clone()),
                 metadata: opened.metadata,
-                handle: self.handle(opened.handle),
             }),
             WalkEntry::File(value) => WalkEntry::File(value),
             WalkEntry::Link(value) => WalkEntry::Link(value),
@@ -89,11 +104,15 @@ impl PlatformScanner for ProbedPlatform {
         cancel: &CancellationToken,
     ) -> Result<RootAdmission<Handle>, PlatformError> {
         self.probe.roots.fetch_add(1, Ordering::SeqCst);
-        let opened = self.native.admit_root(root, cancel)?;
+        let mut opened = self.native.admit_root(root, cancel)?;
+        if self.changed_root_mount {
+            let mount = opened.metadata.mount_identity.as_mut().unwrap();
+            mount.value = mount.value.wrapping_add(1);
+        }
         Ok(RootAdmission::new(
             opened.root,
             opened.metadata,
-            self.handle(opened.directory),
+            self.handle(opened.directory, root.path().to_path_buf()),
             opened.root_locator,
         ))
     }
@@ -103,6 +122,13 @@ impl PlatformScanner for ProbedPlatform {
         cancel: &CancellationToken,
         limits: DirectoryReadLimits,
     ) -> Result<DirectoryEntryBatch, PlatformError> {
+        if let Some(kind) = self.enumeration_io_errors.get(&directory.path) {
+            return Err(PlatformError::Io {
+                path: directory.path.clone(),
+                detail: "fixture enumeration denied or removed".into(),
+                io_kind: Some(*kind),
+            });
+        }
         if self.bad_batch {
             return Ok(DirectoryEntryBatch {
                 entries: Vec::new(),
@@ -112,6 +138,17 @@ impl PlatformScanner for ProbedPlatform {
         let batch = self
             .native
             .enumerate_children(&mut directory.native, cancel, limits)?;
+        for child in &batch.entries {
+            if self
+                .mount_boundaries
+                .iter()
+                .any(|path| child.path != *path && child.path.starts_with(path))
+            {
+                self.probe
+                    .boundary_descendants
+                    .fetch_add(1, Ordering::SeqCst);
+            }
+        }
         self.observe();
         Ok(batch)
     }
@@ -156,6 +193,13 @@ impl PlatformScanner for ProbedPlatform {
         if admission == DirectoryHandleAdmission::Deny {
             self.probe.denied.fetch_add(1, Ordering::SeqCst);
         }
+        if let Some(kind) = self.child_io_errors.get(&child.path) {
+            return Err(PlatformError::Io {
+                path: child.path.clone(),
+                detail: "fixture child denied or removed".into(),
+                io_kind: Some(*kind),
+            });
+        }
         self.native
             .inspect_child_with_mount_identity_and_directory_admission(
                 &parent.native,
@@ -170,6 +214,13 @@ impl PlatformScanner for ProbedPlatform {
         parent: &Handle,
         child: &DirectoryEntryRecord,
     ) -> Option<sweepx_platform::CachedFileEntry> {
+        if self.force_full_file_observations
+            || self.mount_boundaries.contains(&child.path)
+            || self.child_io_errors.contains_key(&child.path)
+        {
+            // Model the native fast path's refusal of a file on a different mount.
+            return None;
+        }
         let file = self.native.observe_file_length(&parent.native, child)?;
         self.probe.native_lengths.fetch_add(1, Ordering::SeqCst);
         Some(file)
@@ -179,6 +230,14 @@ impl PlatformScanner for ProbedPlatform {
         root: &EntryMetadata,
         entry: &EntryMetadata,
     ) -> Result<bool, PlatformError> {
+        if self.unavailable_mount_comparison {
+            return Err(PlatformError::Unsupported(
+                "mount comparison unavailable".into(),
+            ));
+        }
+        if self.mount_boundaries.contains(&entry.path) {
+            return Ok(false);
+        }
         self.native.is_same_mount(root, entry)
     }
 }
@@ -563,4 +622,328 @@ fn logical_usage_honors_cancellation_in_final_progress_callback() {
             |_| cancel.cancel(),
         );
     assert_eq!(result, Err(DetailRescanError::Cancelled));
+}
+
+#[test]
+fn child_mount_boundaries_keep_safe_siblings_and_lower_bound_totals() {
+    for nested in [false, true] {
+        for directory in [false, true] {
+            let (_temp, root) = fixture();
+            fs::create_dir(root.join("safe")).unwrap();
+            fs::write(root.join("safe/file"), b"1234567").unwrap();
+            fs::write(root.join("direct"), b"123").unwrap();
+            let excluded = if nested {
+                root.join("safe/mount")
+            } else {
+                root.join("mount")
+            };
+            if directory {
+                fs::create_dir(&excluded).unwrap();
+                fs::write(excluded.join("never-visit"), vec![9; 1024]).unwrap();
+            } else {
+                fs::write(&excluded, vec![9; 1024]).unwrap();
+            }
+            // Independent ordinary metadata gives the admitted file total. Excluded data must
+            // contribute neither bytes nor descendant observations, regardless of row ordering.
+            let expected = u128::from(fs::metadata(root.join("direct")).unwrap().len())
+                + u128::from(fs::metadata(root.join("safe/file")).unwrap().len());
+            let (scan_id, observed) = source(&root);
+            for mode in ["listing", "full", "size", "strict"] {
+                let probe = Arc::new(Probe::default());
+                let mut platform = ProbedPlatform::new(Arc::clone(&probe));
+                platform.mount_boundaries.insert(excluded.clone());
+                let scanner = DetailRescanner::new(platform, limits());
+                let mut ids = DetailEntryIdAllocator::new(scan_id.clone()).unwrap();
+                let cancel = CancellationToken::new();
+                if mode == "strict" {
+                    let result = scanner.observe_direct_children(
+                        request(&scan_id, &observed),
+                        &mut ids,
+                        &cancel,
+                    );
+                    if nested {
+                        assert!(result.is_ok());
+                    } else {
+                        assert_eq!(result.unwrap_err(), DetailRescanError::MountChanged);
+                    }
+                } else {
+                    let result = match mode {
+                        "listing" => scanner.rescan_direct_children(
+                            request(&scan_id, &observed),
+                            &mut ids,
+                            &cancel,
+                        ),
+                        "size" => scanner.rescan_logical_with_progress(
+                            request(&scan_id, &observed),
+                            &mut ids,
+                            &cancel,
+                            |_| {},
+                        ),
+                        _ => scanner.rescan(request(&scan_id, &observed), &mut ids, &cancel),
+                    }
+                    .unwrap();
+                    let expected_rows = [root.join("safe"), root.join("direct")]
+                        .into_iter()
+                        .map(|path| path.display().to_string())
+                        .collect::<BTreeSet<_>>();
+                    assert_eq!(
+                        result
+                            .rows
+                            .iter()
+                            .map(|row| row.display_path.clone())
+                            .collect::<BTreeSet<_>>(),
+                        expected_rows
+                    );
+                    assert_eq!(result.aggregate.direct_child_count, known_count(2));
+                    assert!(!result.aggregate.coverage.complete);
+                    if mode != "listing" {
+                        assert!(
+                            result
+                                .aggregate
+                                .coverage
+                                .incomplete_reasons
+                                .contains(&ReasonCode::UnsupportedFilesystem)
+                        );
+                        assert_eq!(
+                            result.aggregate.apparent_logical_bytes,
+                            EvidenceValue::LowerBound {
+                                value: DecimalU128::new(expected),
+                                reason: ReasonCode::IncompleteStreamCoverage,
+                            }
+                        );
+                        let safe = result
+                            .rows
+                            .iter()
+                            .find(|row| row.display_path == root.join("safe").display().to_string())
+                            .unwrap();
+                        assert_eq!(safe.coverage.complete, !nested);
+                        assert_eq!(
+                            result.aggregate.recursive_entry_count,
+                            known_count(if nested { 4 } else { 3 })
+                        );
+                    }
+                }
+                assert_eq!(probe.boundary_descendants.load(Ordering::SeqCst), 0);
+                released(&probe);
+            }
+        }
+    }
+}
+
+#[test]
+fn detail_target_mount_change_and_uncertain_child_mount_still_fail_closed() {
+    let (_temp, root) = fixture();
+    fs::write(root.join("file"), b"123").unwrap();
+    let (scan_id, observed) = source(&root);
+    for changed_root in [false, true] {
+        let probe = Arc::new(Probe::default());
+        let mut platform = ProbedPlatform::new(Arc::clone(&probe));
+        platform.changed_root_mount = changed_root;
+        platform.unavailable_mount_comparison = !changed_root;
+        let mut ids = DetailEntryIdAllocator::new(scan_id.clone()).unwrap();
+        let result = DetailRescanner::new(platform, limits()).rescan_direct_children(
+            request(&scan_id, &observed),
+            &mut ids,
+            &CancellationToken::new(),
+        );
+        assert_eq!(
+            result.unwrap_err(),
+            if changed_root {
+                DetailRescanError::MountChanged
+            } else {
+                DetailRescanError::IdentityUnavailable
+            }
+        );
+        released(&probe);
+    }
+}
+
+#[test]
+fn denied_or_disappearing_children_keep_siblings_without_claiming_complete_totals() {
+    for io_kind in [
+        std::io::ErrorKind::PermissionDenied,
+        std::io::ErrorKind::NotFound,
+    ] {
+        for scenario in ["direct", "nested", "enumeration"] {
+            let (_temp, root) = fixture();
+            fs::create_dir(root.join("safe")).unwrap();
+            fs::write(root.join("safe/file"), b"1234567").unwrap();
+            fs::write(root.join("direct"), b"123").unwrap();
+            let excluded = if scenario == "nested" {
+                root.join("safe/excluded")
+            } else {
+                root.join("excluded")
+            };
+            if scenario == "enumeration" {
+                fs::create_dir(&excluded).unwrap();
+                fs::write(excluded.join("never-read"), vec![9; 1024]).unwrap();
+            } else {
+                fs::write(&excluded, vec![9; 1024]).unwrap();
+            }
+            let expected = u128::from(fs::metadata(root.join("direct")).unwrap().len())
+                + u128::from(fs::metadata(root.join("safe/file")).unwrap().len());
+            let (scan_id, observed) = source(&root);
+            for mode in ["full", "size", "listing", "strict"] {
+                let probe = Arc::new(Probe::default());
+                let mut platform = ProbedPlatform::new(Arc::clone(&probe));
+                if scenario == "enumeration" {
+                    platform
+                        .enumeration_io_errors
+                        .insert(excluded.clone(), io_kind);
+                } else {
+                    platform.child_io_errors.insert(excluded.clone(), io_kind);
+                }
+                let scanner = DetailRescanner::new(platform, limits());
+                let mut ids = DetailEntryIdAllocator::new(scan_id.clone()).unwrap();
+                let cancel = CancellationToken::new();
+                if mode == "strict" {
+                    let result = scanner.observe_direct_children(
+                        request(&scan_id, &observed),
+                        &mut ids,
+                        &cancel,
+                    );
+                    if scenario == "direct" {
+                        assert_eq!(
+                            result.unwrap_err(),
+                            if io_kind == std::io::ErrorKind::PermissionDenied {
+                                DetailRescanError::IdentityUnavailable
+                            } else {
+                                DetailRescanError::IdentityMismatch
+                            }
+                        );
+                    } else {
+                        assert!(result.is_ok());
+                    }
+                } else {
+                    let result = match mode {
+                        "listing" => scanner.rescan_direct_children(
+                            request(&scan_id, &observed),
+                            &mut ids,
+                            &cancel,
+                        ),
+                        "size" => scanner.rescan_logical_with_progress(
+                            request(&scan_id, &observed),
+                            &mut ids,
+                            &cancel,
+                            |_| {},
+                        ),
+                        _ => scanner.rescan(request(&scan_id, &observed), &mut ids, &cancel),
+                    }
+                    .unwrap();
+                    let mut expected_rows = [root.join("safe"), root.join("direct")]
+                        .into_iter()
+                        .map(|path| path.display().to_string())
+                        .collect::<BTreeSet<_>>();
+                    if scenario == "enumeration" {
+                        expected_rows.insert(excluded.display().to_string());
+                    }
+                    assert_eq!(
+                        result
+                            .rows
+                            .iter()
+                            .map(|row| row.display_path.clone())
+                            .collect::<BTreeSet<_>>(),
+                        expected_rows
+                    );
+                    assert_eq!(
+                        result.aggregate.direct_child_count,
+                        known_count(expected_rows.len() as u128)
+                    );
+                    assert!(!result.aggregate.coverage.complete);
+                    if mode != "listing" {
+                        assert_eq!(
+                            result.aggregate.apparent_logical_bytes,
+                            EvidenceValue::LowerBound {
+                                value: DecimalU128::new(expected),
+                                reason: ReasonCode::IncompleteStreamCoverage,
+                            }
+                        );
+                        assert!(
+                            result
+                                .aggregate
+                                .coverage
+                                .incomplete_reasons
+                                .contains(&if io_kind == std::io::ErrorKind::PermissionDenied {
+                                    ReasonCode::StrictReadOnly
+                                } else {
+                                    ReasonCode::UnknownIdentity
+                                })
+                        );
+                        let safe = result
+                            .rows
+                            .iter()
+                            .find(|row| row.display_path == root.join("safe").display().to_string())
+                            .unwrap();
+                        assert_eq!(safe.coverage.complete, scenario != "nested");
+                    }
+                }
+                released(&probe);
+            }
+        }
+    }
+}
+
+#[test]
+fn denied_target_enumeration_is_still_a_failure() {
+    let (_temp, root) = fixture();
+    let (scan_id, observed) = source(&root);
+    let probe = Arc::new(Probe::default());
+    let mut platform = ProbedPlatform::new(Arc::clone(&probe));
+    platform
+        .enumeration_io_errors
+        .insert(root, std::io::ErrorKind::PermissionDenied);
+    let mut ids = DetailEntryIdAllocator::new(scan_id.clone()).unwrap();
+    let result = DetailRescanner::new(platform, limits()).rescan(
+        request(&scan_id, &observed),
+        &mut ids,
+        &CancellationToken::new(),
+    );
+    assert_eq!(result.unwrap_err(), DetailRescanError::IdentityUnavailable);
+    released(&probe);
+}
+
+#[test]
+fn streamed_fallback_file_facts_keep_size_without_hard_link_or_allocation_claims() {
+    let (_temp, root) = fixture();
+    fs::create_dir(root.join("nested")).unwrap();
+    fs::write(root.join("nested/file"), b"12345").unwrap();
+    fs::hard_link(root.join("nested/file"), root.join("nested/alias")).unwrap();
+    let mut oracle = Oracle::default();
+    oracle.walk(&root, true);
+    let (scan_id, observed) = source(&root);
+    let probe = oracle.probe();
+    let mut platform = ProbedPlatform::new(Arc::clone(&probe));
+    platform.force_full_file_observations = true;
+    let result = DetailRescanner::new(platform, limits())
+        .rescan_logical_with_progress(
+            request(&scan_id, &observed),
+            &mut DetailEntryIdAllocator::new(scan_id.clone()).unwrap(),
+            &CancellationToken::new(),
+            |_| {},
+        )
+        .unwrap();
+    assert!(result.aggregate.coverage.complete);
+    assert_eq!(
+        result.aggregate.apparent_logical_bytes,
+        known_u128(oracle.logical)
+    );
+    assert_eq!(
+        result.aggregate.recursive_entry_count,
+        known_count(oracle.entries)
+    );
+    assert!(matches!(
+        result.aggregate.unique_logical_bytes,
+        EvidenceValue::Unknown { .. }
+    ));
+    assert!(matches!(
+        result.aggregate.filesystem_reported_allocated_bytes,
+        EvidenceValue::Unknown { .. }
+    ));
+    assert!(matches!(
+        result.aggregate.potentially_reclaimable_bytes,
+        EvidenceValue::Unknown { .. }
+    ));
+    assert_eq!(probe.native_lengths.load(Ordering::SeqCst), 0);
+    assert_eq!(result.rows.len(), 1);
+    released(&probe);
 }

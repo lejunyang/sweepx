@@ -177,6 +177,7 @@ struct Cli {
 enum Commands {
     Scan {
         /// Browse directories with live paths and file sizes, or show --large-files/--duplicates results.
+        /// Child permission denials and other volumes leave incomplete directory totals.
         #[arg(long)]
         tui: bool,
         /// Rank ordinary files by size; report-only unless explicitly selected in --tui.

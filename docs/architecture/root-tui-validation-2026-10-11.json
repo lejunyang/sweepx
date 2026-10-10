@@ -1,0 +1,131 @@
+{
+  "terminalState": "finished",
+  "snapshots": [
+    {
+      "elapsed": 0.01,
+      "lines": []
+    },
+    {
+      "elapsed": 5.05,
+      "lines": [
+        "│SweepX | Scanning | 23940 entries | 4.8s | 4971/s                                                                                                             │",
+        "│Scan roots > / | Scanned size: 1.6 GiB                                                                                                                        │",
+        "│Scanning: /System/iOSSupport/System/Library/AccessibilityBundles/Clock.axbundle/Contents/Resources/pt.lproj                                                   │"
+      ]
+    },
+    {
+      "elapsed": 10.15,
+      "lines": [
+        "│SweepX | Scanning | 45332 entries | 9.9s | 4593/s                                                                                                             │",
+        "│Scan roots > / | Scanned size: 2.1 GiB                                                                                                                        │",
+        "│Scanning: /System/iOSSupport/System/Library/Frameworks/ScreenCaptureKit.framework/Versions/A/Resources/ro.lproj                                               │"
+      ]
+    },
+    {
+      "elapsed": 15.16,
+      "lines": [
+        "│SweepX | Scanning | 134868 entries | 14.9s | 9040/s                                                                                                           │",
+        "│Scan roots > / | Scanned size: 4.0 GiB                                                                                                                        │",
+        "│Scanning: /System/Library/CoreServices/ControlStrip.app/Contents/XPCServices/com.apple.DFRSystemExtra.NightShift.xpc/Contents/Resources/sv.lproj              │"
+      ]
+    },
+    {
+      "elapsed": 20.17,
+      "lines": [
+        "│SweepX | Scanning | 166025 entries | 19.9s | 8357/s                                                                                                           │",
+        "│Scan roots > / | Scanned size: 6.1 GiB                                                                                                                        │",
+        "│Scanning: /System/Library/ProductDocuments/SafetyAndHandling/J714_ROW.bundle/te.lproj                                                                         │"
+      ]
+    },
+    {
+      "elapsed": 25.19,
+      "lines": [
+        "│SweepX | Scanning | 200247 entries | 24.9s | 8038/s                                                                                                           │",
+        "│Scan roots > / | Scanned size: 8.0 GiB                                                                                                                        │",
+        "│Scanning: /System/Library/Automator/Label Finder Items.action/Contents/Resources/zh_TW.lproj                                                                  │"
+      ]
+    },
+    {
+      "elapsed": 30.21,
+      "lines": [
+        "│SweepX | Scanning | 228533 entries | 30.1s | 7597/s                                                                                                           │",
+        "│Scan roots > / | Scanned size: 9.0 GiB                                                                                                                        │",
+        "│Scanning: ure_Book_Photos_OSX_Preview.pppreview/Contents/Resources/ru.lproj/Localizable.strings    /System/Library/Templates/Data/Library/Application Support/│"
+      ]
+    },
+    {
+      "elapsed": 35.23,
+      "lines": [
+        "│SweepX | Scanning | 271712 entries | 35.0s | 7761/s                                                                                                           │",
+        "│Scan roots > / | Scanned size: 10.5 GiB                                                                                                                       │",
+        "│Scanning: /System/Library/PrivateFrameworks/ConfigurationProfiles.framework/XPCServices/FirewallService.xpc/Contents/Resources/he.lproj                       │"
+      ]
+    },
+    {
+      "elapsed": 40.26,
+      "lines": [
+        "│SweepX | Scanning | 316436 entries | 40.1s | 7900/s                                                                                                           │",
+        "│Scan roots > / | Scanned size: 12.5 GiB                                                                                                                       │",
+        "│Scanning: /System/Library/PrivateFrameworks/ScreenSharing.framework/Versions/A/Frameworks/ScreenSharingUI.framework/Versions/A/Resources/en.lproj             │"
+      ]
+    },
+    {
+      "elapsed": 45.28,
+      "lines": [
+        "│SweepX | Scanning | 366011 entries | 45.1s | 8113/s                                                                                                           │",
+        "│Scan roots > / | Scanned size: 14.2 GiB                                                                                                                       │",
+        "│Scanning: /System/Library/PrivateFrameworks/NotesUIServices.framework/Versions/A/Resources/uk.lproj                                                           │"
+      ]
+    },
+    {
+      "elapsed": 50.3,
+      "lines": [
+        "│SweepX | Scanning | 412204 entries | 50.2s | 8218/s                                                                                                           │",
+        "│Scan roots > / | Scanned size: 15.5 GiB                                                                                                                       │",
+        "│Scanning: /System/Library/Frameworks/Ruby.framework/Versions/2.6/usr/share/ri/2.6.0/system/IO/EINPROGRESSWaitReadable                                         │"
+      ]
+    },
+    {
+      "elapsed": 55.34,
+      "lines": [
+        "│SweepX | Scanning | 444466 entries | 55.2s | 8053/s                                                                                                           │",
+        "│Scan roots > / | Scanned size: 16.6 GiB                                                                                                                       │",
+        "│Scanning: /System/Library/Frameworks/GLKit.framework/Resources                                                                                                │"
+      ]
+    },
+    {
+      "elapsed": 60.37,
+      "lines": [
+        "│SweepX | Scanning | 461136 entries | 60.2s | 7656/s                                                                                                           │",
+        "│Scan roots > / | Scanned size: 17.6 GiB                                                                                                                       │",
+        "│Scanning: /System/Library/Filesystems/NetFSPlugins/nfs.bundle/Contents/Resources/it.lproj                                                                     │"
+      ]
+    },
+    {
+      "elapsed": 65.4,
+      "lines": [
+        "│SweepX | Scanning | 473132 entries | 65.2s | 7260/s                                                                                                           │",
+        "│Scan roots > / | Scanned size: 18.5 GiB                                                                                                                       │",
+        "│Scanning: /System/Applications/Apps.app/Contents/Resources/es.lproj                                                                                           │"
+      ]
+    }
+  ],
+  "observedSeconds": 68.23,
+  "tag": "complete",
+  "exit": 0,
+  "screen": "┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐\n│SweepX | Finished | 485975 entries | 68.1s | 7139/s                                                                                                           │\n└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘\n┌Location──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐\n│Scan roots > / | Scanned size: 19.0 GiB                                                                                                                       │\n│Scanned: /System/DriverKit/System/Library/Frameworks/USBDriverKit.framework/version.plist                                                                     │\n└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘\n┌Contents──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐\n│Name                                                                                                           Type        Size             status            │\n│System                                                                                                         directory   17.4 GiB         Incomplete        │\n│usr                                                                                                            directory   1.6 GiB          Incomplete        │\n│bin                                                                                                            directory   11.2 MiB         Complete          │\n│sbin                                                                                                           directory   8.8 MiB          Complete          │\n│.VolumeIcon.icns                                                                                               symlink     36 B             Complete          │\n│home                                                                                                           symlink     25 B             Complete          │\n│etc                                                                                                            symlink     11 B             Complete          │\n│tmp                                                                                                            symlink     11 B             Complete          │\n│var                                                                                                            symlink     11 B             Complete          │\n│.nofollow                                                                                                      directory   0 B              Complete          │\n│.resolve                                                                                                       directory   0 B              Complete          │\n│.vol                                                                                                           directory   0 B              Complete          │\n│                                                                                                                                                              │\n│                                                                                                                                                              │\n│                                                                                                                                                              │\n│                                                                                                                                                              │\n│                                                                                                                                                              │\n│                                                                                                                                                              │\n│                                                                                                                                                              │\n└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘\n┌Scan + Trash preview──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐\n│↑/↓ select  Enter/→ open  Esc/Backspace/← back  p full path  d/Delete move to Trash  q/Ctrl-C quit | Size sums file bytes                                     │\n└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘",
+  "host": {
+    "os": "macOS 26.5.2",
+    "architecture": "arm64",
+    "rust": "1.98.0",
+    "build": "debug",
+    "date": "2026-10-11"
+  },
+  "scope": "Read-only functional terminal validation; excluded mounts and permissions; no independent whole-disk byte oracle; OS caches not cleared.",
+  "before": {
+    "withState": "Scan failed: mount_changed",
+    "withoutState": "Scan failed: mount_changed",
+    "intermediateVisitedCutoff": 131072
+  },
+  "command": "sweepx --locale en-US scan --tui --no-state /"
+}

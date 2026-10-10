@@ -39,14 +39,21 @@ struct LiveTuiDetailRescanProvider {
 
 /// Builds the frontend adapter; invalid scan identities leave it unavailable.
 pub(crate) fn tui_detail_rescan_provider(summary: &ScanSummary) -> TuiDetailRescanProvider {
+    tui_detail_rescan_provider_for_mode(summary, true)
+}
+
+fn tui_detail_rescan_provider_for_mode(
+    summary: &ScanSummary,
+    logical_only: bool,
+) -> TuiDetailRescanProvider {
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     {
-        let live = live_tui_detail_rescan_provider(summary).ok();
+        let live = live_tui_detail_rescan_provider(summary, logical_only).ok();
         TuiDetailRescanProvider { live }
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
-        let _ = summary;
+        let _ = (summary, logical_only);
         TuiDetailRescanProvider {}
     }
 }
@@ -63,18 +70,14 @@ pub(crate) fn tui_directory_detail_rescan_provider(
         progress: Vec::new(),
         progress_retention: Default::default(),
     };
-    let mut provider = tui_detail_rescan_provider(&summary);
-    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-    if let Some(live) = provider.live.as_mut() {
-        // Junk breakdown orders physical allocation and requires complete file facts.
-        live.logical_only = false;
-    }
-    provider
+    // Junk breakdown retains full allocation and hard-link facts with the original work cap.
+    tui_detail_rescan_provider_for_mode(&summary, false)
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 fn live_tui_detail_rescan_provider(
     summary: &ScanSummary,
+    logical_only: bool,
 ) -> Result<LiveTuiDetailRescanProvider, DetailRescanError> {
     let scan_id = summary
         .roots
@@ -109,16 +112,30 @@ fn live_tui_detail_rescan_provider(
                 .map_err(|_| DetailRescanError::InvalidRequest)?,
         )?;
     }
+    let limits =
+        detail_limits_for_mode(sweepx_platform::ScanResourceLimits::default(), logical_only);
     Ok(LiveTuiDetailRescanProvider {
-        scanner: DetailRescanner::new(
-            HostPlatformScanner::new(),
-            sweepx_platform::ScanResourceLimits::default(),
-        ),
-        logical_only: true,
+        scanner: DetailRescanner::new(HostPlatformScanner::new(), limits),
+        logical_only,
         ids: Mutex::new(ids),
         cancel: Mutex::new(CancellationToken::new()),
         progress: Mutex::new(None),
     })
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+fn detail_limits_for_mode(
+    mut limits: sweepx_platform::ScanResourceLimits,
+    logical_only: bool,
+) -> sweepx_platform::ScanResourceLimits {
+    if logical_only {
+        // Ordinary size browsing streams descendant lengths without retaining file rows or
+        // hard-link ledgers. Total work need not fit the full-fact inventory's 131K entry cap.
+        // Keep bounded batches, per-directory reads, visible rows and ancestor handles; users
+        // can cancel between native observations. Full-fact junk inventories retain the cap.
+        limits.max_visited_entries = usize::MAX;
+    }
+    limits
 }
 
 impl DetailRescanProvider for TuiDetailRescanProvider {
@@ -204,6 +221,16 @@ impl DetailRescanProvider for TuiDetailRescanProvider {
                         on_progress,
                     )
                 }
+            } else if live.logical_only {
+                // Eviction/legacy detail requests use the same bounded-metadata size mode.
+                // The ordinary provider's enlarged work allowance must never feed a full
+                // descendant hard-link inventory merely because progress was not requested.
+                live.scanner.rescan_logical_with_progress(
+                    scanner_request,
+                    &mut ids,
+                    &cancel,
+                    |_| {},
+                )
             } else {
                 live.scanner.rescan(scanner_request, &mut ids, &cancel)
             };
@@ -450,6 +477,85 @@ mod tui_detail_rescan_provider_tests {
         );
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn streamed_size_mode_outgrows_full_fact_work_cap_with_bounded_rows() {
+        let temp = tempfile::TempDir::new().unwrap();
+        #[cfg(unix)]
+        let parent = temp.path().canonicalize().unwrap();
+        #[cfg(windows)]
+        let parent = temp.path().to_path_buf();
+        let path = parent.join("root");
+        std::fs::create_dir_all(path.join("nested")).unwrap();
+        let mut expected = 0u128;
+        for n in 0..6 {
+            let file = path.join("nested").join(n.to_string());
+            std::fs::write(&file, vec![1; n + 1]).unwrap();
+            expected += u128::from(std::fs::metadata(file).unwrap().len());
+        }
+        let scan_id = ScanId::new("streamed-work-budget");
+        let source = sweepx_scanner::Scanner::new(
+            HostPlatformScanner::new(),
+            sweepx_scanner::ScannerOptions {
+                scan_id: scan_id.clone(),
+                ..Default::default()
+            },
+        )
+        .scan_roots_only(
+            &[sweepx_platform::ScanRoot::new(path).unwrap()],
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        let root = &source.roots[0];
+        let base = sweepx_platform::ScanResourceLimits {
+            max_visited_entries: 4,
+            max_retained_entries: 1,
+            max_frontier_entries: 3,
+            max_directory_batch_entries: 2,
+            ..Default::default()
+        };
+        for logical_only in [false, true] {
+            let scanner = DetailRescanner::new(
+                HostPlatformScanner::new(),
+                detail_limits_for_mode(base, logical_only),
+            );
+            let request = DetailRescanRequest {
+                source_scan_id: &scan_id,
+                source_root_identity: root.identity.as_ref().unwrap(),
+                source_directory_identity: root.identity.as_ref().unwrap(),
+                directory_locator: root.executable_native_locator().unwrap().unwrap(),
+                revision: DecimalU128::new(2),
+                max_rows: 1,
+            };
+            let mut ids = DetailEntryIdAllocator::new(scan_id.clone()).unwrap();
+            let result = if logical_only {
+                scanner.rescan_logical_with_progress(
+                    request,
+                    &mut ids,
+                    &CancellationToken::new(),
+                    |_| {},
+                )
+            } else {
+                scanner.rescan(request, &mut ids, &CancellationToken::new())
+            };
+            if logical_only {
+                let result = result.unwrap();
+                assert_eq!(result.rows.len(), 1);
+                assert!(result.aggregate.coverage.complete);
+                assert_eq!(
+                    result.aggregate.apparent_logical_bytes,
+                    sweepx_platform::known_u128(expected)
+                );
+                assert_eq!(
+                    result.aggregate.recursive_entry_count,
+                    sweepx_platform::known_count(7)
+                );
+            } else {
+                assert_eq!(result.unwrap_err(), DetailRescanError::ResourceLimit);
+            }
+        }
+    }
+
     #[test]
     fn cancelled_tui_provider_can_start_a_fresh_followup_query() {
         let temp = tempfile::TempDir::new().unwrap();
@@ -516,6 +622,8 @@ mod tui_detail_rescan_provider_tests {
         let root_path = fixture_root.join("root");
         std::fs::create_dir(&root_path).unwrap();
         std::fs::write(root_path.join("child"), b"1234").unwrap();
+        std::fs::create_dir(root_path.join("nested")).unwrap();
+        std::fs::write(root_path.join("nested/file"), b"12345").unwrap();
         let context = CoreContext::new(LocaleResolution::new(
             Locale::EnUs,
             sweepx_i18n::LocaleSource::Default,
@@ -574,6 +682,33 @@ mod tui_detail_rescan_provider_tests {
             }
         );
         assert!(detail.aggregate.coverage.complete);
+        let expected_bytes = u128::from(std::fs::metadata(root_path.join("child")).unwrap().len())
+            + u128::from(
+                std::fs::metadata(root_path.join("nested/file"))
+                    .unwrap()
+                    .len(),
+            );
+        assert_eq!(
+            detail.aggregate.apparent_logical_bytes,
+            sweepx_platform::known_u128(expected_bytes)
+        );
+        assert!(matches!(
+            detail.aggregate.unique_logical_bytes,
+            sweepx_model::EvidenceValue::Unknown { .. }
+        ));
+        // Junk's non-progressive detail keeps full unique-file accounting from current metadata.
+        let junk_provider = tui_directory_detail_rescan_provider(&root);
+        let TuiDetailRescanResult::Refreshed(junk) = junk_provider.rescan_detail(&request) else {
+            panic!("junk detail unexpectedly failed");
+        };
+        assert_eq!(
+            junk.aggregate.apparent_logical_bytes,
+            sweepx_platform::known_u128(expected_bytes)
+        );
+        assert_eq!(
+            junk.aggregate.unique_logical_bytes,
+            sweepx_platform::known_u128(expected_bytes)
+        );
     }
 
     #[cfg(target_os = "macos")]

@@ -1,6 +1,6 @@
 use std::collections::{BTreeSet, VecDeque};
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 #[cfg(unix)]
@@ -14,10 +14,11 @@ use sweepx_model::{
     ReasonCode, ScanEntryId, ScanId, ScanObjectIdentity, ScannedEntry,
 };
 use sweepx_platform::{
-    BoundaryKind, CancellationToken, DirectoryEntryRecord, DirectoryHandleAdmission,
-    DirectoryReadLimits, EntryKind, EntryMetadata, ErrorKind, HardLinkKey, PlatformError,
-    PlatformScanner, RootAdmission, ScanResourceLimits, ScanRoot, WalkEntry,
-    inspect_bound_child_with_mount_identity_and_directory_admission, known_count,
+    BoundaryKind, BoundaryRecord, CancellationToken, DirectoryEntryRecord,
+    DirectoryHandleAdmission, DirectoryReadLimits, EntryKind, EntryMetadata, ErrorKind,
+    ErrorRecord, HardLinkKey, PlatformError, PlatformScanner, RootAdmission, ScanResourceLimits,
+    ScanRoot, WalkEntry, inspect_bound_child_with_mount_identity_and_directory_admission,
+    known_count,
 };
 use thiserror::Error;
 
@@ -725,15 +726,19 @@ where
                     .ok_or(DetailRescanError::ResourceLimit)?;
 
                 for child in batch.entries {
-                    let walked = inspect_bound_child_with_mount_identity_and_directory_admission(
-                        &self.platform,
-                        &current.handle,
-                        &current.path,
-                        &child,
-                        cancel,
-                        detail_directory_admission(self.limits.max_frontier_entries, 1),
-                    )
-                    .map_err(map_platform_error)?;
+                    let walked = detail_child_observation(
+                        &child.path,
+                        inspect_bound_child_with_mount_identity_and_directory_admission(
+                            &self.platform,
+                            &current.handle,
+                            &current.path,
+                            &child,
+                            cancel,
+                            detail_directory_admission(self.limits.max_frontier_entries, 1),
+                        ),
+                    )?;
+                    let walked =
+                        restrict_detail_child_to_mount(&self.platform, &root_metadata, walked)?;
 
                     match walked {
                         WalkEntry::Directory(opened) => {
@@ -749,7 +754,6 @@ where
                                 &self.limits,
                             )?;
                             let entry_id = ids.allocate()?;
-                            require_same_mount(&self.platform, &root_metadata, &opened.metadata)?;
                             let identity = scan_object_identity(
                                 entry_id,
                                 request.source_root_identity.entry_id.clone(),
@@ -819,7 +823,6 @@ where
                                 &self.limits,
                             )?;
                             let entry_id = ids.allocate()?;
-                            require_same_mount(&self.platform, &root_metadata, &metadata)?;
                             aggregate.note_file(&metadata);
                             let identity = scan_object_identity(
                                 entry_id,
@@ -856,7 +859,6 @@ where
                                 &self.limits,
                             )?;
                             let entry_id = ids.allocate()?;
-                            require_same_mount(&self.platform, &root_metadata, &metadata)?;
                             let identity = scan_object_identity(
                                 entry_id,
                                 request.source_root_identity.entry_id.clone(),
@@ -1013,10 +1015,30 @@ where
                 if batch_limits.max_batch_entries == 0 || batch_limits.max_batch_bytes == 0 {
                     return Err(DetailRescanError::ResourceLimit);
                 }
-                let batch = self
-                    .platform
-                    .enumerate_children(&mut current.handle, cancel, batch_limits)
-                    .map_err(map_platform_error)?;
+                let batch = match self.platform.enumerate_children(
+                    &mut current.handle,
+                    cancel,
+                    batch_limits,
+                ) {
+                    Ok(batch) => batch,
+                    Err(error) => {
+                        if let Some((_, reason)) = skippable_child_io(&error) {
+                            aggregates.target.mark_incomplete(reason.clone());
+                            aggregates
+                                .direct
+                                .get_mut(&current.direct_child_id)
+                                .ok_or(DetailRescanError::InvalidRequest)?
+                                .mark_incomplete(reason);
+                            progress.clock.current_path = current.path.clone();
+                            progress.clock.changed = Some(current.direct_child_id.clone());
+                            // Exclude this unreadable descendant; pop its frame on the next turn
+                            // while keeping suspended sibling cursors and all observed totals.
+                            frame.end_of_directory = true;
+                            continue;
+                        }
+                        return Err(map_platform_error(error));
+                    }
+                };
                 if batch.entries.is_empty() && !batch.end_of_directory {
                     return Err(DetailRescanError::Unavailable);
                 }
@@ -1054,16 +1076,19 @@ where
                     progress.clock.native_file_lengths += 1;
                     WalkEntry::CachedFile(file)
                 } else {
-                    inspect_bound_child_with_mount_identity_and_directory_admission(
-                        &self.platform,
-                        &current.handle,
-                        &current.path,
-                        &child,
-                        cancel,
-                        detail_directory_admission(self.limits.max_frontier_entries, retained),
-                    )
-                    .map_err(map_platform_error)?
+                    detail_child_observation(
+                        &child.path,
+                        inspect_bound_child_with_mount_identity_and_directory_admission(
+                            &self.platform,
+                            &current.handle,
+                            &current.path,
+                            &child,
+                            cancel,
+                            detail_directory_admission(self.limits.max_frontier_entries, retained),
+                        ),
+                    )?
                 };
+                let walked = restrict_detail_child_to_mount(&self.platform, root_metadata, walked)?;
                 let entry_id = ids.allocate()?;
                 aggregates.target.note_entry()?;
                 let direct = aggregates
@@ -1080,7 +1105,6 @@ where
                 }
                 match walked {
                     WalkEntry::Directory(opened) => {
-                        require_same_mount(&self.platform, root_metadata, &opened.metadata)?;
                         let identity = scan_object_identity(
                             entry_id,
                             current.identity.scan_root_id.clone(),
@@ -1098,13 +1122,18 @@ where
                         });
                     }
                     WalkEntry::File(metadata) => {
-                        require_same_mount(&self.platform, root_metadata, &metadata)?;
-                        aggregates.target.note_file(&metadata);
-                        direct.note_file(&metadata);
+                        if progress.logical_only {
+                            // A fallback native observation still contributes only file length
+                            // in streamed browsing. Retaining its hard-link key would make the
+                            // ledger grow with every descendant despite omitting file rows.
+                            aggregates.target.note_file_length(&metadata.logical_bytes);
+                            direct.note_file_length(&metadata.logical_bytes);
+                        } else {
+                            aggregates.target.note_file(&metadata);
+                            direct.note_file(&metadata);
+                        }
                     }
-                    WalkEntry::Link(metadata) => {
-                        require_same_mount(&self.platform, root_metadata, &metadata)?;
-                    }
+                    WalkEntry::Link(_) => {}
                     WalkEntry::Boundary(boundary) => {
                         if matches!(
                             boundary.kind,
@@ -1126,8 +1155,10 @@ where
                         direct.mark_incomplete(error.reason);
                     }
                     WalkEntry::CachedFile(file) => {
-                        aggregates.target.note_logical_file(file.logical_bytes);
-                        direct.note_logical_file(file.logical_bytes);
+                        aggregates
+                            .target
+                            .note_file_length(&sweepx_platform::known_u128(file.logical_bytes));
+                        direct.note_file_length(&sweepx_platform::known_u128(file.logical_bytes));
                     }
                 }
                 progress.clock.changed = Some(current.direct_child_id.clone());
@@ -1361,9 +1392,8 @@ impl TargetAggregateState {
         }
     }
 
-    fn note_logical_file(&mut self, bytes: u128) {
-        self.apparent_logical_bytes
-            .add(&sweepx_platform::known_u128(bytes));
+    fn note_file_length(&mut self, bytes: &sweepx_model::ByteValue) {
+        self.apparent_logical_bytes.add(bytes);
         // Current logical length is sufficient for apparent usage only. Do not infer physical
         // allocation, hard-link uniqueness or reclaimable bytes from the cheap observation.
         self.unique_logical_bytes = EvidenceAccumulator::Unknown {
@@ -1501,6 +1531,73 @@ fn identity_is_known(identity: &ScanObjectIdentity) -> bool {
         identity.volume_or_mount_identity,
         IdentityEvidence::Known { .. }
     )
+}
+
+// A child denied by the OS or removed during enumeration is missing coverage. Its
+// pathname never becomes a row/locator or deletion authority. Malformed binding, cancellation,
+// resource failures and uncertain native mount evidence keep their existing fatal behavior.
+fn detail_child_observation<H>(
+    path: &Path,
+    observation: Result<WalkEntry<H>, PlatformError>,
+) -> Result<WalkEntry<H>, DetailRescanError> {
+    match observation {
+        Ok(entry) => Ok(entry),
+        Err(error) => {
+            if let Some((kind, reason)) = skippable_child_io(&error) {
+                Ok(WalkEntry::Error(ErrorRecord {
+                    path: path.to_path_buf(),
+                    kind,
+                    reason,
+                    detail: error.to_string(),
+                }))
+            } else {
+                Err(map_platform_error(error))
+            }
+        }
+    }
+}
+
+fn skippable_child_io(error: &PlatformError) -> Option<(ErrorKind, ReasonCode)> {
+    match error {
+        PlatformError::Io {
+            io_kind: Some(std::io::ErrorKind::PermissionDenied),
+            ..
+        } => Some((ErrorKind::AccessDenied, ReasonCode::StrictReadOnly)),
+        PlatformError::Io {
+            io_kind: Some(std::io::ErrorKind::NotFound),
+            ..
+        } => Some((ErrorKind::NotFound, ReasonCode::UnknownIdentity)),
+        _ => None,
+    }
+}
+
+// A newly encountered child on a different mount is an excluded boundary, not evidence
+// that the captured target changed. Normalize it before retaining a row or descending so
+// progressive browsing keeps safe siblings and incomplete totals. Strict inventories still
+// reject this boundary. Reopening captured roots/ancestors uses require_same_mount directly
+// and remains fatal; unknown mount evidence also remains fatal here.
+fn restrict_detail_child_to_mount<P: PlatformScanner>(
+    platform: &P,
+    root: &EntryMetadata,
+    walked: WalkEntry<P::DirectoryHandle>,
+) -> Result<WalkEntry<P::DirectoryHandle>, DetailRescanError> {
+    let metadata = match &walked {
+        WalkEntry::Directory(opened) => &opened.metadata,
+        WalkEntry::File(metadata) | WalkEntry::Link(metadata) => metadata,
+        // Lightweight file observations are already checked against their retained parent by
+        // the native backend; boundaries and errors carry their own exclusion evidence.
+        _ => return Ok(walked),
+    };
+    match require_same_mount(platform, root, metadata) {
+        Ok(()) => Ok(walked),
+        Err(DetailRescanError::MountChanged) => Ok(WalkEntry::Boundary(BoundaryRecord {
+            path: metadata.path.clone(),
+            kind: BoundaryKind::Mount,
+            reason: ReasonCode::UnsupportedFilesystem,
+            detail: "entry crosses the initial mount boundary".into(),
+        })),
+        Err(error) => Err(error),
+    }
 }
 
 fn require_same_mount<P: PlatformScanner>(
