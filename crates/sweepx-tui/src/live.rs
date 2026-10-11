@@ -26,8 +26,9 @@ use ratatui::{Frame, Terminal};
 use sweepx_i18n::Locale;
 use sweepx_model::{
     ArithmeticState, Coverage, CoverageState, DecimalU128, DirectoryAggregate, FieldProvenance,
-    HumanSizeUnit, NativeLocatorEvidence, NativeName, ObjectType, ScanEntryId, ScanEntryIdError,
-    ScanId, ScanObjectIdentity, ScanSort, ScannedEntry,
+    FilesystemObjectDomainIdentity, HumanSizeUnit, IdentityEvidence, NativeLocatorEvidence,
+    NativeName, ObjectType, PlatformFileIdentity, ScanEntryId, ScanEntryIdError, ScanId,
+    ScanObjectIdentity, ScanSort, ScannedEntry, VolumeOrMountIdentity,
 };
 use sweepx_protocol::OutputStatus;
 use thiserror::Error;
@@ -1217,8 +1218,28 @@ impl BrowserModel {
         })
     }
 
+    fn background_directory(&self) -> Option<&BrowserNode> {
+        self.progressive_navigation.then_some(())?;
+        self.nodes
+            .iter()
+            .find(|node| matches!(node.detail_rescan_state, DetailRescanState::Pending { .. }))
+    }
+
+    fn current_listing_waiting(&self) -> bool {
+        self.background_directory().is_some()
+            && self.levels.last().is_some_and(|level| {
+                let node = &self.nodes[level.directory_index];
+                !node.listing_loaded
+                    && !matches!(node.detail_rescan_state, DetailRescanState::Pending { .. })
+            })
+    }
+
     fn begin_detail_rescan(&mut self) -> Option<PendingDetailRescan> {
         let node_index = self.selected_node_index()?;
+        self.begin_detail_rescan_at(node_index)
+    }
+
+    fn begin_detail_rescan_at(&mut self, node_index: usize) -> Option<PendingDetailRescan> {
         let reason = if self.progressive_navigation {
             if !self.nodes[node_index].to_row().can_enter() {
                 return None;
@@ -1313,11 +1334,10 @@ impl BrowserModel {
         })
     }
 
-    fn begin_progressive_aggregate(&mut self) -> Option<PendingDetailRescan> {
+    fn begin_progressive_aggregate_at(&mut self, node_index: usize) -> Option<PendingDetailRescan> {
         if !self.progressive_navigation {
             return None;
         }
-        let node_index = self.levels.last()?.directory_index;
         if self.nodes[node_index].recursive_size_observed
             || self.nodes[node_index].detail_rescan_state.is_stale()
         {
@@ -1353,14 +1373,9 @@ impl BrowserModel {
         if !self.detail_rescan_binding_matches(&pending) {
             return false;
         }
-        let selection_still_bound = if self.progressive_navigation {
-            self.levels
-                .last()
-                .is_some_and(|level| level.directory_index == pending.node_index)
-        } else {
-            self.selected_node_index() == Some(pending.node_index)
-        };
-        if !selection_still_bound {
+        // A progressive request belongs to its native directory, not the foreground page.
+        // Legacy detail previews still require their original selection to remain bound.
+        if !self.progressive_navigation && self.selected_node_index() != Some(pending.node_index) {
             self.restore_detail_rescan_state(&pending);
             return false;
         }
@@ -1651,7 +1666,7 @@ impl BrowserModel {
         &self,
         node_index: usize,
         observed_directory: ScannedEntry,
-        rows: Vec<ScannedEntry>,
+        mut rows: Vec<ScannedEntry>,
         aggregate: DirectoryAggregate,
         revision: DecimalU128,
     ) -> Result<Self, DetailRescanFailure> {
@@ -1663,6 +1678,39 @@ impl BrowserModel {
             }
             removed[index] = true;
             frontier.extend(self.children_by_index[index].iter().copied());
+        }
+
+        // The size pass allocates new row IDs after the initial listing. Keep the browsing
+        // identity and visited descendants of unchanged native children, so completion cannot
+        // invalidate an in-flight breadcrumb. Fresh listings (including explicit refresh) do
+        // not carry old inventories forward. Display names alone never establish a match.
+        let mut replaced = vec![false; self.nodes.len()];
+        if self.progressive_navigation && !self.nodes[node_index].listing_pending {
+            let children = self.children_by_index[node_index]
+                .iter()
+                .filter_map(|index| {
+                    progressive_row_key(&self.nodes[*index].entry).map(|key| (key, *index))
+                })
+                .collect::<HashMap<_, _>>();
+            for row in &mut rows {
+                let Some(index) = progressive_row_key(row)
+                    .filter(|_| row.identity.as_ref().is_some_and(identity_is_known))
+                    .and_then(|key| children.get(&key).copied())
+                else {
+                    continue;
+                };
+                let entry_id = request_entry_id(&self.nodes[index].entry);
+                row.identity.as_mut().expect("validated row").entry_id = entry_id.clone();
+                if let Some(locator) = row.native_locator.as_mut() {
+                    locator.entry.entry_id = entry_id;
+                }
+                replaced[index] = true;
+                let mut frontier = vec![index];
+                while let Some(child) = frontier.pop() {
+                    removed[child] = false;
+                    frontier.extend(self.children_by_index[child].iter().copied());
+                }
+            }
         }
 
         let mut retained_states = self
@@ -1713,7 +1761,9 @@ impl BrowserModel {
             } else {
                 node.entry.clone()
             };
-            if node.root {
+            if replaced[index] {
+                // Its freshly observed direct row is appended below, with the retained ID.
+            } else if node.root {
                 roots.push(entry);
             } else {
                 entries.push(entry);
@@ -1822,16 +1872,20 @@ impl BrowserModel {
 
         rebuilt.levels.clear();
         for (entry_id, parent_selection) in level_ids {
-            let directory_index = rebuilt
-                .nodes
-                .iter()
-                .position(|node| {
-                    node.entry
-                        .identity
-                        .as_ref()
-                        .is_some_and(|identity| identity.entry_id == entry_id)
-                })
-                .ok_or(DetailRescanFailure::InvalidResult)?;
+            let directory_index = rebuilt.nodes.iter().position(|node| {
+                node.entry
+                    .identity
+                    .as_ref()
+                    .is_some_and(|identity| identity.entry_id == entry_id)
+            });
+            let Some(directory_index) = directory_index else {
+                if self.progressive_navigation {
+                    // A removed/replaced native child cannot keep its old browsing authority.
+                    // Return to the nearest surviving ancestor rather than opening its replacement.
+                    break;
+                }
+                return Err(DetailRescanFailure::InvalidResult);
+            };
             rebuilt.levels.push(BrowserLevel {
                 directory_index,
                 directory: rebuilt.nodes[directory_index].entry.display_path.clone(),
@@ -1900,7 +1954,9 @@ impl BrowserModel {
         }
 
         let directory = node.entry.display_path.clone();
-        self.activity = None;
+        if self.background_directory().is_none() {
+            self.activity = None;
+        }
         self.levels.push(BrowserLevel {
             directory_index: node_index,
             directory,
@@ -1913,7 +1969,9 @@ impl BrowserModel {
         let Some(level) = self.levels.pop() else {
             return;
         };
-        self.activity = None;
+        if self.background_directory().is_none() {
+            self.activity = None;
+        }
         self.selected = self
             .current_level_rows()
             .iter()
@@ -2039,22 +2097,36 @@ fn browser_node_bytes(node: &BrowserNode, allocated: bool) -> Option<u128> {
     }
 }
 
+type ProgressiveRowKey<'a> = (
+    &'a ScanId,
+    &'a ObjectType,
+    &'a NativeName,
+    &'a ScanEntryId,
+    &'a Option<ScanEntryId>,
+    &'a IdentityEvidence<PlatformFileIdentity>,
+    &'a IdentityEvidence<FilesystemObjectDomainIdentity>,
+    &'a IdentityEvidence<VolumeOrMountIdentity>,
+);
+
+fn progressive_row_key(entry: &ScannedEntry) -> Option<ProgressiveRowKey<'_>> {
+    let identity = entry.identity.as_ref()?;
+    Some((
+        &entry.scan_id,
+        &entry.object_type,
+        &entry.native_basename,
+        &identity.scan_root_id,
+        &identity.parent_id,
+        &identity.platform_file_identity,
+        &identity.filesystem_object_domain_identity,
+        &identity.volume_or_mount_identity,
+    ))
+}
+
 fn progressive_row_matches(current: &ScannedEntry, progress: &ScannedEntry) -> bool {
-    let (Some(current_identity), Some(progress_identity)) =
-        (current.identity.as_ref(), progress.identity.as_ref())
-    else {
-        return false;
-    };
     // The aggregate pass re-enumerates direct children and therefore allocates fresh scan-local
     // entry ids. Match the already validated listing row by its no-follow native identity tuple;
     // display paths are deliberately excluded from this authority decision.
-    current.scan_id == progress.scan_id
-        && current.object_type == progress.object_type
-        && current.native_basename == progress.native_basename
-        && current_identity.platform_file_identity == progress_identity.platform_file_identity
-        && current_identity.filesystem_object_domain_identity
-            == progress_identity.filesystem_object_domain_identity
-        && current_identity.volume_or_mount_identity == progress_identity.volume_or_mount_identity
+    progressive_row_key(current).is_some_and(|key| Some(key) == progressive_row_key(progress))
 }
 
 fn lower_bound_bytes(value: &sweepx_model::ByteValue) -> Option<u128> {
@@ -2741,6 +2813,28 @@ impl<P: DetailRescanProvider> DetailRescanBrowserReducer<P> {
         }
     }
 
+    fn submit_or_fail(&self, model: &mut BrowserModel, pending: PendingDetailRescan) {
+        if let Err(pending) = self.submit(pending) {
+            model.fail_detail_rescan(&pending, DetailRescanFailure::Unavailable);
+        }
+    }
+
+    fn resume_current_directory(&self, model: &mut BrowserModel) {
+        // One worker and one pending request remain the resource bound. While it is busy,
+        // navigation records only the current breadcrumb, not an unbounded queue of visits.
+        // Once free, list the directory still on screen; obsolete visits need no filesystem work.
+        if self.pending.borrow().is_none()
+            && model.progressive_navigation
+            && let Some(level) = model.levels.last()
+            && !model.nodes[level.directory_index]
+                .detail_rescan_state
+                .is_stale()
+            && let Some(next) = model.begin_detail_rescan_at(level.directory_index)
+        {
+            self.submit_or_fail(model, next);
+        }
+    }
+
     fn complete_or_expire(&self, model: &mut BrowserModel) {
         if let Some(pending) = self.pending.borrow_mut().as_mut() {
             while let Ok(progress) = self.progress.try_recv() {
@@ -2760,6 +2854,12 @@ impl<P: DetailRescanProvider> DetailRescanBrowserReducer<P> {
                     pending.request.reason,
                     DetailRescanReason::ProgressiveListing | DetailRescanReason::RefreshListing
                 );
+                let target_id = pending
+                    .request
+                    .binding
+                    .source_directory_identity
+                    .entry_id
+                    .clone();
                 if !pending.timed_out {
                     let completed_in_time = completed
                         .finished_at
@@ -2775,10 +2875,19 @@ impl<P: DetailRescanProvider> DetailRescanBrowserReducer<P> {
                     if should_enter {
                         model.enter_selected();
                     }
-                    if progressive_listing && let Some(next) = model.begin_progressive_aggregate() {
-                        let _ = self.submit(next);
+                    if progressive_listing
+                        && let Some(target) = model.nodes.iter().position(|node| {
+                            node.entry
+                                .identity
+                                .as_ref()
+                                .is_some_and(|identity| identity.entry_id == target_id)
+                        })
+                        && let Some(next) = model.begin_progressive_aggregate_at(target)
+                    {
+                        self.submit_or_fail(model, next);
                     }
                 }
+                self.resume_current_directory(model);
             }
             Err(TryRecvError::Disconnected) => {
                 if let Some(pending) = self.pending.borrow_mut().take()
@@ -2830,7 +2939,7 @@ where
         }
 
         if self.pending.borrow().is_some() {
-            return if action == BrowserAction::EnterDirectory {
+            return if action == BrowserAction::EnterDirectory && !model.progressive_navigation {
                 BrowserControl::Continue
             } else {
                 ReadOnlyBrowserReducer.reduce(model, action)
@@ -3222,6 +3331,17 @@ pub fn render_live_browser_at_phase(
 
     let title = if model.progressive_navigation && model.inspection.is_none() {
         let state = match model.current_detail_rescan_state() {
+            _ if model.background_directory().is_some()
+                && !matches!(
+                    model.current_detail_rescan_state(),
+                    Some(DetailRescanState::Pending { .. })
+                ) =>
+            {
+                match model.locale {
+                    Locale::ZhCn => "后台扫描中",
+                    Locale::EnUs => "Scanning in background",
+                }
+            }
             Some(DetailRescanState::Pending { .. }) if model.current_listing_pending() => {
                 match model.locale {
                     Locale::ZhCn => "正在读取目录",
@@ -3329,10 +3449,7 @@ pub fn render_live_browser_at_phase(
         breadcrumb.push_str(&format!(" | {caption}: {size}"));
     }
     if model.progressive_navigation {
-        let pending = matches!(
-            model.current_detail_rescan_state(),
-            Some(DetailRescanState::Pending { .. })
-        );
+        let pending = model.background_directory().is_some();
         if let Some(activity) = &model.activity {
             let label = match (model.locale, pending) {
                 (Locale::ZhCn, true) => "正在扫描",
@@ -3349,8 +3466,15 @@ pub fn render_live_browser_at_phase(
                 phase,
             );
             breadcrumb.push_str(&format!("\n{stats}{path}"));
-        } else if pending {
-            breadcrumb.push_str(&format!("\n{}", pending_work_label(model)));
+        } else if let Some(background) = model.background_directory() {
+            let label = match model.locale {
+                Locale::ZhCn => "后台扫描",
+                Locale::EnUs => "Background scan",
+            };
+            breadcrumb.push_str(&format!(
+                "\n{label}: {}",
+                sanitize_terminal_text(&background.entry.display_path)
+            ));
         }
     }
     frame.render_widget(
@@ -3593,10 +3717,12 @@ fn render_browser_rows(frame: &mut Frame<'_>, area: Rect, model: &BrowserModel, 
     });
 
     let empty_title = if rows.is_empty() {
-        if matches!(
-            model.current_detail_rescan_state(),
-            Some(DetailRescanState::Pending { .. })
-        ) {
+        if model.current_listing_waiting()
+            || matches!(
+                model.current_detail_rescan_state(),
+                Some(DetailRescanState::Pending { .. })
+            )
+        {
             pending_work_label(model).to_string()
         } else {
             empty_label(model.locale()).to_string()
@@ -3675,6 +3801,18 @@ fn browser_footer_text(model: &BrowserModel) -> String {
     };
     let detail = if model.progressive_navigation && model.inspection.is_none() {
         let state = match model.current_detail_rescan_state() {
+            _ if model.current_listing_waiting() => waiting_listing_label(model.locale),
+            _ if model.background_directory().is_some()
+                && !matches!(
+                    model.current_detail_rescan_state(),
+                    Some(DetailRescanState::Pending { .. })
+                ) =>
+            {
+                match model.locale {
+                    Locale::ZhCn => "后台扫描继续 · 可进入或返回",
+                    Locale::EnUs => "Background scan continues · enter/back available",
+                }
+            }
             Some(DetailRescanState::Pending { .. }) if model.current_listing_pending() => {
                 match model.locale {
                     Locale::ZhCn => "读取当前层目录列表",
@@ -3907,13 +4045,22 @@ fn scanning_label(locale: Locale) -> &'static str {
 }
 
 fn pending_work_label(model: &BrowserModel) -> &'static str {
-    if model.current_listing_pending() {
+    if model.current_listing_waiting() {
+        waiting_listing_label(model.locale)
+    } else if model.current_listing_pending() {
         match model.locale {
             Locale::ZhCn => "读取当前层目录列表…",
             Locale::EnUs => "Reading this directory's entries…",
         }
     } else {
         scanning_label(model.locale)
+    }
+}
+
+fn waiting_listing_label(locale: Locale) -> &'static str {
+    match locale {
+        Locale::ZhCn => "后台扫描继续，完成后读取此目录列表…",
+        Locale::EnUs => "Background scan continues; this directory will open afterwards…",
     }
 }
 
@@ -5090,7 +5237,7 @@ mod tests {
         model.enter_selected();
         model.finish_detail_rescan(listing, result);
         assert_eq!(model.visible_rows()[0].label(), "file");
-        let pending = model.begin_progressive_aggregate().unwrap();
+        let pending = model.begin_progressive_aggregate_at(0).unwrap();
         // A recursive pass starts again at zero, and may visit subdirectories before the direct
         // files counted by the earlier listing. That first valid snapshot must keep it alive.
         model.nodes[pending.node_index]
@@ -5167,6 +5314,285 @@ mod tests {
         assert_eq!(model.selected_row().unwrap().label(), "file");
         model.return_to_parent();
         assert!(model.activity.is_none());
+    }
+
+    #[derive(Clone, Default)]
+    struct NavigationGate {
+        state: Arc<(StdMutex<NavigationGateState>, Condvar)>,
+    }
+
+    #[derive(Default)]
+    struct NavigationGateState {
+        requests: Vec<DetailRescanRequest>,
+        released: usize,
+        cancelled: bool,
+        sink: Option<SyncSender<DetailRescanProgress>>,
+    }
+
+    impl NavigationGate {
+        fn release(&self, count: usize) {
+            let (state, changed) = &*self.state;
+            state.lock().unwrap().released = count;
+            changed.notify_all();
+        }
+
+        fn await_calls(
+            &self,
+            count: usize,
+            reducer: &DetailRescanBrowserReducer<Self>,
+            model: &mut BrowserModel,
+        ) {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while Instant::now() < deadline {
+                reducer.poll_background(model);
+                let (state, changed) = &*self.state;
+                let state = state.lock().unwrap();
+                if state.requests.len() >= count {
+                    return;
+                }
+                drop(
+                    changed
+                        .wait_timeout(state, Duration::from_millis(1))
+                        .unwrap(),
+                );
+            }
+            panic!("navigation worker did not reach request {count}");
+        }
+    }
+
+    impl DetailRescanProvider for NavigationGate {
+        fn set_progress_sink(&self, sink: Option<SyncSender<DetailRescanProgress>>) {
+            self.state.0.lock().unwrap().sink = sink;
+        }
+
+        fn rescan_detail(&self, request: &DetailRescanRequest) -> DetailRescanResult {
+            let (state, changed) = &*self.state;
+            let mut state = state.lock().unwrap();
+            state.requests.push(request.clone());
+            let call = state.requests.len();
+            changed.notify_all();
+            while state.released < call && !state.cancelled {
+                state = changed.wait(state).unwrap();
+            }
+            if state.cancelled {
+                return DetailRescanResult::Failed {
+                    binding: Box::new(request.binding.clone()),
+                    failure: DetailRescanFailure::Cancelled,
+                };
+            }
+            drop(state);
+            if request.binding.source_directory_identity.entry_id
+                == request.binding.source_root_identity.entry_id
+            {
+                let mut child = entry("/root/sub", ObjectType::Directory, 2, 1, Some(1));
+                if request.reason == DetailRescanReason::ProgressiveListing {
+                    return progressive_listing_result(request, vec![child]);
+                }
+                // The scanner re-enumerates the same native child using a fresh scan row ID.
+                child.identity.as_mut().unwrap().entry_id = entry_id(&scan_id(), 99);
+                return progressive_aggregate_result(request, vec![child]);
+            }
+            let mut file = entry("/root/sub/file", ObjectType::File, 3, 1, Some(2));
+            file.identity.as_mut().unwrap().parent_id =
+                Some(request.binding.source_directory_identity.entry_id.clone());
+            let DetailRescanResult::Refreshed(mut result) = refreshed_result(request, vec![file])
+            else {
+                unreachable!()
+            };
+            let mut directory = entry("/root/sub", ObjectType::Directory, 2, 1, Some(1));
+            directory.identity = Some(request.binding.source_directory_identity.clone());
+            directory.native_locator = Some(request.directory_locator.clone());
+            result.observed_directory = directory;
+            result.aggregate.directory_identity = request
+                .binding
+                .source_directory_identity
+                .entry_id
+                .to_string();
+            DetailRescanResult::Refreshed(result)
+        }
+
+        fn cancel_detail_rescan(&self) {
+            let (state, changed) = &*self.state;
+            state.lock().unwrap().cancelled = true;
+            changed.notify_all();
+        }
+    }
+
+    fn navigation_model() -> BrowserModel {
+        let mut root = entry("/root", ObjectType::Directory, 1, 1, None);
+        attach_root_locator(&mut root);
+        BrowserModel::from_progressive_roots(
+            Locale::EnUs,
+            OutputStatus::Ok,
+            Some("scan-live".into()),
+            vec![root],
+            Vec::new(),
+            HumanSizeUnit::Bytes,
+            ScanSort::Size,
+        )
+        .unwrap()
+    }
+
+    fn navigation_screen(model: &BrowserModel) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(160, 22)).unwrap();
+        terminal
+            .draw(|frame| render_live_browser(frame, frame.area(), model))
+            .unwrap();
+        let mut screen = String::new();
+        // Ratatui stores a placeholder cell after a wide glyph. Concatenating every cell
+        // inserts artificial spaces inside Chinese labels; reconstruct terminal columns instead.
+        for row in terminal.backend().buffer().content.chunks(160) {
+            let mut column = 0;
+            while let Some(cell) = row.get(column) {
+                screen.push_str(cell.symbol());
+                column += UnicodeWidthStr::width(cell.symbol()).max(1);
+            }
+            screen.push('\n');
+        }
+        screen
+    }
+
+    #[test]
+    fn navigation_during_listing_keeps_enter_available_and_aggregates_the_original_target() {
+        let gate = NavigationGate::default();
+        let reducer = DetailRescanBrowserReducer::new(gate.clone()).unwrap();
+        let mut model = navigation_model();
+        reducer.reduce(&mut model, BrowserAction::EnterDirectory);
+        gate.await_calls(1, &reducer, &mut model);
+        for _ in 0..4 {
+            reducer.reduce(&mut model, BrowserAction::ReturnToParent);
+            assert_eq!(model.current_directory(), None);
+            assert!(navigation_screen(&model).contains("Scanning in background"));
+            reducer.reduce(&mut model, BrowserAction::EnterDirectory);
+            assert_eq!(model.current_directory(), Some("/root"));
+        }
+        reducer.reduce(&mut model, BrowserAction::ReturnToParent);
+        gate.release(1);
+        gate.await_calls(2, &reducer, &mut model);
+        assert_eq!(model.current_directory(), None);
+        {
+            let state = gate.state.0.lock().unwrap();
+            assert_eq!(state.requests.len(), 2);
+            assert_eq!(
+                state.requests[1].reason,
+                DetailRescanReason::ProgressiveAggregate
+            );
+            assert_eq!(
+                state.requests[1].binding.source_directory_identity.entry_id,
+                entry_id(&scan_id(), 1)
+            );
+        }
+        gate.release(2);
+        finish_background(&reducer, &mut model);
+        assert!(model.nodes[0].recursive_size_observed);
+        reducer.reduce(&mut model, BrowserAction::EnterDirectory);
+        assert_eq!(model.visible_rows()[0].label(), "sub");
+        assert!(reducer.pending.borrow().is_none());
+        assert_eq!(gate.state.0.lock().unwrap().requests.len(), 2);
+        assert!(!gate.state.0.lock().unwrap().cancelled);
+    }
+
+    #[test]
+    fn navigation_during_aggregation_keeps_progress_and_rebinds_the_open_child() {
+        let gate = NavigationGate::default();
+        let reducer = DetailRescanBrowserReducer::new(gate.clone()).unwrap();
+        let mut model = navigation_model();
+        reducer.reduce(&mut model, BrowserAction::EnterDirectory);
+        gate.release(1);
+        gate.await_calls(2, &reducer, &mut model);
+        reducer.reduce(&mut model, BrowserAction::EnterDirectory);
+        assert_eq!(model.current_directory(), Some("/root/sub"));
+        assert!(navigation_screen(&model).contains("this directory will open afterwards"));
+        model.locale = Locale::ZhCn;
+        let screen = navigation_screen(&model);
+        assert!(screen.contains("后台扫描中"), "{screen}");
+        assert!(screen.contains("后台扫描继续，完成后读取此目录列表"));
+        model.locale = Locale::EnUs;
+        reducer.reduce(&mut model, BrowserAction::ReturnToParent);
+        reducer.reduce(&mut model, BrowserAction::ReturnToParent);
+        let state = gate.state.0.lock().unwrap();
+        state
+            .sink
+            .as_ref()
+            .unwrap()
+            .send(progressive_aggregate_progress(
+                &state.requests[1],
+                entry("/root/sub", ObjectType::Directory, 2, 1, Some(1)),
+                2048,
+            ))
+            .unwrap();
+        drop(state);
+        // An accepted update remains activity even when its directory is offscreen; it must
+        // also renew the inactivity deadline rather than letting navigation time out the scan.
+        reducer
+            .pending
+            .borrow_mut()
+            .as_mut()
+            .unwrap()
+            .last_activity_at = Instant::now() - Duration::from_secs(10);
+        reducer.poll_background(&mut model);
+        assert!(!reducer.pending.borrow().as_ref().unwrap().timed_out);
+        let screen = navigation_screen(&model);
+        assert!(screen.contains("Scanning in background"));
+        assert!(screen.contains("deep.txt"));
+        reducer.reduce(&mut model, BrowserAction::EnterDirectory);
+        assert!(model.activity.is_some());
+        reducer.reduce(&mut model, BrowserAction::EnterDirectory);
+        gate.release(2);
+        gate.await_calls(3, &reducer, &mut model);
+        assert_eq!(model.current_directory(), Some("/root/sub"));
+        assert_eq!(
+            gate.state.0.lock().unwrap().requests[2]
+                .binding
+                .source_directory_identity
+                .entry_id,
+            entry_id(&scan_id(), 2)
+        );
+        assert!(model.nodes[0].recursive_size_observed);
+        gate.release(3);
+        finish_background(&reducer, &mut model);
+        assert_eq!(model.visible_rows()[0].label(), "file");
+        assert!(
+            model
+                .nodes
+                .iter()
+                .all(|node| !node.detail_rescan_state.is_stale())
+        );
+        for _ in 0..3 {
+            reducer.reduce(&mut model, BrowserAction::ReturnToParent);
+            reducer.reduce(&mut model, BrowserAction::EnterDirectory);
+            assert_eq!(model.visible_rows()[0].label(), "file");
+        }
+        assert_eq!(gate.state.0.lock().unwrap().requests.len(), 3);
+        assert!(!gate.state.0.lock().unwrap().cancelled);
+    }
+
+    #[test]
+    fn aggregation_collapses_a_breadcrumb_if_the_native_child_was_replaced() {
+        let mut model = navigation_model();
+        let listing = model.begin_detail_rescan().unwrap();
+        model.enter_selected();
+        let child = entry("/root/sub", ObjectType::Directory, 2, 1, Some(1));
+        let result = progressive_listing_result(&listing.request, vec![child]);
+        model.finish_detail_rescan(listing, result);
+        let pending = model.begin_progressive_aggregate_at(0).unwrap();
+        model.enter_selected();
+        let replacement = entry("/root/sub", ObjectType::Directory, 99, 1, Some(1));
+        let result = progressive_aggregate_result(&pending.request, vec![replacement]);
+        model.finish_detail_rescan(pending, result);
+        assert_eq!(model.current_directory(), Some("/root"));
+        assert!(model.nodes[0].recursive_size_observed);
+        assert_eq!(
+            model
+                .selected_row()
+                .unwrap()
+                .entry()
+                .identity
+                .as_ref()
+                .unwrap()
+                .entry_id,
+            entry_id(&scan_id(), 99)
+        );
     }
 
     #[test]

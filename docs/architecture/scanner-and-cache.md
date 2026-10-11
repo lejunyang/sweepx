@@ -12,6 +12,8 @@
 
 `rescan_logical_with_progress` 与既有 identity-bound detail traversal 共用根/lineage 准入、DFS、批次验证、目录句柄上限、取消与结果发布。直接列表项和目录仍完整检查，只有不保留为可操作行的深层普通文件可用 `observe_file_length`，并验证返回的 path/native name 与当前 child token 一致。返回 None/不一致则回完整检查。系统接口自行限定当前批次、类型、设备/provider/挂载资格；不读取旧缓存，也不从空 FSEvents 推导整树命中。贡献 cheap length 的聚合只建立文件大小；unique、allocated、reclaimable 置 unknown。完整观察 API 保留给垃圾详情与其他需要完整事实的调用者。
 
+普通 TUI 的后台任务绑定原生目录身份，与当前页面分开；扫描期间 Enter/返回不会取消或丢弃任务。列表完成后递归阶段仍针对原目录，完成时保留同一原生子目录的导航身份；子目录被替换或消失时退到最近保留的祖先。仍只使用一个 worker、一个待处理请求，新目录列表在后台任务完成后按当前页面读取。详见[扫描中导航核验](scan-tui-active-navigation-2026-10-11.md)。
+
 普通 `scan --tui` 的[目录导航](scan-tui-navigation-2026-10-11.md)现保留有界的已浏览列表，并使用 `rescan_logical_with_directory_observations` 在原 DFS 内取得每个已完成子目录的大小/覆盖。CLI 只在整个调用成功后发布有界大小快照，键绑定本扫描根与设备/文件/文件系统/mount 身份；首次展开只做当前直接列表观察、重新绑定新行 ID，缺少快照回到递归统计。大小属于本次扫描时点，页脚明确提示历史结果；`r` 清除大小复用并开启新的观察代次。它不使用空变化历史推导新鲜度，不属于文件事实缓存命中，也不参与分类或回收授权。
 
 
