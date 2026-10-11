@@ -12,6 +12,9 @@
 
 `rescan_logical_with_progress` 与既有 identity-bound detail traversal 共用根/lineage 准入、DFS、批次验证、目录句柄上限、取消与结果发布。直接列表项和目录仍完整检查，只有不保留为可操作行的深层普通文件可用 `observe_file_length`，并验证返回的 path/native name 与当前 child token 一致。返回 None/不一致则回完整检查。系统接口自行限定当前批次、类型、设备/provider/挂载资格；不读取旧缓存，也不从空 FSEvents 推导整树命中。贡献 cheap length 的聚合只建立文件大小；unique、allocated、reclaimable 置 unknown。完整观察 API 保留给垃圾详情与其他需要完整事实的调用者。
 
+普通 `scan --tui` 的[目录导航](scan-tui-navigation-2026-10-11.md)现保留有界的已浏览列表，并使用 `rescan_logical_with_directory_observations` 在原 DFS 内取得每个已完成子目录的大小/覆盖。CLI 只在整个调用成功后发布有界大小快照，键绑定本扫描根与设备/文件/文件系统/mount 身份；首次展开只做当前直接列表观察、重新绑定新行 ID，缺少快照回到递归统计。大小属于本次扫描时点，页脚明确提示历史结果；`r` 清除大小复用并开启新的观察代次。它不使用空变化历史推导新鲜度，不属于文件事实缓存命中，也不参与分类或回收授权。
+
+
 约 120 ms 发出有界的累计直接子目录快照，最后可提前 flush；一个非阻塞进度槽之外，可靠的最终结果独立交付。旧的单子目录更新可能在丢帧后让已经完成的兄弟一直停在零，新快照包含已观察的兄弟。TUI 先验证整个快照的 binding、原生身份和单调大小，再一次排序并保持焦点 node。浅层列表与递归统计是两次当前观察，首个递归总量可能小于先前列表统计；单调性从首个有效递归快照开始，避免误拒绝进度造成超时。最终条目数来自可靠结果，焦点按原生对象重新匹配；返回上层会清除其他目录的活动信息。当前路径只是显示文本，不能成为执行权限。进度同时携带耗时、已观察计数和当前原生快速长度计数，供 UI 与只读诊断使用。默认 30 秒为无进度超时，非协作 worker 仍有 quarantine 上限。
 
 可复用只读诊断入口：`cargo run --release -p sweepx-scanner --example detail-usage -- /absolute/root`；追加 `--full` 比较完整深层文件元数据。输出区分 admission 和 traversal，列出所有直接子项总量及真实 coverage；没有系统缓存清空或完整 Finder 显示口径资格的承诺。[本机测量与验证](scan-usage-validation-2026-10-11.json)保留同构建、重复次数、普通目录遍历 oracle、终端验收以及平台运行缺口。

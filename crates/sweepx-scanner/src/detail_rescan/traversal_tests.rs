@@ -608,6 +608,93 @@ fn logical_usage_matches_independent_walk_after_mutations_and_does_not_invent_al
 }
 
 #[test]
+fn completed_directory_observations_match_each_independent_subtree_walk() {
+    let (_temp, root) = fixture();
+    let directories = [
+        root.clone(),
+        root.join("first"),
+        root.join("first/deep"),
+        root.join("second"),
+        root.join("empty"),
+    ];
+    for directory in &directories {
+        fs::create_dir_all(directory).unwrap();
+    }
+    fs::write(root.join("direct"), b"123").unwrap();
+    fs::write(root.join("first/a"), b"12345").unwrap();
+    fs::write(root.join("first/deep/b"), b"1234567").unwrap();
+    fs::hard_link(root.join("first/a"), root.join("second/alias")).unwrap();
+    let (scan_id, observed) = source(&root);
+    let mut sizes = Vec::new();
+    let result = DetailRescanner::new(HostPlatformScanner::new(), limits())
+        .rescan_logical_with_directory_observations(
+            request(&scan_id, &observed),
+            &mut DetailEntryIdAllocator::new(scan_id.clone()).unwrap(),
+            &CancellationToken::new(),
+            |_| {},
+            |size| sizes.push(size),
+        )
+        .unwrap();
+    assert_eq!(sizes.len(), directories.len());
+    for directory in directories {
+        let (_, native) = source(&directory);
+        let identity = native.identity.unwrap();
+        let size = sizes
+            .iter()
+            .find(|size| size.identity.platform_file_identity == identity.platform_file_identity)
+            .unwrap();
+        let mut oracle = Oracle::default();
+        oracle.walk(&directory, true);
+        assert_eq!(
+            size.aggregate.apparent_logical_bytes,
+            known_u128(oracle.logical)
+        );
+        assert_eq!(
+            size.aggregate.recursive_entry_count,
+            known_count(oracle.entries)
+        );
+        assert_eq!(
+            size.aggregate.direct_child_count,
+            known_count(oracle.direct)
+        );
+        assert!(size.aggregate.coverage.complete);
+        if directory != root {
+            assert!(matches!(
+                size.aggregate.filesystem_reported_allocated_bytes,
+                EvidenceValue::Unknown { .. }
+            ));
+            assert!(matches!(
+                size.aggregate.unique_logical_bytes,
+                EvidenceValue::Unknown { .. }
+            ));
+        }
+    }
+    assert_eq!(sizes.last().unwrap().aggregate, result.aggregate);
+}
+
+#[test]
+fn final_directory_observation_cancellation_never_publishes_success() {
+    let (_temp, root) = fixture();
+    fs::create_dir_all(root.join("nested/deep")).unwrap();
+    fs::write(root.join("nested/deep/file"), b"123").unwrap();
+    let (scan_id, observed) = source(&root);
+    let cancel = CancellationToken::new();
+    let result = DetailRescanner::new(HostPlatformScanner::new(), limits())
+        .rescan_logical_with_directory_observations(
+            request(&scan_id, &observed),
+            &mut DetailEntryIdAllocator::new(scan_id.clone()).unwrap(),
+            &cancel,
+            |_| {},
+            |size| {
+                if size.identity == *observed.identity.as_ref().unwrap() {
+                    cancel.cancel();
+                }
+            },
+        );
+    assert_eq!(result, Err(DetailRescanError::Cancelled));
+}
+
+#[test]
 fn logical_usage_honors_cancellation_in_final_progress_callback() {
     let (_temp, root) = fixture();
     fs::create_dir(root.join("nested")).unwrap();

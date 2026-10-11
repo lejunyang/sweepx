@@ -44,6 +44,24 @@ pub const DETAIL_SCAN_MIN_ORDINAL: u128 = ORDINARY_SCAN_MAX_ORDINAL + 1;
 /// flush sooner; the terminal result still supplies all completed rows.
 pub const DETAIL_PROGRESS_INTERVAL: Duration = Duration::from_millis(120);
 
+/// A completed directory-size observation from the current recursive walk.
+///
+/// This is scan-time presentation evidence, not freshness or execution authority. Consumers
+/// must bound retention and publish staged observations only if the enclosing scan succeeds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectorySizeObservation {
+    /// Native object evidence and scan scope of the directory whose size was accumulated.
+    pub identity: ScanObjectIdentity,
+    /// Recursive size, counts and coverage at observation time; gaps remain explicit.
+    pub aggregate: DirectoryAggregate,
+}
+
+#[derive(Default)]
+struct DetailCallbacks<'a> {
+    progress: Option<&'a mut dyn FnMut(DetailRescanProgress)>,
+    directory: Option<&'a mut dyn FnMut(DirectorySizeObservation)>,
+}
+
 /// A source-scan allocator used by repeated detail rescans.
 ///
 /// The allocator starts after the greatest already-observed ordinal and never rewinds, including
@@ -275,7 +293,7 @@ where
             ids,
             cancel,
             TargetTraversal::Recursive,
-            None,
+            DetailCallbacks::default(),
         )?;
 
         Ok(DetailRescanResult {
@@ -326,7 +344,10 @@ where
             ids,
             cancel,
             TargetTraversal::Recursive,
-            &mut on_progress,
+            DetailCallbacks {
+                progress: Some(&mut on_progress),
+                directory: None,
+            },
         )
     }
 
@@ -351,7 +372,39 @@ where
             ids,
             cancel,
             TargetTraversal::RecursiveLogical,
-            &mut on_progress,
+            DetailCallbacks {
+                progress: Some(&mut on_progress),
+                directory: None,
+            },
+        )
+    }
+
+    /// Streams logical size progress and completed per-directory sizes during one native walk.
+    ///
+    /// Callbacks run on the scanning worker and must not block or retain unbounded data. Directory
+    /// observations carry no file inventory or executable locator. They can describe incomplete
+    /// subtrees; consumers must discard their staged generation if the overall call fails.
+    pub fn rescan_logical_with_directory_observations<F, G>(
+        &self,
+        request: DetailRescanRequest<'_>,
+        ids: &mut DetailEntryIdAllocator,
+        cancel: &CancellationToken,
+        mut on_progress: F,
+        mut on_directory: G,
+    ) -> Result<DetailRescanResult, DetailRescanError>
+    where
+        F: FnMut(DetailRescanProgress),
+        G: FnMut(DirectorySizeObservation),
+    {
+        self.rescan_progress(
+            request,
+            ids,
+            cancel,
+            TargetTraversal::RecursiveLogical,
+            DetailCallbacks {
+                progress: Some(&mut on_progress),
+                directory: Some(&mut on_directory),
+            },
         )
     }
 
@@ -361,7 +414,7 @@ where
         ids: &mut DetailEntryIdAllocator,
         cancel: &CancellationToken,
         mode: TargetTraversal,
-        on_progress: &mut dyn FnMut(DetailRescanProgress),
+        callbacks: DetailCallbacks<'_>,
     ) -> Result<DetailRescanResult, DetailRescanError> {
         self.validate_request(&request, ids)?;
         if cancel.is_cancelled() {
@@ -372,7 +425,7 @@ where
         let observed_root = reopened.observed_root.clone();
         let observed_directory = reopened.observed_directory.clone();
         let (rows, aggregate) =
-            self.scan_target_directory(&request, reopened, ids, cancel, mode, Some(on_progress))?;
+            self.scan_target_directory(&request, reopened, ids, cancel, mode, callbacks)?;
 
         Ok(DetailRescanResult {
             observed_root,
@@ -404,7 +457,7 @@ where
             ids,
             cancel,
             TargetTraversal::DirectPartial,
-            None,
+            DetailCallbacks::default(),
         )?;
         Ok(DetailRescanResult {
             observed_root,
@@ -435,7 +488,7 @@ where
             ids,
             cancel,
             TargetTraversal::DirectStrict,
-            None,
+            DetailCallbacks::default(),
         )
         .map(|(rows, _)| rows)
     }
@@ -634,8 +687,12 @@ where
         ids: &mut DetailEntryIdAllocator,
         cancel: &CancellationToken,
         mode: TargetTraversal,
-        mut on_progress: Option<&mut dyn FnMut(DetailRescanProgress)>,
+        callbacks: DetailCallbacks<'_>,
     ) -> Result<(Vec<ScannedEntry>, DirectoryAggregate), DetailRescanError> {
+        let DetailCallbacks {
+            progress: mut on_progress,
+            directory: mut on_directory,
+        } = callbacks;
         let recursive = matches!(
             mode,
             TargetTraversal::Recursive | TargetTraversal::RecursiveLogical
@@ -797,6 +854,7 @@ where
                                     rows: &rows,
                                     request,
                                     on_progress: &mut on_progress,
+                                    on_directory: &mut on_directory,
                                     clock: &mut progress_clock,
                                     logical_only: mode == TargetTraversal::RecursiveLogical,
                                 };
@@ -967,15 +1025,22 @@ where
             row.coverage = child.coverage;
         }
 
-        Ok((
-            rows,
-            aggregate.finish(
-                request.source_scan_id,
-                &request.source_directory_identity.entry_id,
-                request.revision,
-                recursive,
-            ),
-        ))
+        let aggregate = aggregate.finish(
+            request.source_scan_id,
+            &request.source_directory_identity.entry_id,
+            request.revision,
+            recursive,
+        );
+        if let Some(observer) = on_directory {
+            observer(DirectorySizeObservation {
+                identity: request.source_directory_identity.clone(),
+                aggregate: aggregate.clone(),
+            });
+        }
+        if cancel.is_cancelled() {
+            return Err(DetailRescanError::Cancelled);
+        }
+        Ok((rows, aggregate))
     }
 
     fn scan_nested_directories(
@@ -990,7 +1055,10 @@ where
         // The outer target owns one capability. Each frame keeps one ancestor cursor and at
         // most one bounded batch of uninspected tokens; siblings never own retained handles.
         // This is iterative so arbitrary filesystem depth cannot exhaust the Rust call stack.
-        let mut frames = vec![RecursiveDirectory::new(initial)];
+        let mut frames = vec![RecursiveDirectory::new(
+            initial,
+            progress.on_directory.is_some(),
+        )];
         while !frames.is_empty() {
             if cancel.is_cancelled() {
                 return Err(DetailRescanError::Cancelled);
@@ -1028,11 +1096,14 @@ where
                                 .direct
                                 .get_mut(&current.direct_child_id)
                                 .ok_or(DetailRescanError::InvalidRequest)?
-                                .mark_incomplete(reason);
+                                .mark_incomplete(reason.clone());
                             progress.clock.current_path = current.path.clone();
                             progress.clock.changed = Some(current.direct_child_id.clone());
                             // Exclude this unreadable descendant; pop its frame on the next turn
                             // while keeping suspended sibling cursors and all observed totals.
+                            if let Some(size) = &mut frame.size {
+                                size.mark_incomplete(reason);
+                            }
                             frame.end_of_directory = true;
                             continue;
                         }
@@ -1090,6 +1161,10 @@ where
                 };
                 let walked = restrict_detail_child_to_mount(&self.platform, root_metadata, walked)?;
                 let entry_id = ids.allocate()?;
+                if let Some(size) = &mut frame.size {
+                    size.note_entry()?;
+                    size.note_direct_child()?;
+                }
                 aggregates.target.note_entry()?;
                 let direct = aggregates
                     .direct
@@ -1122,6 +1197,9 @@ where
                         });
                     }
                     WalkEntry::File(metadata) => {
+                        if let Some(size) = &mut frame.size {
+                            size.note_file_length(&metadata.logical_bytes);
+                        }
                         if progress.logical_only {
                             // A fallback native observation still contributes only file length
                             // in streamed browsing. Retaining its hard-link key would make the
@@ -1141,6 +1219,9 @@ where
                         ) {
                             return Err(map_boundary(&boundary.kind));
                         }
+                        if let Some(size) = &mut frame.size {
+                            size.mark_incomplete(boundary.reason.clone());
+                        }
                         aggregates.target.mark_incomplete(boundary.reason.clone());
                         direct.mark_incomplete(boundary.reason);
                     }
@@ -1151,10 +1232,16 @@ where
                         ) {
                             return Err(map_walk_error(error.kind));
                         }
+                        if let Some(size) = &mut frame.size {
+                            size.mark_incomplete(error.reason.clone());
+                        }
                         aggregates.target.mark_incomplete(error.reason.clone());
                         direct.mark_incomplete(error.reason);
                     }
                     WalkEntry::CachedFile(file) => {
+                        if let Some(size) = &mut frame.size {
+                            size.note_file_length(&sweepx_platform::known_u128(file.logical_bytes));
+                        }
                         aggregates
                             .target
                             .note_file_length(&sweepx_platform::known_u128(file.logical_bytes));
@@ -1178,9 +1265,37 @@ where
                 progress.clock.last_emit = Instant::now();
             }
             if let Some(directory) = descend {
-                frames.push(RecursiveDirectory::new(directory));
+                frames.push(RecursiveDirectory::new(
+                    directory,
+                    progress.on_directory.is_some(),
+                ));
             } else if finished {
-                frames.pop(); // close this cursor/capability before admitting another sibling
+                let completed = frames.pop().expect("completed frame");
+                if let Some(size) = completed.size {
+                    let observation = DirectorySizeObservation {
+                        aggregate: size.finish(
+                            progress.request.source_scan_id,
+                            &completed.directory.identity.entry_id,
+                            progress.request.revision,
+                            true,
+                        ),
+                        identity: completed.directory.identity,
+                    };
+                    if let Some(parent) = frames.last_mut().and_then(|frame| frame.size.as_mut()) {
+                        parent.recursive_entry_count = parent
+                            .recursive_entry_count
+                            .checked_add(size.recursive_entry_count)
+                            .ok_or(DetailRescanError::ResourceLimit)?;
+                        parent
+                            .apparent_logical_bytes
+                            .add(&observation.aggregate.apparent_logical_bytes);
+                        parent.incomplete_reasons.extend(size.incomplete_reasons);
+                    }
+                    if let Some(observer) = progress.on_directory.as_deref_mut() {
+                        observer(observation);
+                    }
+                }
+                // The native owner closes before admitting another sibling.
             }
         }
         Ok(())
@@ -1200,6 +1315,7 @@ struct RecursiveProgressContext<'a, 'request, 'callback> {
     rows: &'a [ScannedEntry],
     request: &'a DetailRescanRequest<'request>,
     on_progress: &'a mut Option<&'callback mut dyn FnMut(DetailRescanProgress)>,
+    on_directory: &'a mut Option<&'callback mut dyn FnMut(DirectorySizeObservation)>,
     clock: &'a mut RecursiveProgressClock,
 }
 
@@ -1274,15 +1390,22 @@ fn detail_directory_admission(limit: usize, retained: usize) -> DirectoryHandleA
 
 struct RecursiveDirectory<D> {
     directory: NestedDirectory<D>,
+    // Length-only state per retained frame; never a descendant hard-link ledger.
+    size: Option<TargetAggregateState>,
     pending: VecDeque<DirectoryEntryRecord>,
     consumed_entries: usize,
     consumed_bytes: usize,
     end_of_directory: bool,
 }
 impl<D> RecursiveDirectory<D> {
-    fn new(directory: NestedDirectory<D>) -> Self {
+    fn new(directory: NestedDirectory<D>, observe_size: bool) -> Self {
         Self {
             directory,
+            size: observe_size.then(|| {
+                let mut size = TargetAggregateState::new();
+                size.note_file_length(&sweepx_platform::known_u128(0));
+                size
+            }),
             pending: VecDeque::new(),
             consumed_entries: 0,
             consumed_bytes: 0,

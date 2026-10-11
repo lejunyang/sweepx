@@ -177,6 +177,7 @@ struct Cli {
 enum Commands {
     Scan {
         /// Browse directories with live paths and file sizes, or show --large-files/--duplicates results.
+        /// Reuse this session's size results while browsing; press r to rescan the current directory.
         /// Child permission denials and other volumes leave incomplete directory totals.
         #[arg(long)]
         tui: bool,

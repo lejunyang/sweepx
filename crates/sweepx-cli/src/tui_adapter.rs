@@ -5,6 +5,9 @@
 
 use std::sync::Mutex;
 
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+mod size_snapshots;
+
 use sweepx_core::{CancellationToken, ScanSummary};
 #[cfg(test)]
 use sweepx_model::{DecimalU128, ScanId};
@@ -32,6 +35,7 @@ pub(crate) struct TuiDetailRescanProvider {
 struct LiveTuiDetailRescanProvider {
     scanner: DetailRescanner<HostPlatformScanner>,
     logical_only: bool,
+    sizes: Mutex<size_snapshots::SizeSnapshots>,
     ids: Mutex<DetailEntryIdAllocator>,
     cancel: Mutex<CancellationToken>,
     progress: Mutex<Option<std::sync::mpsc::SyncSender<TuiDetailRescanProgress>>>,
@@ -117,6 +121,7 @@ fn live_tui_detail_rescan_provider(
     Ok(LiveTuiDetailRescanProvider {
         scanner: DetailRescanner::new(HostPlatformScanner::new(), limits),
         logical_only,
+        sizes: Mutex::new(Default::default()),
         ids: Mutex::new(ids),
         cancel: Mutex::new(CancellationToken::new()),
         progress: Mutex::new(None),
@@ -186,7 +191,17 @@ impl DetailRescanProvider for TuiDetailRescanProvider {
                 revision: request.binding.revision,
                 max_rows: request.max_rows,
             };
-            let scanned = if request.reason == DetailRescanReason::ProgressiveListing {
+            let mut staged = size_snapshots::SizeSnapshots::default();
+            let listing = matches!(
+                request.reason,
+                DetailRescanReason::ProgressiveListing | DetailRescanReason::RefreshListing
+            );
+            if request.reason == DetailRescanReason::RefreshListing
+                && let Ok(mut sizes) = live.sizes.lock()
+            {
+                *sizes = Default::default();
+            }
+            let scanned = if listing {
                 live.scanner
                     .rescan_direct_children(scanner_request, &mut ids, &cancel)
             } else if request.reason == DetailRescanReason::ProgressiveAggregate {
@@ -207,11 +222,12 @@ impl DetailRescanProvider for TuiDetailRescanProvider {
                     });
                 };
                 if live.logical_only {
-                    live.scanner.rescan_logical_with_progress(
+                    live.scanner.rescan_logical_with_directory_observations(
                         scanner_request,
                         &mut ids,
                         &cancel,
                         on_progress,
+                        |observation| staged.insert(observation),
                     )
                 } else {
                     live.scanner.rescan_with_progress(
@@ -235,13 +251,28 @@ impl DetailRescanProvider for TuiDetailRescanProvider {
                 live.scanner.rescan(scanner_request, &mut ids, &cancel)
             };
             let result = match scanned {
-                Ok(detail) => TuiDetailRescanResult::Refreshed(Box::new(RefreshedDetail {
-                    binding,
-                    observed_root: detail.observed_root,
-                    observed_directory: detail.observed_directory,
-                    rows: detail.rows,
-                    aggregate: detail.aggregate,
-                })),
+                Ok(mut detail) => {
+                    // Publish staged descendant sizes only after the entire native operation
+                    // succeeds. Cancellation, binding failures and resource failures publish none.
+                    let recursive_size_observed = if let Ok(mut sizes) = live.sizes.lock() {
+                        sizes.merge(staged);
+                        if listing && live.logical_only {
+                            sizes.apply(&mut detail)
+                        } else {
+                            !listing
+                        }
+                    } else {
+                        !listing
+                    };
+                    TuiDetailRescanResult::Refreshed(Box::new(RefreshedDetail {
+                        binding,
+                        observed_root: detail.observed_root,
+                        observed_directory: detail.observed_directory,
+                        rows: detail.rows,
+                        aggregate: detail.aggregate,
+                        recursive_size_observed,
+                    }))
+                }
                 Err(error) => TuiDetailRescanResult::Failed {
                     binding: Box::new(binding),
                     failure: map_tui_detail_rescan_error(error),
@@ -460,6 +491,7 @@ mod tui_detail_rescan_provider_tests {
                     sweepx_platform::ScanResourceLimits::default(),
                 ),
                 logical_only: true,
+                sizes: Mutex::new(Default::default()),
                 ids: Mutex::new(ids),
                 cancel: Mutex::new(CancellationToken::new()),
                 progress: Mutex::new(None),
@@ -832,5 +864,80 @@ mod tui_detail_rescan_provider_tests {
                 EvidenceValue::Unknown { .. }
             ));
         }
+        // The recursive root pass has already measured this child's descendants. A new child
+        // listing must rebind native IDs without walking those descendants again.
+        let TuiDetailRescanResult::Refreshed(root_listing) =
+            provider.rescan_detail(&TuiDetailRescanRequest {
+                binding: DetailRescanBinding {
+                    source_scan_id: root.scan_id.clone(),
+                    source_root_identity: identity.clone(),
+                    source_directory_identity: identity.clone(),
+                    base_revision: DecimalU128::new(4),
+                    revision: DecimalU128::new(5),
+                },
+                directory_locator: root.executable_native_locator().unwrap().unwrap().clone(),
+                reason: DetailRescanReason::ProgressiveListing,
+                max_rows: 16,
+            })
+        else {
+            panic!("root listing failed");
+        };
+        assert!(root_listing.recursive_size_observed);
+        let child = root_listing
+            .rows
+            .iter()
+            .find(|row| row.display_path.ends_with("/nested"))
+            .unwrap();
+        let mut child_request = TuiDetailRescanRequest {
+            binding: DetailRescanBinding {
+                source_scan_id: root.scan_id.clone(),
+                source_root_identity: identity.clone(),
+                source_directory_identity: child.identity.as_ref().unwrap().clone(),
+                base_revision: DecimalU128::new(5),
+                revision: DecimalU128::new(6),
+            },
+            directory_locator: child.executable_native_locator().unwrap().unwrap().clone(),
+            reason: DetailRescanReason::ProgressiveListing,
+            max_rows: 16,
+        };
+        let TuiDetailRescanResult::Refreshed(child_detail) = provider.rescan_detail(&child_request)
+        else {
+            panic!("child listing failed");
+        };
+        assert!(child_detail.recursive_size_observed);
+        assert_eq!(
+            child_detail.aggregate.apparent_logical_bytes,
+            sweepx_platform::known_u128(ordinary_bytes(&root_path.join("nested")))
+        );
+        assert_eq!(
+            child_detail.aggregate.scan_entry_id().unwrap(),
+            child.identity.as_ref().unwrap().entry_id
+        );
+        // Results are explicitly from scan time. A deep edit becomes current only on refresh.
+        std::fs::write(root_path.join("nested/file"), b"12345678901234567").unwrap();
+        let TuiDetailRescanResult::Refreshed(snapshot) = provider.rescan_detail(&child_request)
+        else {
+            panic!("snapshot listing failed");
+        };
+        assert_eq!(
+            snapshot.aggregate.apparent_logical_bytes,
+            child_detail.aggregate.apparent_logical_bytes
+        );
+        child_request.reason = DetailRescanReason::RefreshListing;
+        let TuiDetailRescanResult::Refreshed(fresh_listing) =
+            provider.rescan_detail(&child_request)
+        else {
+            panic!("refresh listing failed");
+        };
+        assert!(!fresh_listing.recursive_size_observed);
+        child_request.reason = DetailRescanReason::ProgressiveAggregate;
+        let TuiDetailRescanResult::Refreshed(fresh_size) = provider.rescan_detail(&child_request)
+        else {
+            panic!("refresh size failed");
+        };
+        assert_eq!(
+            fresh_size.aggregate.apparent_logical_bytes,
+            sweepx_platform::known_u128(ordinary_bytes(&root_path.join("nested")))
+        );
     }
 }
