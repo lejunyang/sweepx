@@ -1,0 +1,1425 @@
+{
+  "kind": "sweepx.scan-tui.nested-progress.validation/v1",
+  "date": "2026-10-11",
+  "limits": [
+    "One final invocation per locale; earlier diagnostic invocations are described separately in the accompanying document.",
+    "Debug macOS build; OS caches not cleared; host/build activity uncontrolled; functional evidence, not throughput percentiles.",
+    "Ordinary direct-name oracle and scanner-fixture total oracle; no full real-root byte-total oracle.",
+    "Native Linux/Windows TUI unverified; cross-target source checks passed."
+  ],
+  "runs": [
+    {
+      "date": "2026-10-11",
+      "locale": "en-US",
+      "build": "debug Rust 1.98.0",
+      "host": "macOS 26.5.2 arm64",
+      "root": "/",
+      "os_cache": "not cleared",
+      "sweepx_cache": "new no-state invocation",
+      "repetitions": 1,
+      "phases": [
+        {
+          "name": "root active before entering System",
+          "seconds_since_start": 11.966,
+          "root_entries": 122446,
+          "rows": [
+            {
+              "name": "System",
+              "type": "directory",
+              "bytes": 2216409283,
+              "status": "Counting"
+            },
+            {
+              "name": "usr",
+              "type": "directory",
+              "bytes": 1665842660,
+              "status": "Counting"
+            },
+            {
+              "name": "bin",
+              "type": "directory",
+              "bytes": 11781168,
+              "status": "Counting"
+            },
+            {
+              "name": "sbin",
+              "type": "directory",
+              "bytes": 9230048,
+              "status": "Counting"
+            },
+            {
+              "name": ".VolumeIcon.icns",
+              "type": "symlink",
+              "bytes": 36,
+              "status": "Complete"
+            },
+            {
+              "name": "home",
+              "type": "symlink",
+              "bytes": 25,
+              "status": "Complete"
+            },
+            {
+              "name": "etc",
+              "type": "symlink",
+              "bytes": 11,
+              "status": "Complete"
+            },
+            {
+              "name": "tmp",
+              "type": "symlink",
+              "bytes": 11,
+              "status": "Complete"
+            },
+            {
+              "name": "var",
+              "type": "symlink",
+              "bytes": 11,
+              "status": "Complete"
+            },
+            {
+              "name": ".resolve",
+              "type": "directory",
+              "bytes": 0,
+              "status": "Counting"
+            },
+            {
+              "name": ".nofollow",
+              "type": "directory",
+              "bytes": null,
+              "status": "Waiting"
+            },
+            {
+              "name": ".vol",
+              "type": "directory",
+              "bytes": null,
+              "status": "Waiting"
+            }
+          ],
+          "terminal": [
+            "SweepX | Scanning | 122446 entries | 11.8s | 10417/s",
+            "Scan roots > / | Scanned size: 3903263159 B",
+            "Scanning: /System/Library/Address Book Plug-Ins/LocalSource.sourcebundle/Contents/Resources/LocalPreferences.bundle/Contents/Resources/es.lproj",
+            "Name                                                                                                           Type        Size             status",
+            "System                                                                                                         directory   2216409283 B     Counting",
+            "usr                                                                                                            directory   1665842660 B     Counting",
+            "bin                                                                                                            directory   11781168 B       Counting",
+            "sbin                                                                                                           directory   9230048 B        Counting",
+            ".VolumeIcon.icns                                                                                               symlink     36 B             Complete",
+            "home                                                                                                           symlink     25 B             Complete",
+            "etc                                                                                                            symlink     11 B             Complete",
+            "tmp                                                                                                            symlink     11 B             Complete",
+            "var                                                                                                            symlink     11 B             Complete",
+            ".resolve                                                                                                       directory   0 B              Counting",
+            ".nofollow                                                                                                      directory   —                Waiting",
+            ".vol                                                                                                           directory   —                Waiting",
+            "↑/↓ select  Enter/→ open  Esc/Backspace/← back  p full path  d/Delete move to Trash  q/Ctrl-C quit | Scanning current directory…"
+          ]
+        },
+        {
+          "name": "System direct list during root scan",
+          "seconds_since_start": 12.161,
+          "root_entries": 122904,
+          "rows": [
+            {
+              "name": "Library",
+              "type": "directory",
+              "bytes": 1639795159,
+              "status": "Counting"
+            },
+            {
+              "name": "iOSSupport",
+              "type": "directory",
+              "bytes": 582813586,
+              "status": "Counting"
+            },
+            {
+              "name": ".localized",
+              "type": "file",
+              "bytes": 0,
+              "status": "Complete"
+            },
+            {
+              "name": "Applications",
+              "type": "directory",
+              "bytes": null,
+              "status": "Waiting"
+            },
+            {
+              "name": "Cryptexes",
+              "type": "directory",
+              "bytes": null,
+              "status": "Waiting"
+            },
+            {
+              "name": "Developer",
+              "type": "directory",
+              "bytes": null,
+              "status": "Waiting"
+            },
+            {
+              "name": "DriverKit",
+              "type": "directory",
+              "bytes": null,
+              "status": "Waiting"
+            },
+            {
+              "name": "Volumes",
+              "type": "directory",
+              "bytes": null,
+              "status": "Waiting"
+            }
+          ],
+          "terminal": [
+            "SweepX | Scanning in background | 122904 entries | 11.9s | 10351/s",
+            "Scan roots > / > /System | Scanned size: 2222608745 B",
+            "Scanning: /System/Library/UserEventPlugins/com.apple.touchbar.matching.plugin",
+            "Name                                                                                                           Type        Size             status",
+            "Library                                                                                                        directory   1639795159 B     Counting",
+            "iOSSupport                                                                                                     directory   582813586 B      Counting",
+            ".localized                                                                                                     file        0 B              Complete",
+            "Applications                                                                                                   directory   —                Waiting",
+            "Cryptexes                                                                                                      directory   —                Waiting",
+            "Developer                                                                                                      directory   —                Waiting",
+            "DriverKit                                                                                                      directory   —                Waiting",
+            "Volumes                                                                                                        directory   —                Waiting",
+            "↑/↓ select  Enter/→ open  Esc/Backspace/← back  p full path  d/Delete move to Trash  q/Ctrl-C quit | Background scan continues · enter/back available"
+          ]
+        },
+        {
+          "name": "Library size while unfinished",
+          "seconds_since_start": 12.221,
+          "root_entries": 122904,
+          "rows": [
+            {
+              "name": "Library",
+              "type": "directory",
+              "bytes": 1639795159,
+              "status": "Counting"
+            },
+            {
+              "name": "iOSSupport",
+              "type": "directory",
+              "bytes": 582813586,
+              "status": "Counting"
+            },
+            {
+              "name": ".localized",
+              "type": "file",
+              "bytes": 0,
+              "status": "Complete"
+            },
+            {
+              "name": "Applications",
+              "type": "directory",
+              "bytes": null,
+              "status": "Waiting"
+            },
+            {
+              "name": "Cryptexes",
+              "type": "directory",
+              "bytes": null,
+              "status": "Waiting"
+            },
+            {
+              "name": "Developer",
+              "type": "directory",
+              "bytes": null,
+              "status": "Waiting"
+            },
+            {
+              "name": "DriverKit",
+              "type": "directory",
+              "bytes": null,
+              "status": "Waiting"
+            },
+            {
+              "name": "Volumes",
+              "type": "directory",
+              "bytes": null,
+              "status": "Waiting"
+            }
+          ],
+          "terminal": [
+            "SweepX | Scanning in background | 122904 entries | 11.9s | 10351/s",
+            "Scan roots > / > /System | Scanned size: 2222608745 B",
+            "Scanning: /System/Library/UserEventPlugins/com.apple.touchbar.matching.plugin",
+            "Name                                                                                                           Type        Size             status",
+            "Library                                                                                                        directory   1639795159 B     Counting",
+            "iOSSupport                                                                                                     directory   582813586 B      Counting",
+            ".localized                                                                                                     file        0 B              Complete",
+            "Applications                                                                                                   directory   —                Waiting",
+            "Cryptexes                                                                                                      directory   —                Waiting",
+            "Developer                                                                                                      directory   —                Waiting",
+            "DriverKit                                                                                                      directory   —                Waiting",
+            "Volumes                                                                                                        directory   —                Waiting",
+            "↑/↓ select  Enter/→ open  Esc/Backspace/← back  p full path  d/Delete move to Trash  q/Ctrl-C quit | Background scan continues · enter/back available"
+          ]
+        },
+        {
+          "name": "Library size grows and list stays descending before root completion",
+          "seconds_since_start": 12.266,
+          "root_entries": 124104,
+          "rows": [
+            {
+              "name": "Library",
+              "type": "directory",
+              "bytes": 1679862469,
+              "status": "Counting"
+            },
+            {
+              "name": "iOSSupport",
+              "type": "directory",
+              "bytes": 582813586,
+              "status": "Counting"
+            },
+            {
+              "name": ".localized",
+              "type": "file",
+              "bytes": 0,
+              "status": "Complete"
+            },
+            {
+              "name": "Applications",
+              "type": "directory",
+              "bytes": null,
+              "status": "Waiting"
+            },
+            {
+              "name": "Cryptexes",
+              "type": "directory",
+              "bytes": null,
+              "status": "Waiting"
+            },
+            {
+              "name": "Developer",
+              "type": "directory",
+              "bytes": null,
+              "status": "Waiting"
+            },
+            {
+              "name": "DriverKit",
+              "type": "directory",
+              "bytes": null,
+              "status": "Waiting"
+            },
+            {
+              "name": "Volumes",
+              "type": "directory",
+              "bytes": null,
+              "status": "Waiting"
+            }
+          ],
+          "terminal": [
+            "SweepX | Scanning in background | 124104 entries | 12.0s | 10346/s",
+            "Scan roots > / > /System | Scanned size: 2262676055 B",
+            "Scanning: /System/Library/CoreServices/JavaLauncher.app/Contents/Resources/Base.lproj",
+            "Name                                                                                                           Type        Size             status",
+            "Library                                                                                                        directory   1679862469 B     Counting",
+            "iOSSupport                                                                                                     directory   582813586 B      Counting",
+            ".localized                                                                                                     file        0 B              Complete",
+            "Applications                                                                                                   directory   —                Waiting",
+            "Cryptexes                                                                                                      directory   —                Waiting",
+            "Developer                                                                                                      directory   —                Waiting",
+            "DriverKit                                                                                                      directory   —                Waiting",
+            "Volumes                                                                                                        directory   —                Waiting",
+            "↑/↓ select  Enter/→ open  Esc/Backspace/← back  p full path  d/Delete move to Trash  q/Ctrl-C quit | Background scan continues · enter/back available"
+          ]
+        },
+        {
+          "name": "return and reenter retains growing list",
+          "seconds_since_start": 12.275,
+          "root_entries": 124104,
+          "rows": [
+            {
+              "name": "Library",
+              "type": "directory",
+              "bytes": 1679862469,
+              "status": "Counting"
+            },
+            {
+              "name": "iOSSupport",
+              "type": "directory",
+              "bytes": 582813586,
+              "status": "Counting"
+            },
+            {
+              "name": ".localized",
+              "type": "file",
+              "bytes": 0,
+              "status": "Complete"
+            },
+            {
+              "name": "Applications",
+              "type": "directory",
+              "bytes": null,
+              "status": "Waiting"
+            },
+            {
+              "name": "Cryptexes",
+              "type": "directory",
+              "bytes": null,
+              "status": "Waiting"
+            },
+            {
+              "name": "Developer",
+              "type": "directory",
+              "bytes": null,
+              "status": "Waiting"
+            },
+            {
+              "name": "DriverKit",
+              "type": "directory",
+              "bytes": null,
+              "status": "Waiting"
+            },
+            {
+              "name": "Volumes",
+              "type": "directory",
+              "bytes": null,
+              "status": "Waiting"
+            }
+          ],
+          "terminal": [
+            "SweepX | Scanning in background | 124104 entries | 12.0s | 10346/s",
+            "Scan roots > / > /System | Scanned size: 2262676055 B",
+            "Scanning: /System/Library/CoreServices/JavaLauncher.app/Contents/Resources/Base.lproj",
+            "Name                                                                                                           Type        Size             status",
+            "Library                                                                                                        directory   1679862469 B     Counting",
+            "iOSSupport                                                                                                     directory   582813586 B      Counting",
+            ".localized                                                                                                     file        0 B              Complete",
+            "Applications                                                                                                   directory   —                Waiting",
+            "Cryptexes                                                                                                      directory   —                Waiting",
+            "Developer                                                                                                      directory   —                Waiting",
+            "DriverKit                                                                                                      directory   —                Waiting",
+            "Volumes                                                                                                        directory   —                Waiting",
+            "↑/↓ select  Enter/→ open  Esc/Backspace/← back  p full path  d/Delete move to Trash  q/Ctrl-C quit | Background scan continues · enter/back availabl"
+          ]
+        },
+        {
+          "name": "depth two Library list while root continues",
+          "seconds_since_start": 13.095,
+          "root_entries": 131583,
+          "rows": [
+            {
+              "name": "LinguisticData",
+              "type": "directory",
+              "bytes": 1238100535,
+              "status": "Counting"
+            },
+            {
+              "name": "CoreServices",
+              "type": "directory",
+              "bytes": 328220239,
+              "status": "Counting"
+            },
+            {
+              "name": "Kernels",
+              "type": "directory",
+              "bytes": 236758632,
+              "status": "Counting"
+            },
+            {
+              "name": "Assistant",
+              "type": "directory",
+              "bytes": 129599078,
+              "status": "Counting"
+            },
+            {
+              "name": "Video",
+              "type": "directory",
+              "bytes": 35346452,
+              "status": "Counting"
+            },
+            {
+              "name": "Snippets",
+              "type": "directory",
+              "bytes": 10682070,
+              "status": "Counting"
+            },
+            {
+              "name": "SystemConfiguration",
+              "type": "directory",
+              "bytes": 10464363,
+              "status": "Counting"
+            },
+            {
+              "name": "UserEventPlugins",
+              "type": "directory",
+              "bytes": 5765897,
+              "status": "Counting"
+            },
+            {
+              "name": "Image Capture",
+              "type": "directory",
+              "bytes": 4166820,
+              "status": "Counting"
+            },
+            {
+              "name": "Address Book Plug-Ins",
+              "type": "directory",
+              "bytes": 3469333,
+              "status": "Counting"
+            },
+            {
+              "name": "SyncServices",
+              "type": "directory",
+              "bytes": 1413605,
+              "status": "Counting"
+            },
+            {
+              "name": "iCloudSettings",
+              "type": "directory",
+              "bytes": 868421,
+              "status": "Counting"
+            },
+            {
+              "name": "Preferences",
+              "type": "directory",
+              "bytes": 343854,
+              "status": "Counting"
+            },
+            {
+              "name": "DirectoryServices",
+              "type": "directory",
+              "bytes": 310695,
+              "status": "Counting"
+            },
+            {
+              "name": "Filters",
+              "type": "directory",
+              "bytes": 260799,
+              "status": "Counting"
+            },
+            {
+              "name": "SESStorage",
+              "type": "directory",
+              "bytes": 224729,
+              "status": "Counting"
+            },
+            {
+              "name": "Password Server Filters",
+              "type": "directory",
+              "bytes": 135408,
+              "status": "Counting"
+            },
+            {
+              "name": "LifecyclePolicy",
+              "type": "directory",
+              "bytes": 104753,
+              "status": "Counting"
+            },
+            {
+              "name": "IdentityServices",
+              "type": "directory",
+              "bytes": 29990,
+              "status": "Counting"
+            }
+          ],
+          "terminal": [
+            "SweepX | Scanning in background | 131583 entries | 12.8s | 10250/s",
+            "Scan roots > / > /System > /System/Library | Scanned size: 2006286798 B",
+            "Scanning: /System/Library/CoreServices/Finder.app/Contents/Applications/Recents.app/Contents/Resources/hu.lproj",
+            "Name                                                                                                           Type        Size             status",
+            "LinguisticData                                                                                                 directory   1238100535 B     Counting",
+            "CoreServices                                                                                                   directory   328220239 B      Counting",
+            "Kernels                                                                                                        directory   236758632 B      Counting",
+            "Assistant                                                                                                      directory   129599078 B      Counting",
+            "Video                                                                                                          directory   35346452 B       Counting",
+            "Snippets                                                                                                       directory   10682070 B       Counting",
+            "SystemConfiguration                                                                                            directory   10464363 B       Counting",
+            "UserEventPlugins                                                                                               directory   5765897 B        Counting",
+            "Image Capture                                                                                                  directory   4166820 B        Counting",
+            "Address Book Plug-Ins                                                                                          directory   3469333 B        Counting",
+            "SyncServices                                                                                                   directory   1413605 B        Counting",
+            "iCloudSettings                                                                                                 directory   868421 B         Counting",
+            "Preferences                                                                                                    directory   343854 B         Counting",
+            "DirectoryServices                                                                                              directory   310695 B         Counting",
+            "Filters                                                                                                        directory   260799 B         Counting",
+            "SESStorage                                                                                                     directory   224729 B         Counting",
+            "Password Server Filters                                                                                        directory   135408 B         Counting",
+            "LifecyclePolicy                                                                                                directory   104753 B         Counting",
+            "IdentityServices                                                                                               directory   29990 B          Counting",
+            "↑/↓ select  Enter/→ open  Esc/Backspace/← back  p full path  d/Delete move to Trash  q/Ctrl-C quit | Background scan continues · enter/back available"
+          ]
+        },
+        {
+          "name": "depth two folder grows before root completion",
+          "seconds_since_start": 13.205,
+          "root_entries": 132675,
+          "rows": [
+            {
+              "name": "LinguisticData",
+              "type": "directory",
+              "bytes": 1238100535,
+              "status": "Counting"
+            },
+            {
+              "name": "CoreServices",
+              "type": "directory",
+              "bytes": 339888575,
+              "status": "Counting"
+            },
+            {
+              "name": "Kernels",
+              "type": "directory",
+              "bytes": 236758632,
+              "status": "Counting"
+            },
+            {
+              "name": "Assistant",
+              "type": "directory",
+              "bytes": 129599078,
+              "status": "Counting"
+            },
+            {
+              "name": "Video",
+              "type": "directory",
+              "bytes": 35346452,
+              "status": "Counting"
+            },
+            {
+              "name": "Snippets",
+              "type": "directory",
+              "bytes": 10682070,
+              "status": "Counting"
+            },
+            {
+              "name": "SystemConfiguration",
+              "type": "directory",
+              "bytes": 10464363,
+              "status": "Counting"
+            },
+            {
+              "name": "UserEventPlugins",
+              "type": "directory",
+              "bytes": 5765897,
+              "status": "Counting"
+            },
+            {
+              "name": "Image Capture",
+              "type": "directory",
+              "bytes": 4166820,
+              "status": "Counting"
+            },
+            {
+              "name": "Address Book Plug-Ins",
+              "type": "directory",
+              "bytes": 3469333,
+              "status": "Counting"
+            },
+            {
+              "name": "SyncServices",
+              "type": "directory",
+              "bytes": 1413605,
+              "status": "Counting"
+            },
+            {
+              "name": "iCloudSettings",
+              "type": "directory",
+              "bytes": 868421,
+              "status": "Counting"
+            },
+            {
+              "name": "Preferences",
+              "type": "directory",
+              "bytes": 343854,
+              "status": "Counting"
+            },
+            {
+              "name": "DirectoryServices",
+              "type": "directory",
+              "bytes": 310695,
+              "status": "Counting"
+            },
+            {
+              "name": "Filters",
+              "type": "directory",
+              "bytes": 260799,
+              "status": "Counting"
+            },
+            {
+              "name": "SESStorage",
+              "type": "directory",
+              "bytes": 224729,
+              "status": "Counting"
+            },
+            {
+              "name": "Password Server Filters",
+              "type": "directory",
+              "bytes": 135408,
+              "status": "Counting"
+            },
+            {
+              "name": "LifecyclePolicy",
+              "type": "directory",
+              "bytes": 104753,
+              "status": "Counting"
+            },
+            {
+              "name": "IdentityServices",
+              "type": "directory",
+              "bytes": 29990,
+              "status": "Counting"
+            }
+          ],
+          "terminal": [
+            "SweepX | Scanning in background | 132675 entries | 13.0s | 10240/s",
+            "Scan roots > / > /System > /System/Library | Scanned size: 2017955134 B",
+            "Scanning: /System/Library/CoreServices/Certificate Assistant.app/Contents/Resources/2_SetDefaultCA.bundle/Contents",
+            "Name                                                                                                           Type        Size             status",
+            "LinguisticData                                                                                                 directory   1238100535 B     Counting",
+            "CoreServices                                                                                                   directory   339888575 B      Counting",
+            "Kernels                                                                                                        directory   236758632 B      Counting",
+            "Assistant                                                                                                      directory   129599078 B      Counting",
+            "Video                                                                                                          directory   35346452 B       Counting",
+            "Snippets                                                                                                       directory   10682070 B       Counting",
+            "SystemConfiguration                                                                                            directory   10464363 B       Counting",
+            "UserEventPlugins                                                                                               directory   5765897 B        Counting",
+            "Image Capture                                                                                                  directory   4166820 B        Counting",
+            "Address Book Plug-Ins                                                                                          directory   3469333 B        Counting",
+            "SyncServices                                                                                                   directory   1413605 B        Counting",
+            "iCloudSettings                                                                                                 directory   868421 B         Counting",
+            "Preferences                                                                                                    directory   343854 B         Counting",
+            "DirectoryServices                                                                                              directory   310695 B         Counting",
+            "Filters                                                                                                        directory   260799 B         Counting",
+            "SESStorage                                                                                                     directory   224729 B         Counting",
+            "Password Server Filters                                                                                        directory   135408 B         Counting",
+            "LifecyclePolicy                                                                                                directory   104753 B         Counting",
+            "IdentityServices                                                                                               directory   29990 B          Counting",
+            "↑/↓ select  Enter/→ open  Esc/Backspace/← back  p full path  d/Delete move to Trash  q/Ctrl-C quit | Background scan continues · enter/back available"
+          ]
+        }
+      ],
+      "independent_direct_names": [
+        ".localized",
+        "Applications",
+        "Cryptexes",
+        "Developer",
+        "DriverKit",
+        "Library",
+        "Volumes",
+        "iOSSupport"
+      ],
+      "library_growth_bytes": [
+        1639795159,
+        1679862469
+      ],
+      "depth_two_folder_growth": {
+        "name": "CoreServices",
+        "bytes": [
+          328220239,
+          339888575
+        ]
+      },
+      "exit": 0
+    },
+    {
+      "date": "2026-10-11",
+      "locale": "zh-CN",
+      "build": "debug Rust 1.98.0",
+      "host": "macOS 26.5.2 arm64",
+      "root": "/",
+      "os_cache": "not cleared",
+      "sweepx_cache": "new no-state invocation",
+      "repetitions": 1,
+      "phases": [
+        {
+          "name": "root active before entering System",
+          "seconds_since_start": 17.02,
+          "root_entries": 122456,
+          "rows": [
+            {
+              "name": "System",
+              "type": "directory",
+              "bytes": 2216410983,
+              "status": "统计中"
+            },
+            {
+              "name": "usr",
+              "type": "directory",
+              "bytes": 1665842660,
+              "status": "统计中"
+            },
+            {
+              "name": "bin",
+              "type": "directory",
+              "bytes": 11781168,
+              "status": "统计中"
+            },
+            {
+              "name": "sbin",
+              "type": "directory",
+              "bytes": 9230048,
+              "status": "统计中"
+            },
+            {
+              "name": ".VolumeIcon.icns",
+              "type": "symlink",
+              "bytes": 36,
+              "status": "已完成"
+            },
+            {
+              "name": "home",
+              "type": "symlink",
+              "bytes": 25,
+              "status": "已完成"
+            },
+            {
+              "name": "etc",
+              "type": "symlink",
+              "bytes": 11,
+              "status": "已完成"
+            },
+            {
+              "name": "tmp",
+              "type": "symlink",
+              "bytes": 11,
+              "status": "已完成"
+            },
+            {
+              "name": "var",
+              "type": "symlink",
+              "bytes": 11,
+              "status": "已完成"
+            },
+            {
+              "name": ".resolve",
+              "type": "directory",
+              "bytes": 0,
+              "status": "统计中"
+            },
+            {
+              "name": ".nofollow",
+              "type": "directory",
+              "bytes": null,
+              "status": "等待扫描"
+            },
+            {
+              "name": ".vol",
+              "type": "directory",
+              "bytes": null,
+              "status": "等待扫描"
+            }
+          ],
+          "terminal": [
+            "SweepX | 扫描中 | 已扫描 122456 项 | 16.8 秒 | 7286 项/秒",
+            "扫描根目录 > / | 已扫描大小: 3903264859 B",
+            "正在扫描: /System/Library/Address Book Plug-Ins/LocalSource.sourcebundle/Contents/Resources/LocalPreferences.bundle/Contents/Resources/ko.lproj",
+            "名称                                                                                                           类型        大小             状态",
+            "System                                                                                                         directory   2216410983 B     统计中",
+            "usr                                                                                                            directory   1665842660 B     统计中",
+            "bin                                                                                                            directory   11781168 B       统计中",
+            "sbin                                                                                                           directory   9230048 B        统计中",
+            ".VolumeIcon.icns                                                                                               symlink     36 B             已完成",
+            "home                                                                                                           symlink     25 B             已完成",
+            "etc                                                                                                            symlink     11 B             已完成",
+            "tmp                                                                                                            symlink     11 B             已完成",
+            "var                                                                                                            symlink     11 B             已完成",
+            ".resolve                                                                                                       directory   0 B              统计中",
+            ".nofollow                                                                                                      directory   —                等待扫描",
+            ".vol                                                                                                           directory   —                等待扫描",
+            "↑/↓ 选择  Enter/→ 进入目录  Esc/Backspace/← 返回  p 完整路径  d/Delete 移到回收站  q/Ctrl-C 退出 | 正在扫描当前目录…"
+          ]
+        },
+        {
+          "name": "System direct list during root scan",
+          "seconds_since_start": 17.222,
+          "root_entries": 124115,
+          "rows": [
+            {
+              "name": "Library",
+              "type": "directory",
+              "bytes": 1679879376,
+              "status": "统计中"
+            },
+            {
+              "name": "iOSSupport",
+              "type": "directory",
+              "bytes": 582813586,
+              "status": "统计中"
+            },
+            {
+              "name": ".localized",
+              "type": "file",
+              "bytes": 0,
+              "status": "已完成"
+            },
+            {
+              "name": "Applications",
+              "type": "directory",
+              "bytes": null,
+              "status": "等待扫描"
+            },
+            {
+              "name": "Cryptexes",
+              "type": "directory",
+              "bytes": null,
+              "status": "等待"
+            }
+          ],
+          "terminal": [
+            "SweepX | 后台扫描中 | 已扫描 124115 项 | 17.0 秒 | 7281 项/秒",
+            "扫描根目录 > / > /System | 已扫描大小: 2262692962 B",
+            "正在扫描: /System/Library/CoreServices/JavaLauncher.app/Contents/Resources/ru.lproj",
+            "名称                                                                                                           类型        大小             状态",
+            "Library                                                                                                        directory   1679879376 B     统计中",
+            "iOSSupport                                                                                                     directory   582813586 B      统计中",
+            ".localized                                                                                                     file        0 B              已完成",
+            "Applications                                                                                                   directory   —                等待扫描",
+            "Cryptexes                                                                                                      directory   —                等待",
+            "↑/↓ 选择  Enter/→ 进入目录  Esc/Backspace/← 返回  p 完整路径  d/Delete 移到回收站  q/Ctrl-C 退出 | 读取当前层目录列表"
+          ]
+        },
+        {
+          "name": "Library size while unfinished",
+          "seconds_since_start": 17.23,
+          "root_entries": 124115,
+          "rows": [
+            {
+              "name": "Library",
+              "type": "directory",
+              "bytes": 1679879376,
+              "status": "统计中"
+            },
+            {
+              "name": "iOSSupport",
+              "type": "directory",
+              "bytes": 582813586,
+              "status": "统计中"
+            },
+            {
+              "name": ".localized",
+              "type": "file",
+              "bytes": 0,
+              "status": "已完成"
+            },
+            {
+              "name": "Applications",
+              "type": "directory",
+              "bytes": null,
+              "status": "等待扫描"
+            },
+            {
+              "name": "Cryptexes",
+              "type": "directory",
+              "bytes": null,
+              "status": "等待扫描"
+            },
+            {
+              "name": "Developer",
+              "type": "directory",
+              "bytes": null,
+              "status": "等待扫描"
+            },
+            {
+              "name": "DriverKit",
+              "type": "directory",
+              "bytes": null,
+              "status": "等待扫描"
+            },
+            {
+              "name": "Volumes",
+              "type": "directory",
+              "bytes": null,
+              "status": "等待扫描"
+            }
+          ],
+          "terminal": [
+            "SweepX | 后台扫描中 | 已扫描 124115 项 | 17.0 秒 | 7281 项/秒",
+            "扫描根目录 > / > /System | 已扫描大小: 2262692962 B",
+            "正在扫描: /System/Library/CoreServices/JavaLauncher.app/Contents/Resources/ru.lproj",
+            "名称                                                                                                           类型        大小             状态",
+            "Library                                                                                                        directory   1679879376 B     统计中",
+            "iOSSupport                                                                                                     directory   582813586 B      统计中",
+            ".localized                                                                                                     file        0 B              已完成",
+            "Applications                                                                                                   directory   —                等待扫描",
+            "Cryptexes                                                                                                      directory   —                等待扫描",
+            "Developer                                                                                                      directory   —                等待扫描",
+            "DriverKit                                                                                                      directory   —                等待扫描",
+            "Volumes                                                                                                        directory   —                等待扫描",
+            "↑/↓ 选择  Enter/→ 进入目录  Esc/Backspace/← 返回  p 完整路径  d/Delete 移到回收站  q/Ctrl-C 退出 | 后台扫描继续 · 可进入或返回"
+          ]
+        },
+        {
+          "name": "Library size grows and list stays descending before root completion",
+          "seconds_since_start": 17.509,
+          "root_entries": 124930,
+          "rows": [
+            {
+              "name": "Library",
+              "type": "directory",
+              "bytes": 1698197524,
+              "status": "统计中"
+            },
+            {
+              "name": "iOSSupport",
+              "type": "directory",
+              "bytes": 582813586,
+              "status": "统计中"
+            },
+            {
+              "name": ".localized",
+              "type": "file",
+              "bytes": 0,
+              "status": "已完成"
+            },
+            {
+              "name": "Applications",
+              "type": "directory",
+              "bytes": null,
+              "status": "等待扫描"
+            },
+            {
+              "name": "Cryptexes",
+              "type": "directory",
+              "bytes": null,
+              "status": "等待扫描"
+            },
+            {
+              "name": "Developer",
+              "type": "directory",
+              "bytes": null,
+              "status": "等待扫描"
+            },
+            {
+              "name": "DriverKit",
+              "type": "directory",
+              "bytes": null,
+              "status": "等待扫描"
+            },
+            {
+              "name": "Volumes",
+              "type": "directory",
+              "bytes": null,
+              "status": "等待扫描"
+            }
+          ],
+          "terminal": [
+            "SweepX | 后台扫描中 | 已扫描 124930 项 | 17.2 秒 | 7278 项/秒",
+            "扫描根目录 > / > /System | 已扫描大小: 2281011110 B",
+            "正在扫描: /System/Library/CoreServices/Dock.app/Contents/XPCServices/com.apple.dock.external.extra.x86_64.xpc/Contents/Resources/ms.lproj",
+            "名称                                                                                                           类型        大小             状态",
+            "Library                                                                                                        directory   1698197524 B     统计中",
+            "iOSSupport                                                                                                     directory   582813586 B      统计中",
+            ".localized                                                                                                     file        0 B              已完成",
+            "Applications                                                                                                   directory   —                等待扫描",
+            "Cryptexes                                                                                                      directory   —                等待扫描",
+            "Developer                                                                                                      directory   —                等待扫描",
+            "DriverKit                                                                                                      directory   —                等待扫描",
+            "Volumes                                                                                                        directory   —                等待扫描",
+            "↑/↓ 选择  Enter/→ 进入目录  Esc/Backspace/← 返回  p 完整路径  d/Delete 移到回收站  q/Ctrl-C 退出 | 后台扫描继续 · 可进入或返回"
+          ]
+        },
+        {
+          "name": "return and reenter retains growing list",
+          "seconds_since_start": 17.536,
+          "root_entries": 125117,
+          "rows": [
+            {
+              "name": "Library",
+              "type": "directory",
+              "bytes": 1721220519,
+              "status": "统计中"
+            },
+            {
+              "name": "iOSSupport",
+              "type": "directory",
+              "bytes": 582813586,
+              "status": "统计中"
+            },
+            {
+              "name": ".localized",
+              "type": "file",
+              "bytes": 0,
+              "status": "已完成"
+            },
+            {
+              "name": "Applications",
+              "type": "directory",
+              "bytes": null,
+              "status": "等待扫描"
+            },
+            {
+              "name": "Cryptexes",
+              "type": "directory",
+              "bytes": null,
+              "status": "等待扫描"
+            },
+            {
+              "name": "Developer",
+              "type": "directory",
+              "bytes": null,
+              "status": "等待扫描"
+            },
+            {
+              "name": "DriverKit",
+              "type": "directory",
+              "bytes": null,
+              "status": "等待扫描"
+            },
+            {
+              "name": "Volumes",
+              "type": "directory",
+              "bytes": null,
+              "status": "等待扫描"
+            },
+            {
+              "name": ".resolve",
+              "type": "directory",
+              "bytes": 0,
+              "status": "统计中"
+            },
+            {
+              "name": ".nofollow",
+              "type": "directory",
+              "bytes": null,
+              "status": "等待扫描"
+            },
+            {
+              "name": ".vol",
+              "type": "directory",
+              "bytes": null,
+              "status": "等待扫描"
+            }
+          ],
+          "terminal": [
+            "SweepX | 后台扫描中 | 已扫描 125117 项 | 17.3 秒 | 7218 项/秒",
+            "扫描根目录 > / > /System | 已扫描大小: 2304034105 B",
+            "正在扫描: /System/Library/CoreServices/ControlCenter.app/Contents/Resources/de.lproj",
+            "名称                                                                                                           类型        大小             状态",
+            "Library                                                                                                        directory   1721220519 B     统计中",
+            "iOSSupport                                                                                                     directory   582813586 B      统计中",
+            ".localized                                                                                                     file        0 B              已完成",
+            "Applications                                                                                                   directory   —                等待扫描",
+            "Cryptexes                                                                                                      directory   —                等待扫描",
+            "Developer                                                                                                      directory   —                等待扫描",
+            "DriverKit                                                                                                      directory   —                等待扫描",
+            "Volumes                                                                                                        directory   —                等待扫描",
+            "已完成",
+            ".resolve                                                                                                       directory   0 B              统计中",
+            ".nofollow                                                                                                      directory   —                等待扫描",
+            ".vol                                                                                                           directory   —                等待扫描",
+            "↑/↓ 选择  Enter/→ 进入目录  Esc/Backspace/← 返回  p 完整路径  d/Delete 移到回收站  q/Ctrl-C 退出 | 正在扫描当前目录…"
+          ]
+        },
+        {
+          "name": "depth two Library list while root continues",
+          "seconds_since_start": 19.052,
+          "root_entries": 126908,
+          "rows": [
+            {
+              "name": "LinguisticData",
+              "type": "directory",
+              "bytes": 1238100535,
+              "status": "统计中"
+            },
+            {
+              "name": "CoreServices",
+              "type": "directory",
+              "bytes": 247883035,
+              "status": "统计中"
+            },
+            {
+              "name": "Kernels",
+              "type": "directory",
+              "bytes": 236758632,
+              "status": "统计中"
+            },
+            {
+              "name": "Assistant",
+              "type": "directory",
+              "bytes": 129599078,
+              "status": "统计中"
+            },
+            {
+              "name": "Video",
+              "type": "directory",
+              "bytes": 35346452,
+              "status": "统计中"
+            },
+            {
+              "name": "Snippets",
+              "type": "directory",
+              "bytes": 10682070,
+              "status": "统计中"
+            },
+            {
+              "name": "SystemConfiguration",
+              "type": "directory",
+              "bytes": 10464363,
+              "status": "统计中"
+            },
+            {
+              "name": "UserEventPlugins",
+              "type": "directory",
+              "bytes": 5765897,
+              "status": "统计中"
+            },
+            {
+              "name": "Image Capture",
+              "type": "directory",
+              "bytes": 4166820,
+              "status": "统计中"
+            },
+            {
+              "name": "Address Book Plug-Ins",
+              "type": "directory",
+              "bytes": 3469333,
+              "status": "统计中"
+            },
+            {
+              "name": "SyncServices",
+              "type": "directory",
+              "bytes": 1413605,
+              "status": "统计中"
+            },
+            {
+              "name": "iCloudSettings",
+              "type": "directory",
+              "bytes": 868421,
+              "status": "统计中"
+            },
+            {
+              "name": "Preferences",
+              "type": "directory",
+              "bytes": 343854,
+              "status": "统计中"
+            },
+            {
+              "name": "DirectoryServices",
+              "type": "directory",
+              "bytes": 310695,
+              "status": "统计中"
+            },
+            {
+              "name": "Filters",
+              "type": "directory",
+              "bytes": 260799,
+              "status": "统计中"
+            },
+            {
+              "name": "SESStorage",
+              "type": "directory",
+              "bytes": 224729,
+              "status": "统计中"
+            },
+            {
+              "name": "Password Server Filters",
+              "type": "directory",
+              "bytes": 135408,
+              "status": "统计中"
+            },
+            {
+              "name": "LifecyclePolicy",
+              "type": "directory",
+              "bytes": 104753,
+              "status": "统计中"
+            },
+            {
+              "name": "IdentityServices",
+              "type": "directory",
+              "bytes": 29990,
+              "status": "统计中"
+            }
+          ],
+          "terminal": [
+            "SweepX | 后台扫描中 | 已扫描 126908 项 | 18.8 秒 | 6738 项/秒",
+            "扫描根目录 > / > /System > /System/Library | 已扫描大小: 1925949594 B",
+            "正在扫描: /System/Library/CoreServices/KeyboardSetupAssistant.app/Contents/Resources/el.lproj",
+            "名称                                                                                                           类型        大小             状态",
+            "LinguisticData                                                                                                 directory   1238100535 B     统计中",
+            "CoreServices                                                                                                   directory   247883035 B      统计中",
+            "Kernels                                                                                                        directory   236758632 B      统计中",
+            "Assistant                                                                                                      directory   129599078 B      统计中",
+            "Video                                                                                                          directory   35346452 B       统计中",
+            "Snippets                                                                                                       directory   10682070 B       统计中",
+            "SystemConfiguration                                                                                            directory   10464363 B       统计中",
+            "UserEventPlugins                                                                                               directory   5765897 B        统计中",
+            "Image Capture                                                                                                  directory   4166820 B        统计中",
+            "Address Book Plug-Ins                                                                                          directory   3469333 B        统计中",
+            "SyncServices                                                                                                   directory   1413605 B        统计中",
+            "iCloudSettings                                                                                                 directory   868421 B         统计中",
+            "Preferences                                                                                                    directory   343854 B         统计中",
+            "DirectoryServices                                                                                              directory   310695 B         统计中",
+            "Filters                                                                                                        directory   260799 B         统计中",
+            "SESStorage                                                                                                     directory   224729 B         统计中",
+            "Password Server Filters                                                                                        directory   135408 B         统计中",
+            "LifecyclePolicy                                                                                                directory   104753 B         统计中",
+            "IdentityServices                                                                                               directory   29990 B          统计中",
+            "↑/↓ 选择  Enter/→ 进入目录  Esc/Backspace/← 返回  p 完整路径  d/Delete 移到回收站  q/Ctrl-C 退出 | 后台扫描继续 · 可进入或返回"
+          ]
+        },
+        {
+          "name": "depth two folder grows before root completion",
+          "seconds_since_start": 19.184,
+          "root_entries": 126939,
+          "rows": [
+            {
+              "name": "LinguisticData",
+              "type": "directory",
+              "bytes": 1238100535,
+              "status": "统计中"
+            },
+            {
+              "name": "CoreServices",
+              "type": "directory",
+              "bytes": 250503881,
+              "status": "统计中"
+            },
+            {
+              "name": "Kernels",
+              "type": "directory",
+              "bytes": 236758632,
+              "status": "统计中"
+            },
+            {
+              "name": "Assistant",
+              "type": "directory",
+              "bytes": 129599078,
+              "status": "统计中"
+            },
+            {
+              "name": "Video",
+              "type": "directory",
+              "bytes": 35346452,
+              "status": "统计中"
+            },
+            {
+              "name": "Snippets",
+              "type": "directory",
+              "bytes": 10682070,
+              "status": "统计中"
+            },
+            {
+              "name": "SystemConfiguration",
+              "type": "directory",
+              "bytes": 10464363,
+              "status": "统计中"
+            },
+            {
+              "name": "UserEventPlugins",
+              "type": "directory",
+              "bytes": 5765897,
+              "status": "统计中"
+            },
+            {
+              "name": "Image Capture",
+              "type": "directory",
+              "bytes": 4166820,
+              "status": "统计中"
+            },
+            {
+              "name": "Address Book Plug-Ins",
+              "type": "directory",
+              "bytes": 3469333,
+              "status": "统计中"
+            },
+            {
+              "name": "SyncServices",
+              "type": "directory",
+              "bytes": 1413605,
+              "status": "统计中"
+            },
+            {
+              "name": "iCloudSettings",
+              "type": "directory",
+              "bytes": 868421,
+              "status": "统计中"
+            },
+            {
+              "name": "Preferences",
+              "type": "directory",
+              "bytes": 343854,
+              "status": "统计中"
+            },
+            {
+              "name": "DirectoryServices",
+              "type": "directory",
+              "bytes": 310695,
+              "status": "统计中"
+            },
+            {
+              "name": "Filters",
+              "type": "directory",
+              "bytes": 260799,
+              "status": "统计中"
+            },
+            {
+              "name": "SESStorage",
+              "type": "directory",
+              "bytes": 224729,
+              "status": "统计中"
+            },
+            {
+              "name": "Password Server Filters",
+              "type": "directory",
+              "bytes": 135408,
+              "status": "统计中"
+            },
+            {
+              "name": "LifecyclePolicy",
+              "type": "directory",
+              "bytes": 104753,
+              "status": "统计中"
+            },
+            {
+              "name": "IdentityServices",
+              "type": "directory",
+              "bytes": 29990,
+              "status": "统计中"
+            }
+          ],
+          "terminal": [
+            "SweepX | 后台扫描中 | 已扫描 126939 项 | 19.0 秒 | 6683 项/秒",
+            "扫描根目录 > / > /System > /System/Library | 已扫描大小: 1928570440 B",
+            "正在扫描: /System/Library/CoreServices/KeyboardSetupAssistant.app/Contents/Resources/en_GB.lproj",
+            "名称                                                                                                           类型        大小             状态",
+            "LinguisticData                                                                                                 directory   1238100535 B     统计中",
+            "CoreServices                                                                                                   directory   250503881 B      统计中",
+            "Kernels                                                                                                        directory   236758632 B      统计中",
+            "Assistant                                                                                                      directory   129599078 B      统计中",
+            "Video                                                                                                          directory   35346452 B       统计中",
+            "Snippets                                                                                                       directory   10682070 B       统计中",
+            "SystemConfiguration                                                                                            directory   10464363 B       统计中",
+            "UserEventPlugins                                                                                               directory   5765897 B        统计中",
+            "Image Capture                                                                                                  directory   4166820 B        统计中",
+            "Address Book Plug-Ins                                                                                          directory   3469333 B        统计中",
+            "SyncServices                                                                                                   directory   1413605 B        统计中",
+            "iCloudSettings                                                                                                 directory   868421 B         统计中",
+            "Preferences                                                                                                    directory   343854 B         统计中",
+            "DirectoryServices                                                                                              directory   310695 B         统计中",
+            "Filters                                                                                                        directory   260799 B         统计中",
+            "SESStorage                                                                                                     directory   224729 B         统计中",
+            "Password Server Filters                                                                                        directory   135408 B         统计中",
+            "LifecyclePolicy                                                                                                directory   104753 B         统计中",
+            "IdentityServices                                                                                               directory   29990 B          统计中",
+            "↑/↓ 选择  Enter/→ 进入目录  Esc/Backspace/← 返回  p 完整路径  d/Delete 移到回收站  q/Ctrl-C 退出 | 后台扫描继续 · 可进入或返回"
+          ]
+        }
+      ],
+      "independent_direct_names": [
+        ".localized",
+        "Applications",
+        "Cryptexes",
+        "Developer",
+        "DriverKit",
+        "Library",
+        "Volumes",
+        "iOSSupport"
+      ],
+      "library_growth_bytes": [
+        1679879376,
+        1698197524
+      ],
+      "depth_two_folder_growth": {
+        "name": "CoreServices",
+        "bytes": [
+          247883035,
+          250503881
+        ]
+      },
+      "exit": 0
+    }
+  ]
+}

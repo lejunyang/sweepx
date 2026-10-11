@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{self, Write};
 use std::mem::size_of;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -150,6 +150,16 @@ pub struct DetailRescanProgress {
     pub native_file_lengths: u128,
 }
 
+/// Identity-bound, provisional size of a directory during an enclosing recursive scan.
+/// This carries display evidence only, and must remain explicitly incomplete until completion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveDirectorySize {
+    /// Native directory identity, rebound to the queried browser row's scan identity.
+    pub identity: ScanObjectIdentity,
+    /// Recursive byte lower bound; allocation and reclaimable space are not inferred.
+    pub bytes: sweepx_model::ByteValue,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DetailRescanResult {
     Refreshed(Box<RefreshedDetail>),
@@ -167,6 +177,12 @@ pub enum DetailRescanResult {
 /// permit until it really returns; capacity exhaustion rejects a new browser
 /// instead of creating unbounded detached threads.
 pub trait DetailRescanProvider: Send + Sync + 'static {
+    /// Samples bounded in-memory progress for these displayed directory identities.
+    /// Must not perform filesystem I/O or block the UI waiting for a worker; unavailable samples
+    /// may be omitted. Responses must not exceed the supplied identities or claim exact totals.
+    fn live_directory_sizes(&self, _identities: &[ScanObjectIdentity]) -> Vec<LiveDirectorySize> {
+        Vec::new()
+    }
     /// Starts a new single-flight query generation before it is queued to the
     /// background worker. Providers can use this hook to replace cancellation
     /// state left by the preceding query without losing a cancellation that
@@ -1744,6 +1760,78 @@ impl BrowserModel {
         true
     }
 
+    fn update_visible_directory_sizes(&mut self, provider: &impl DetailRescanProvider) {
+        let Some(current) = self.levels.last().map(|level| level.directory_index) else {
+            return;
+        };
+        if !self.nodes[current].listing_loaded {
+            return;
+        }
+        // Include the current directory's header and every direct folder, not just the page
+        // window: an off-screen folder may become the largest and must move into view.
+        let indices = std::iter::once(current)
+            .chain(self.children_by_index[current].iter().copied())
+            .filter(|index| self.nodes[*index].entry.object_type == ObjectType::Directory)
+            .collect::<Vec<_>>();
+        let identities = indices
+            .iter()
+            .filter_map(|index| self.nodes[*index].entry.identity.clone())
+            .collect::<Vec<_>>();
+        let samples = provider.live_directory_sizes(&identities);
+        if samples.len() > identities.len() {
+            return;
+        }
+        let requested = indices
+            .iter()
+            .filter_map(|index| {
+                self.nodes[*index]
+                    .entry
+                    .identity
+                    .as_ref()
+                    .map(|identity| (identity.entry_id.clone(), *index))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let mut seen = BTreeSet::new();
+        let mut updates = Vec::new();
+        for sample in samples {
+            let Some(index) = requested.get(&sample.identity.entry_id).copied() else {
+                return;
+            };
+            if self.nodes[index].entry.identity.as_ref() != Some(&sample.identity)
+                || !identity_is_known(&sample.identity)
+                || !matches!(sample.bytes, sweepx_model::EvidenceValue::LowerBound { .. })
+                || !seen.insert(index)
+            {
+                return;
+            }
+            let node = &self.nodes[index];
+            let old = node
+                .aggregate
+                .as_ref()
+                .map(|aggregate| &aggregate.apparent_logical_bytes)
+                .unwrap_or(&node.entry.logical_bytes);
+            if lower_bound_bytes(&sample.bytes) < lower_bound_bytes(old) || &sample.bytes == old {
+                continue;
+            }
+            updates.push((index, sample.bytes));
+        }
+        if updates.is_empty() {
+            return;
+        }
+        for (index, bytes) in updates {
+            let node = &mut self.nodes[index];
+            if let Some(aggregate) = &mut node.aggregate {
+                aggregate.apparent_logical_bytes = bytes.clone();
+                aggregate.arithmetic_state = ArithmeticState::LowerBound;
+                mark_coverage_in_progress(&mut aggregate.coverage);
+            }
+            node.entry.logical_bytes = bytes;
+            mark_coverage_in_progress(&mut node.entry.coverage);
+        }
+        self.sort_rows();
+        self.reload_loaded_level();
+    }
+
     fn rebuilt_with_detail_rows(
         &self,
         node_index: usize,
@@ -2395,6 +2483,23 @@ fn mark_coverage_details_lost(coverage: &mut Coverage) {
     coverage.state = CoverageState::DetailsLost;
     coverage.complete = false;
     coverage.details_lost = true;
+}
+
+fn mark_coverage_in_progress(coverage: &mut Coverage) {
+    coverage.complete = false;
+    coverage.state = if coverage.details_lost {
+        CoverageState::DetailsLost
+    } else {
+        CoverageState::Incomplete
+    };
+    if !coverage
+        .incomplete_reasons
+        .contains(&sweepx_model::ReasonCode::IncompleteStreamCoverage)
+    {
+        coverage
+            .incomplete_reasons
+            .push(sweepx_model::ReasonCode::IncompleteStreamCoverage);
+    }
 }
 
 fn validate_refreshed_target(
@@ -3116,6 +3221,14 @@ impl<P: DetailRescanProvider> DetailRescanBrowserReducer<P> {
             worker.complete_or_expire(model);
         }
         self.schedule_current_directory(model);
+        if model.progressive_navigation
+            && self.scan.pending.borrow().as_ref().is_some_and(|pending| {
+                pending.request.reason == DetailRescanReason::ProgressiveAggregate
+                    && !pending.timed_out
+            })
+        {
+            model.update_visible_directory_sizes(self.scan.provider());
+        }
     }
 }
 
@@ -3890,10 +4003,7 @@ fn render_browser_rows(frame: &mut Frame<'_>, area: Rect, model: &BrowserModel, 
                     Locale::EnUs => "Complete",
                 },
                 (sweepx_model::EvidenceValue::LowerBound { .. }, _) => {
-                    if matches!(
-                        model.current_detail_rescan_state(),
-                        Some(DetailRescanState::Pending { .. })
-                    ) {
+                    if model.current_size_scanning() {
                         match model.locale {
                             Locale::ZhCn => "统计中",
                             Locale::EnUs => "Counting",
@@ -5722,6 +5832,202 @@ mod tests {
             screen.push('\n');
         }
         screen
+    }
+
+    #[derive(Clone, Default)]
+    struct FolderProgressGate {
+        root: NavigationGate,
+        samples: Arc<StdMutex<Vec<LiveDirectorySize>>>,
+    }
+
+    impl DetailRescanProvider for FolderProgressGate {
+        fn set_progress_sink(&self, sink: Option<SyncSender<DetailRescanProgress>>) {
+            self.root.set_progress_sink(sink);
+        }
+        fn rescan_detail(&self, request: &DetailRescanRequest) -> DetailRescanResult {
+            self.root.rescan_detail(request)
+        }
+        fn prepare_directory_listing(&self) {
+            self.root.prepare_directory_listing();
+        }
+        fn cancel_directory_listing(&self) {
+            self.root.cancel_directory_listing();
+        }
+        fn cancel_detail_rescan(&self) {
+            self.root.cancel_detail_rescan();
+        }
+        fn live_directory_sizes(
+            &self,
+            identities: &[ScanObjectIdentity],
+        ) -> Vec<LiveDirectorySize> {
+            self.samples
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|sample| identities.contains(&sample.identity))
+                .cloned()
+                .collect()
+        }
+        fn rescan_directory_listing(&self, request: &DetailRescanRequest) -> DetailRescanResult {
+            let DetailRescanResult::Refreshed(mut result) =
+                self.root.rescan_directory_listing(request)
+            else {
+                unreachable!()
+            };
+            for (name, ordinal) in [("a", 4), ("z", 5)] {
+                let mut row = entry(
+                    &format!("/root/sub/{name}"),
+                    ObjectType::Directory,
+                    ordinal,
+                    1,
+                    Some(2),
+                );
+                row.logical_bytes = EvidenceValue::NotChecked {
+                    reason: ReasonCode::IncompleteStreamCoverage,
+                };
+                result.rows.push(row);
+            }
+            attach_child_locators(request, &mut result.rows);
+            result.aggregate.direct_child_count = EvidenceValue::Known {
+                value: DecimalU128::new(3),
+            };
+            DetailRescanResult::Refreshed(result)
+        }
+    }
+
+    #[test]
+    fn open_child_folders_grow_and_resort_while_root_is_held_and_focus_stays_bound() {
+        let gate = FolderProgressGate::default();
+        let reducer = DetailRescanBrowserReducer::new(gate.clone()).unwrap();
+        let mut model = navigation_model();
+        reducer.reduce(&mut model, BrowserAction::EnterDirectory);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        gate.root.release(1);
+        while gate.root.state.0.lock().unwrap().requests.len() < 2 && Instant::now() < deadline {
+            reducer.poll_background(&mut model);
+            thread::sleep(Duration::from_millis(1));
+        }
+        reducer.reduce(&mut model, BrowserAction::EnterDirectory);
+        gate.root.release_listing();
+        while model.visible_rows().len() < 3 && Instant::now() < deadline {
+            reducer.poll_background(&mut model);
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(model.current_directory(), Some("/root/sub"));
+        assert_eq!(model.visible_rows().len(), 3);
+        assert!(navigation_screen(&model).contains("Waiting"));
+        let a = model
+            .visible_rows()
+            .iter()
+            .find(|row| row.label() == "a")
+            .unwrap()
+            .entry()
+            .identity
+            .clone()
+            .unwrap();
+        let z = model
+            .visible_rows()
+            .iter()
+            .find(|row| row.label() == "z")
+            .unwrap()
+            .entry()
+            .identity
+            .clone()
+            .unwrap();
+        let sample = |identity, value| LiveDirectorySize {
+            identity,
+            bytes: EvidenceValue::LowerBound {
+                value: DecimalU128::new(value),
+                reason: ReasonCode::IncompleteStreamCoverage,
+            },
+        };
+        *gate.samples.lock().unwrap() = vec![sample(a.clone(), 10), sample(z.clone(), 5)];
+        reducer.poll_background(&mut model);
+        assert_eq!(
+            model
+                .visible_rows()
+                .iter()
+                .map(BrowserRow::label)
+                .collect::<Vec<_>>(),
+            vec!["a", "file", "z"]
+        );
+        model.set_selected(0);
+        *gate.samples.lock().unwrap() = vec![sample(a, 10), sample(z, 50)];
+        reducer.poll_background(&mut model);
+        assert_eq!(
+            model
+                .visible_rows()
+                .iter()
+                .map(BrowserRow::label)
+                .collect::<Vec<_>>(),
+            vec!["z", "a", "file"]
+        );
+        assert_eq!(model.selected_row().unwrap().label(), "a");
+        let screen = navigation_screen(&model);
+        assert!(screen.contains("50 B") && screen.contains("Counting"));
+        assert!(model.visible_rows()[0].entry().coverage.details_lost);
+        assert_eq!(
+            model.visible_rows()[0].entry().coverage.state,
+            CoverageState::DetailsLost
+        );
+        {
+            let state = gate.root.state.0.lock().unwrap();
+            assert_eq!(state.requests.len(), 3);
+            assert!(!state.cancelled && !state.root_completed);
+        }
+        assert!(reducer.scan.pending.borrow().is_some());
+        reducer.reduce(&mut model, BrowserAction::ReturnToParent);
+        reducer.reduce(&mut model, BrowserAction::EnterDirectory);
+        assert_eq!(model.visible_rows()[0].label(), "z");
+        gate.root.release(3);
+        finish_background(&reducer, &mut model);
+    }
+
+    #[test]
+    fn live_directory_samples_reject_foreign_native_identity_without_partial_updates() {
+        let mut model = navigation_model();
+        model.enter_selected();
+        let pending = model.begin_detail_rescan_at(0).unwrap();
+        let a = entry("/root/a", ObjectType::Directory, 2, 1, Some(1));
+        let z = entry("/root/z", ObjectType::Directory, 3, 1, Some(1));
+        let result = progressive_listing_result(&pending.request, vec![a.clone(), z.clone()]);
+        model.finish_detail_rescan(pending, result);
+        let sample = |identity| LiveDirectorySize {
+            identity,
+            bytes: EvidenceValue::LowerBound {
+                value: DecimalU128::new(100),
+                reason: ReasonCode::IncompleteStreamCoverage,
+            },
+        };
+        let mut foreign = z.identity.clone().unwrap();
+        foreign.volume_or_mount_identity = IdentityEvidence::unknown(ReasonCode::UnknownIdentity);
+        // This provider deliberately returns an identity outside the supplied set.
+        struct UnvalidatedSamples(Vec<LiveDirectorySize>);
+        impl DetailRescanProvider for UnvalidatedSamples {
+            fn rescan_detail(&self, _: &DetailRescanRequest) -> DetailRescanResult {
+                unreachable!()
+            }
+            fn live_directory_sizes(&self, _: &[ScanObjectIdentity]) -> Vec<LiveDirectorySize> {
+                self.0.clone()
+            }
+        }
+        let before = model
+            .visible_rows()
+            .iter()
+            .map(|row| row.entry().logical_bytes.clone())
+            .collect::<Vec<_>>();
+        model.update_visible_directory_sizes(&UnvalidatedSamples(vec![
+            sample(a.identity.unwrap()),
+            sample(foreign),
+        ]));
+        assert_eq!(
+            before,
+            model
+                .visible_rows()
+                .iter()
+                .map(|row| row.entry().logical_bytes.clone())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

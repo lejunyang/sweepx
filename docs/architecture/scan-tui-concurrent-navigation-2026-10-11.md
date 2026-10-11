@@ -5,6 +5,9 @@ That implementation preserved the root request, but its single worker still seri
 child's direct listing behind the entire root traversal. The CLI also held its shared detail-ID
 allocator lock for all native I/O, so merely adding a thread would still have blocked listings.
 
+Opened-directory rows now also update during the root traversal; see
+[nested live progress](scan-tui-nested-progress-2026-10-11.md).
+
 ## Delivered behavior and contracts
 
 - Progressive browsing retains one recursive worker and lazily admits one independent direct-list

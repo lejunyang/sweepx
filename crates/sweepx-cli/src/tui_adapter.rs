@@ -36,6 +36,7 @@ struct LiveTuiDetailRescanProvider {
     scanner: DetailRescanner<HostPlatformScanner>,
     logical_only: bool,
     sizes: Mutex<size_snapshots::SizeSnapshots>,
+    live_sizes: Mutex<size_snapshots::LiveSizeSnapshots>,
     ids: Mutex<DetailEntryIdAllocator>,
     cancel: Mutex<CancellationToken>,
     listing_cancel: Mutex<CancellationToken>,
@@ -123,6 +124,7 @@ fn live_tui_detail_rescan_provider(
         scanner: DetailRescanner::new(HostPlatformScanner::new(), limits),
         logical_only,
         sizes: Mutex::new(Default::default()),
+        live_sizes: Mutex::new(Default::default()),
         ids: Mutex::new(ids),
         cancel: Mutex::new(CancellationToken::new()),
         listing_cancel: Mutex::new(CancellationToken::new()),
@@ -146,6 +148,19 @@ fn detail_limits_for_mode(
 }
 
 impl DetailRescanProvider for TuiDetailRescanProvider {
+    fn live_directory_sizes(
+        &self,
+        _identities: &[sweepx_model::ScanObjectIdentity],
+    ) -> Vec<sweepx_tui::LiveDirectorySize> {
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+        if let Some(live) = &self.live
+            && let Ok(sizes) = live.live_sizes.try_lock()
+        {
+            // Sampling is memory-only and never waits for the traversal's progress lock.
+            return sizes.sample(_identities);
+        }
+        Vec::new()
+    }
     fn set_progress_sink(
         &self,
         sink: Option<std::sync::mpsc::SyncSender<TuiDetailRescanProgress>>,
@@ -164,6 +179,9 @@ impl DetailRescanProvider for TuiDetailRescanProvider {
             && let Ok(mut cancel) = live.cancel.lock()
         {
             *cancel = CancellationToken::new();
+            if let Ok(mut sizes) = live.live_sizes.lock() {
+                *sizes = Default::default();
+            }
         }
     }
 
@@ -269,6 +287,11 @@ impl TuiDetailRescanProvider {
                     .rescan_direct_children(scanner_request, &mut ids, &cancel)
             } else if request.reason == DetailRescanReason::ProgressiveAggregate {
                 let on_progress = |progress: sweepx_scanner::DetailRescanProgress| {
+                    if let Ok(mut sizes) = live.live_sizes.lock() {
+                        for observation in &progress.directory_sizes {
+                            sizes.insert(observation);
+                        }
+                    }
                     let Some(sender) = live.progress.lock().ok().and_then(|slot| slot.clone())
                     else {
                         return;
@@ -290,7 +313,12 @@ impl TuiDetailRescanProvider {
                         &mut ids,
                         &cancel,
                         on_progress,
-                        |observation| staged.insert(observation),
+                        |observation| {
+                            if let Ok(mut sizes) = live.live_sizes.lock() {
+                                sizes.insert(&observation);
+                            }
+                            staged.insert(observation);
+                        },
                     )
                 } else {
                     live.scanner.rescan_with_progress(
@@ -315,6 +343,15 @@ impl TuiDetailRescanProvider {
             };
             let result = match scanned {
                 Ok(mut detail) => {
+                    if listing && live.logical_only {
+                        for row in &mut detail.rows {
+                            if row.object_type == sweepx_model::ObjectType::Directory {
+                                row.logical_bytes = sweepx_model::EvidenceValue::NotChecked {
+                                    reason: sweepx_model::ReasonCode::IncompleteStreamCoverage,
+                                };
+                            }
+                        }
+                    }
                     // Publish staged descendant sizes only after the entire native operation
                     // succeeds. Cancellation, binding failures and resource failures publish none.
                     let recursive_size_observed = if let Ok(mut sizes) = live.sizes.lock() {
@@ -546,6 +583,7 @@ mod tui_detail_rescan_provider_tests {
                 ),
                 logical_only: true,
                 sizes: Mutex::new(Default::default()),
+                live_sizes: Mutex::new(Default::default()),
                 ids: Mutex::new(ids),
                 cancel: Mutex::new(CancellationToken::new()),
                 listing_cancel: Mutex::new(CancellationToken::new()),

@@ -45,6 +45,7 @@ struct ProbedPlatform {
     unavailable_mount_comparison: bool,
     child_io_errors: std::collections::BTreeMap<PathBuf, std::io::ErrorKind>,
     enumeration_io_errors: std::collections::BTreeMap<PathBuf, std::io::ErrorKind>,
+    file_delay: Duration,
 }
 impl ProbedPlatform {
     fn new(probe: Arc<Probe>) -> Self {
@@ -58,6 +59,7 @@ impl ProbedPlatform {
             unavailable_mount_comparison: false,
             child_io_errors: std::collections::BTreeMap::new(),
             enumeration_io_errors: std::collections::BTreeMap::new(),
+            file_delay: Duration::ZERO,
         }
     }
     fn handle(&self, native: NativeHandle, path: PathBuf) -> Handle {
@@ -190,6 +192,11 @@ impl PlatformScanner for ProbedPlatform {
         cancel: &CancellationToken,
         admission: DirectoryHandleAdmission,
     ) -> Result<WalkEntry<Handle>, PlatformError> {
+        if !self.file_delay.is_zero()
+            && fs::symlink_metadata(&child.path).is_ok_and(|metadata| metadata.is_file())
+        {
+            std::thread::sleep(self.file_delay);
+        }
         if admission == DirectoryHandleAdmission::Deny {
             self.probe.denied.fetch_add(1, Ordering::SeqCst);
         }
@@ -222,6 +229,9 @@ impl PlatformScanner for ProbedPlatform {
             return None;
         }
         let file = self.native.observe_file_length(&parent.native, child)?;
+        if !self.file_delay.is_zero() {
+            std::thread::sleep(self.file_delay);
+        }
         self.probe.native_lengths.fetch_add(1, Ordering::SeqCst);
         Some(file)
     }
@@ -670,6 +680,75 @@ fn completed_directory_observations_match_each_independent_subtree_walk() {
         }
     }
     assert_eq!(sizes.last().unwrap().aggregate, result.aggregate);
+}
+
+#[test]
+fn active_nested_progress_includes_unfinished_descendants_without_double_counting() {
+    let (_temp, root) = fixture();
+    fs::create_dir_all(root.join("child/deep")).unwrap();
+    fs::write(root.join("child/deep/a"), b"1234567").unwrap();
+    fs::write(root.join("child/deep/b"), b"123456789").unwrap();
+    let mut oracle = Oracle::default();
+    oracle.walk(&root, true);
+    let (scan_id, observed) = source(&root);
+    let (_, child) = source(&root.join("child"));
+    let (_, deep) = source(&root.join("child/deep"));
+    let probe = Arc::new(Probe::default());
+    let mut platform = ProbedPlatform::new(Arc::clone(&probe));
+    // A controlled native file observation exceeds the measured 120 ms presentation interval.
+    // Neither the expected byte values nor this delay are derived from the implementation constant.
+    platform.file_delay = Duration::from_millis(200);
+    let mut updates = Vec::new();
+    let result = DetailRescanner::new(platform, limits())
+        .rescan_logical_with_directory_observations(
+            request(&scan_id, &observed),
+            &mut DetailEntryIdAllocator::new(scan_id.clone()).unwrap(),
+            &CancellationToken::new(),
+            |progress| updates.push(progress),
+            |_| {},
+        )
+        .unwrap();
+    let intermediate = updates.iter().find(|progress| {
+        progress.directory_sizes.iter().any(|size| {
+            size.identity.platform_file_identity == deep.identity.as_ref().unwrap().platform_file_identity
+                && matches!(size.aggregate.apparent_logical_bytes, EvidenceValue::LowerBound {value, ..} if value.0 > 0 && value.0 < oracle.logical)
+        })
+    }).expect("unfinished nested file contribution was not streamed");
+    let parent = intermediate
+        .directory_sizes
+        .iter()
+        .find(|size| {
+            size.identity.platform_file_identity
+                == child.identity.as_ref().unwrap().platform_file_identity
+        })
+        .unwrap();
+    let leaf = intermediate
+        .directory_sizes
+        .iter()
+        .find(|size| {
+            size.identity.platform_file_identity
+                == deep.identity.as_ref().unwrap().platform_file_identity
+        })
+        .unwrap();
+    assert_eq!(
+        parent.aggregate.apparent_logical_bytes,
+        leaf.aggregate.apparent_logical_bytes
+    );
+    assert!(!parent.aggregate.coverage.complete && !leaf.aggregate.coverage.complete);
+    assert!(
+        updates
+            .iter()
+            .all(|progress| progress.directory_sizes.len() <= 2)
+    );
+    assert_eq!(
+        result.aggregate.apparent_logical_bytes,
+        known_u128(oracle.logical)
+    );
+    assert_eq!(
+        result.aggregate.recursive_entry_count,
+        known_count(oracle.entries)
+    );
+    released(&probe);
 }
 
 #[test]

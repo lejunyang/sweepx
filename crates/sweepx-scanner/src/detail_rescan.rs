@@ -44,10 +44,11 @@ pub const DETAIL_SCAN_MIN_ORDINAL: u128 = ORDINARY_SCAN_MAX_ORDINAL + 1;
 /// flush sooner; the terminal result still supplies all completed rows.
 pub const DETAIL_PROGRESS_INTERVAL: Duration = Duration::from_millis(120);
 
-/// A completed directory-size observation from the current recursive walk.
+/// A directory-size observation from the current recursive walk.
 ///
-/// This is scan-time presentation evidence, not freshness or execution authority. Consumers
-/// must bound retention and publish staged observations only if the enclosing scan succeeds.
+/// Completion callbacks carry finished subtrees; progress carries explicitly incomplete active
+/// frames. This is presentation evidence, not freshness or execution authority. Consumers must
+/// bound retention and publish completed reuse snapshots only if the enclosing scan succeeds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirectorySizeObservation {
     /// Native object evidence and scan scope of the directory whose size was accumulated.
@@ -173,6 +174,10 @@ pub struct DetailRescanProgress {
     /// update cannot leave a completed sibling at zero until the whole root finishes.
     pub rows: Vec<ScannedEntry>,
     pub aggregate: DirectoryAggregate,
+    /// Lower-bound sizes of active ancestor frames, bounded by the native handle allowance.
+    /// These include the active descendant's contribution without waiting for its completion.
+    /// Empty when per-directory observations were not requested; never execution authority.
+    pub directory_sizes: Vec<DirectorySizeObservation>,
     /// Advisory path of the latest visited entry; never execution authority.
     pub current_path: PathBuf,
     /// Time spent in this directory traversal, excluding root/lineage admission.
@@ -738,6 +743,7 @@ where
             changed: None,
             current_path: target_metadata.path.clone(),
             native_file_lengths: 0,
+            directory_sizes: Vec::new(),
         };
         // Keep one accumulator per direct child directory. Descendants are never retained as
         // rows, but their bytes roll up into the visible child so the TUI can show useful sizes
@@ -1289,6 +1295,7 @@ where
             if progress.clock.last_emit.elapsed() >= DETAIL_PROGRESS_INTERVAL
                 && progress.clock.changed.take().is_some()
             {
+                progress.clock.directory_sizes = active_directory_sizes(&frames, progress.request)?;
                 emit_recursive_progress(
                     progress.rows,
                     aggregates.target,
@@ -1342,6 +1349,7 @@ struct RecursiveProgressClock {
     current_path: PathBuf,
     native_file_lengths: u128,
     last_emit: Instant,
+    directory_sizes: Vec<DirectorySizeObservation>,
     changed: Option<ScanEntryId>,
 }
 
@@ -1386,6 +1394,7 @@ fn emit_recursive_progress(
         .collect();
     on_progress(DetailRescanProgress {
         rows,
+        directory_sizes: clock.directory_sizes.clone(),
         current_path: clock.current_path.clone(),
         elapsed_millis: clock.started.elapsed().as_millis(),
         native_file_lengths: clock.native_file_lengths,
@@ -1447,6 +1456,44 @@ impl<D> RecursiveDirectory<D> {
             end_of_directory: false,
         }
     }
+}
+
+fn active_directory_sizes<D>(
+    frames: &[RecursiveDirectory<D>],
+    request: &DetailRescanRequest<'_>,
+) -> Result<Vec<DirectorySizeObservation>, DetailRescanError> {
+    // A frame has already rolled up finished children, but its active child has not been popped
+    // yet. Fold only that active chain from the leaf upwards; no filesystem work or per-file
+    // inventory is added, and a later pop must not count this provisional fold a second time.
+    let mut descendant_bytes = EvidenceAccumulator::known_zero();
+    let mut descendant_entries = 0u128;
+    let mut observations = Vec::with_capacity(frames.len());
+    for frame in frames.iter().rev() {
+        let Some(size) = &frame.size else {
+            continue;
+        };
+        let identity = &frame.directory.identity;
+        let mut aggregate = size.finish(
+            request.source_scan_id,
+            &identity.entry_id,
+            request.revision,
+            false,
+        );
+        let mut bytes = size.apparent_logical_bytes.clone();
+        bytes.add(&descendant_bytes.clone().into_value(false));
+        descendant_bytes = bytes;
+        descendant_entries = size
+            .recursive_entry_count
+            .checked_add(descendant_entries)
+            .ok_or(DetailRescanError::ResourceLimit)?;
+        aggregate.apparent_logical_bytes = descendant_bytes.clone().into_value(false);
+        aggregate.recursive_entry_count = known_count(descendant_entries);
+        observations.push(DirectorySizeObservation {
+            identity: identity.clone(),
+            aggregate,
+        });
+    }
+    Ok(observations)
 }
 
 impl<D> TargetDirectory<D> {

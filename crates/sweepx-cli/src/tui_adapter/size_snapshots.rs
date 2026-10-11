@@ -1,7 +1,7 @@
 //! Bounded, invocation-local display snapshots. These are observations from the completed scan,
 //! not fresh subtree facts, classification evidence or permission to execute cleanup.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use sweepx_model::{
     DirectoryAggregate, FilesystemObjectDomainIdentity, IdentityEvidence, ObjectType,
@@ -11,6 +11,94 @@ use sweepx_scanner::{DetailRescanResult, DirectorySizeObservation};
 
 const MAX_DIRECTORIES: usize = 16_384;
 const MAX_BYTES: usize = 16 * 1024 * 1024;
+
+struct LiveValue {
+    bytes: sweepx_model::ByteValue,
+    sequence: u128,
+    cost: usize,
+}
+
+/// Separate, bounded advisory progress. Eviction admits newly scanned directories after the
+/// capacity is reached; these provisional values never enter the completed-snapshot cache.
+#[derive(Default)]
+pub(super) struct LiveSizeSnapshots {
+    values: HashMap<Key, LiveValue>,
+    order: BTreeMap<u128, Key>,
+    sequence: u128,
+    bytes: usize,
+}
+
+impl LiveSizeSnapshots {
+    pub(super) fn insert(&mut self, observation: &DirectorySizeObservation) {
+        let Some(key) = Key::from_identity(&observation.identity) else {
+            return;
+        };
+        let value = match observation.aggregate.apparent_logical_bytes {
+            sweepx_model::EvidenceValue::Known { value }
+            | sweepx_model::EvidenceValue::LowerBound { value, .. } => value,
+            _ => return,
+        };
+        if self.values.get(&key).is_some_and(|old| {
+            matches!(old.bytes, sweepx_model::EvidenceValue::LowerBound { value: previous, .. } if previous.0 > value.0)
+        }) {
+            return;
+        }
+        // Include both owned key copies, root strings, both indexes and their allocation overhead.
+        let cost = (std::mem::size_of::<(Key, LiveValue)>() + std::mem::size_of::<(u128, Key)>())
+            * 2
+            + key.root.as_str().len() * 2;
+        if cost > MAX_BYTES {
+            return;
+        }
+        let Some(sequence) = self.sequence.checked_add(1) else {
+            return;
+        };
+        self.sequence = sequence;
+        if let Some(old) = self.values.remove(&key) {
+            self.order.remove(&old.sequence);
+            self.bytes -= old.cost;
+        }
+        while self.values.len() >= MAX_DIRECTORIES || self.bytes.saturating_add(cost) > MAX_BYTES {
+            let Some((_, evicted)) = self.order.pop_first() else {
+                return;
+            };
+            if let Some(old) = self.values.remove(&evicted) {
+                self.bytes -= old.cost;
+            }
+        }
+        self.order.insert(sequence, key.clone());
+        self.values.insert(
+            key,
+            LiveValue {
+                bytes: sweepx_model::EvidenceValue::LowerBound {
+                    value,
+                    reason: sweepx_model::ReasonCode::IncompleteStreamCoverage,
+                },
+                sequence,
+                cost,
+            },
+        );
+        self.bytes += cost;
+    }
+
+    pub(super) fn sample(
+        &self,
+        identities: &[ScanObjectIdentity],
+    ) -> Vec<sweepx_tui::LiveDirectorySize> {
+        identities
+            .iter()
+            .take(MAX_DIRECTORIES)
+            .filter_map(|identity| {
+                let key = Key::from_identity(identity)?;
+                let value = self.values.get(&key)?;
+                Some(sweepx_tui::LiveDirectorySize {
+                    identity: identity.clone(),
+                    bytes: value.bytes.clone(),
+                })
+            })
+            .collect()
+    }
+}
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct Key {
@@ -232,5 +320,56 @@ mod tests {
         staged.insert(observation(40_003));
         snapshots.merge(staged);
         assert_eq!((snapshots.values.len(), snapshots.bytes), before);
+    }
+
+    #[test]
+    fn live_samples_rebind_native_ids_and_never_publish_exact_or_regress() {
+        let mut live = LiveSizeSnapshots::default();
+        let mut source = observation(2);
+        live.insert(&source);
+        let mut queried = source.identity.clone();
+        queried.entry_id = ScanEntryId::for_scan_ordinal(&source.aggregate.scan_id, 99).unwrap();
+        let samples = live.sample(&[queried.clone()]);
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].identity, queried);
+        assert_eq!(
+            samples[0].bytes,
+            EvidenceValue::LowerBound {
+                value: DecimalU128::new(23),
+                reason: ReasonCode::IncompleteStreamCoverage,
+            }
+        );
+        source.aggregate.apparent_logical_bytes = EvidenceValue::Known {
+            value: DecimalU128::new(7),
+        };
+        live.insert(&source);
+        assert_eq!(live.sample(&[queried.clone()]), samples);
+        source.aggregate.apparent_logical_bytes = EvidenceValue::Known {
+            value: DecimalU128::new(47),
+        };
+        live.insert(&source);
+        assert!(
+            matches!(live.sample(&[queried.clone()])[0].bytes, EvidenceValue::LowerBound {value, ..} if value.0 == 47)
+        );
+        queried.volume_or_mount_identity = IdentityEvidence::unknown(ReasonCode::UnknownIdentity);
+        assert!(live.sample(&[queried]).is_empty());
+    }
+
+    #[test]
+    fn live_retention_admits_new_progress_after_eviction_and_replaces_without_growth() {
+        let mut live = LiveSizeSnapshots::default();
+        for ordinal in 2..40_002 {
+            live.insert(&observation(ordinal));
+        }
+        assert!(live.values.len() <= MAX_DIRECTORIES);
+        assert_eq!(live.values.len(), live.order.len());
+        assert!(live.bytes <= MAX_BYTES);
+        assert!(live.sample(&[observation(2).identity]).is_empty());
+        assert_eq!(live.sample(&[observation(40_001).identity]).len(), 1);
+        let before = (live.values.len(), live.order.len(), live.bytes);
+        for _ in 0..100 {
+            live.insert(&observation(40_001));
+        }
+        assert_eq!(before, (live.values.len(), live.order.len(), live.bytes));
     }
 }
