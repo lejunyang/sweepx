@@ -105,7 +105,7 @@ impl<P: PlatformScanner> DetailRescanner<P> {
         };
         let ids = DetailEntryIdAllocator::new(entry.scan_id.clone())?;
         self.validate_request(&directory_request, &ids)?;
-        let reopened = self.reopen_target(&directory_request, cancel)?;
+        let reopened = self.reopen_target(&directory_request, cancel, false)?;
         let child = DirectoryEntryRecord::from_parent_and_name(
             &reopened.target_metadata.path,
             entry.native_basename.clone(),

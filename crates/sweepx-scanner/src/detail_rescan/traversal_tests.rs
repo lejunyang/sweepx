@@ -46,6 +46,8 @@ struct ProbedPlatform {
     child_io_errors: std::collections::BTreeMap<PathBuf, std::io::ErrorKind>,
     enumeration_io_errors: std::collections::BTreeMap<PathBuf, std::io::ErrorKind>,
     file_delay: Duration,
+    volume_prefixes: std::collections::BTreeMap<PathBuf, u64>,
+    aliases: std::collections::BTreeMap<PathBuf, EntryMetadata>,
 }
 impl ProbedPlatform {
     fn new(probe: Arc<Probe>) -> Self {
@@ -60,6 +62,8 @@ impl ProbedPlatform {
             child_io_errors: std::collections::BTreeMap::new(),
             enumeration_io_errors: std::collections::BTreeMap::new(),
             file_delay: Duration::ZERO,
+            volume_prefixes: Default::default(),
+            aliases: Default::default(),
         }
     }
     fn handle(&self, native: NativeHandle, path: PathBuf) -> Handle {
@@ -73,7 +77,12 @@ impl ProbedPlatform {
         self.observe();
         handle
     }
-    fn observed(&self, entry: WalkEntry<NativeHandle>) -> WalkEntry<Handle> {
+    fn observed(&self, mut entry: WalkEntry<NativeHandle>) -> WalkEntry<Handle> {
+        match &mut entry {
+            WalkEntry::Directory(opened) => self.scope_metadata(&mut opened.metadata),
+            WalkEntry::File(metadata) | WalkEntry::Link(metadata) => self.scope_metadata(metadata),
+            _ => {}
+        }
         let entry = match entry {
             WalkEntry::Directory(opened) => WalkEntry::Directory(OpenedDirectory {
                 handle: self.handle(opened.handle, opened.metadata.path.clone()),
@@ -94,6 +103,21 @@ impl ProbedPlatform {
             .fd_peak
             .fetch_max(self.probe.descriptors(), Ordering::SeqCst);
     }
+    fn scope_metadata(&self, metadata: &mut EntryMetadata) {
+        if let Some((_, mount)) = self
+            .volume_prefixes
+            .iter()
+            .rev()
+            .find(|(prefix, _)| metadata.path.starts_with(prefix))
+        {
+            metadata.mount_identity = Some(sweepx_platform::MountIdentity { value: *mount });
+        }
+        if let Some(alias) = self.aliases.get(&metadata.path) {
+            metadata.identity = alias.identity.clone();
+            metadata.filesystem_identity = alias.filesystem_identity.clone();
+            metadata.mount_identity = alias.mount_identity.clone();
+        }
+    }
 }
 impl PlatformScanner for ProbedPlatform {
     type DirectoryHandle = Handle;
@@ -107,6 +131,7 @@ impl PlatformScanner for ProbedPlatform {
     ) -> Result<RootAdmission<Handle>, PlatformError> {
         self.probe.roots.fetch_add(1, Ordering::SeqCst);
         let mut opened = self.native.admit_root(root, cancel)?;
+        self.scope_metadata(&mut opened.metadata);
         if self.changed_root_mount {
             let mount = opened.metadata.mount_identity.as_mut().unwrap();
             mount.value = mount.value.wrapping_add(1);
@@ -1052,7 +1077,7 @@ fn denied_or_disappearing_children_keep_siblings_without_claiming_complete_total
                         assert_eq!(
                             result.unwrap_err(),
                             if io_kind == std::io::ErrorKind::PermissionDenied {
-                                DetailRescanError::IdentityUnavailable
+                                DetailRescanError::AccessDenied
                             } else {
                                 DetailRescanError::IdentityMismatch
                             }
@@ -1144,7 +1169,7 @@ fn denied_target_enumeration_is_still_a_failure() {
         &mut ids,
         &CancellationToken::new(),
     );
-    assert_eq!(result.unwrap_err(), DetailRescanError::IdentityUnavailable);
+    assert_eq!(result.unwrap_err(), DetailRescanError::AccessDenied);
     released(&probe);
 }
 
@@ -1192,4 +1217,215 @@ fn streamed_fallback_file_facts_keep_size_without_hard_link_or_allocation_claims
     assert_eq!(probe.native_lengths.load(Ordering::SeqCst), 0);
     assert_eq!(result.rows.len(), 1);
     released(&probe);
+}
+
+#[test]
+fn size_browser_counts_two_admitted_volumes_once_and_retains_exclusions() {
+    let (_temp, root) = fixture();
+    let logical = root.join("Users");
+    let data = root.join("Data");
+    let alias = data.join("Users");
+    let outside = root.join("external");
+    for path in [&logical, &data, &alias, &outside] {
+        fs::create_dir(path).unwrap();
+    }
+    fs::write(logical.join("user-file"), b"1234567").unwrap();
+    // A controlled namespace fixture models two firmlink entrances to one native directory.
+    // The alternate entrance has the same content and native identity; its traversal must stop.
+    fs::write(alias.join("user-file"), b"1234567").unwrap();
+    fs::write(data.join("unique"), b"12345678901").unwrap();
+    fs::write(root.join("system-file"), b"1234567890123").unwrap();
+    fs::write(outside.join("excluded-file"), vec![0; 1000]).unwrap();
+    let denied = root.join("denied");
+    fs::create_dir(&denied).unwrap();
+    let expected = [
+        &logical.join("user-file"),
+        &data.join("unique"),
+        &root.join("system-file"),
+    ]
+    .into_iter()
+    .map(|p| u128::from(fs::metadata(p).unwrap().len()))
+    .sum::<u128>();
+    assert_eq!(expected, 31);
+    let (scan_id, observed) = source(&root);
+    let probe = Arc::new(Probe::default());
+    let mut platform = ProbedPlatform::new(Arc::clone(&probe));
+    platform.volume_prefixes.insert(logical.clone(), 100);
+    platform.volume_prefixes.insert(data.clone(), 100);
+    platform.volume_prefixes.insert(outside.clone(), 200);
+    platform
+        .child_io_errors
+        .insert(denied.clone(), std::io::ErrorKind::PermissionDenied);
+    let cancel = CancellationToken::new();
+    let logical_metadata = platform
+        .admit_root(&ScanRoot::new(&logical).unwrap(), &cancel)
+        .unwrap()
+        .metadata;
+    let data_metadata = platform
+        .admit_root(&ScanRoot::new(&data).unwrap(), &cancel)
+        .unwrap()
+        .metadata;
+    platform
+        .aliases
+        .insert(alias.clone(), logical_metadata.clone());
+    let mut scanner = DetailRescanner::new(
+        platform,
+        ScanResourceLimits {
+            max_frontier_entries: 8,
+            ..limits()
+        },
+    )
+    .with_size_browser();
+    scanner.scope_override = Some(volume_scope::VolumeScope {
+        data: Some(data_metadata),
+        aliases: [(alias.clone(), logical_metadata)].into_iter().collect(),
+        unverified_logical: Default::default(),
+    });
+    let mut ids = DetailEntryIdAllocator::new(scan_id.clone()).unwrap();
+    let listing = scanner
+        .rescan_direct_children(request(&scan_id, &observed), &mut ids, &cancel)
+        .unwrap();
+    assert_eq!(listing.rows.len(), fs::read_dir(&root).unwrap().count());
+    for (path, reason) in [
+        (&outside, ReasonCode::UnsupportedFilesystem),
+        (&denied, ReasonCode::StrictReadOnly),
+    ] {
+        let row = listing
+            .rows
+            .iter()
+            .find(|row| row.display_path == path.display().to_string())
+            .unwrap();
+        assert_eq!(row.logical_bytes, EvidenceValue::Unknown { reason });
+        assert!(row.executable_native_locator().unwrap().is_none());
+    }
+    let mut observations = Vec::new();
+    let complete = scanner
+        .rescan_logical_with_directory_observations(
+            request(&scan_id, &observed),
+            &mut ids,
+            &cancel,
+            |_| {},
+            |o| observations.push(o),
+        )
+        .unwrap();
+    assert_eq!(
+        complete.aggregate.apparent_logical_bytes,
+        EvidenceValue::LowerBound {
+            value: DecimalU128::new(expected),
+            reason: ReasonCode::IncompleteStreamCoverage
+        }
+    );
+    let data_row = complete
+        .rows
+        .iter()
+        .find(|row| row.display_path == data.display().to_string())
+        .unwrap();
+    assert_eq!(data_row.logical_bytes, known_u128(11));
+    let users = complete
+        .rows
+        .iter()
+        .find(|row| row.display_path == logical.display().to_string())
+        .unwrap();
+    assert_eq!(users.logical_bytes, known_u128(7));
+    let subrequest = DetailRescanRequest {
+        source_directory_identity: users.identity.as_ref().unwrap(),
+        directory_locator: users.executable_native_locator().unwrap().unwrap(),
+        ..request(&scan_id, &observed)
+    };
+    assert_eq!(
+        scanner
+            .rescan_direct_children(subrequest, &mut ids, &cancel)
+            .unwrap()
+            .rows
+            .len(),
+        1
+    );
+    // Strict inventories and content authority do not inherit the size browser's mount scope.
+    assert_eq!(
+        scanner.observe_direct_children(subrequest, &mut ids, &cancel),
+        Err(DetailRescanError::MountChanged)
+    );
+    let data_request = DetailRescanRequest {
+        source_directory_identity: data_row.identity.as_ref().unwrap(),
+        directory_locator: data_row.executable_native_locator().unwrap().unwrap(),
+        ..request(&scan_id, &observed)
+    };
+    let data_listing = scanner
+        .rescan_direct_children(data_request, &mut ids, &cancel)
+        .unwrap();
+    let alias_row = data_listing
+        .rows
+        .iter()
+        .find(|row| row.display_path == alias.display().to_string())
+        .unwrap();
+    assert_eq!(
+        alias_row.logical_bytes,
+        EvidenceValue::NotChecked {
+            reason: ReasonCode::NotRevalidated
+        }
+    );
+    assert!(alias_row.executable_native_locator().unwrap().is_some());
+    assert!(
+        observations
+            .iter()
+            .any(|o| o.identity == *users.identity.as_ref().unwrap())
+    );
+    released(&probe);
+}
+
+#[test]
+fn verified_alias_replacement_or_missing_identity_fails_closed() {
+    let (_temp, root) = fixture();
+    let cancel = CancellationToken::new();
+    let platform = HostPlatformScanner::new();
+    let mut metadata = platform
+        .admit_root(&ScanRoot::new(&root).unwrap(), &cancel)
+        .unwrap()
+        .metadata;
+    let scope = volume_scope::VolumeScope {
+        aliases: [(root.clone(), metadata.clone())].into_iter().collect(),
+        ..Default::default()
+    };
+    assert!(scope.is_counted_alias(&metadata).unwrap());
+    metadata.identity = None;
+    assert_eq!(
+        scope.is_counted_alias(&metadata),
+        Err(DetailRescanError::IdentityMismatch)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn native_socket_exclusion_does_not_claim_a_foreign_volume() {
+    use std::os::unix::{fs::FileTypeExt, net::UnixListener};
+    let (_temp, root) = fixture();
+    let socket = root.join("socket");
+    let _listener = UnixListener::bind(&socket).unwrap();
+    assert!(
+        fs::symlink_metadata(&socket)
+            .unwrap()
+            .file_type()
+            .is_socket()
+    );
+    let (scan_id, source) = source(&root);
+    let detail = DetailRescanner::new(HostPlatformScanner::new(), limits())
+        .with_size_browser()
+        .rescan_direct_children(
+            request(&scan_id, &source),
+            &mut DetailEntryIdAllocator::new(scan_id.clone()).unwrap(),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+    let row = detail
+        .rows
+        .iter()
+        .find(|row| row.display_path == socket.display().to_string())
+        .unwrap();
+    assert_eq!(
+        row.logical_bytes,
+        EvidenceValue::Unknown {
+            reason: ReasonCode::AdapterCapabilityAbsent
+        }
+    );
+    assert!(row.executable_native_locator().unwrap().is_none());
 }

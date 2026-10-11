@@ -178,7 +178,8 @@ enum Commands {
     Scan {
         /// Browse directories with live paths and file sizes, or show --large-files/--duplicates results.
         /// Reuse this session's size results while browsing; press r to rescan the current directory.
-        /// Child permission denials and other volumes leave incomplete directory totals.
+        /// Ordinary macOS browsing of / includes System and Data with verified alias deduplication.
+        /// Unreadable entries and excluded volumes stay visible with reasons.
         #[arg(long)]
         tui: bool,
         /// Rank ordinary files by size; report-only unless explicitly selected in --tui.

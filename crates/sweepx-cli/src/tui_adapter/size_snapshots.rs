@@ -16,6 +16,7 @@ struct LiveValue {
     bytes: sweepx_model::ByteValue,
     sequence: u128,
     cost: usize,
+    incomplete_reasons: Vec<sweepx_model::ReasonCode>,
 }
 
 /// Separate, bounded advisory progress. Eviction admits newly scanned directories after the
@@ -46,7 +47,9 @@ impl LiveSizeSnapshots {
         // Include both owned key copies, root strings, both indexes and their allocation overhead.
         let cost = (std::mem::size_of::<(Key, LiveValue)>() + std::mem::size_of::<(u128, Key)>())
             * 2
-            + key.root.as_str().len() * 2;
+            + key.root.as_str().len() * 2
+            + observation.aggregate.coverage.incomplete_reasons.len()
+                * std::mem::size_of::<sweepx_model::ReasonCode>();
         if cost > MAX_BYTES {
             return;
         }
@@ -76,6 +79,7 @@ impl LiveSizeSnapshots {
                 },
                 sequence,
                 cost,
+                incomplete_reasons: observation.aggregate.coverage.incomplete_reasons.clone(),
             },
         );
         self.bytes += cost;
@@ -94,6 +98,7 @@ impl LiveSizeSnapshots {
                 Some(sweepx_tui::LiveDirectorySize {
                     identity: identity.clone(),
                     bytes: value.bytes.clone(),
+                    incomplete_reasons: value.incomplete_reasons.clone(),
                 })
             })
             .collect()
@@ -133,11 +138,13 @@ impl Key {
 /// One bounded generation of historical directory sizes for ordinary TUI navigation.
 pub(super) struct SizeSnapshots {
     values: HashMap<Key, DirectoryAggregate>,
+    order: BTreeMap<(u128, u128), (Key, usize)>,
+    sequence: u128,
     bytes: usize,
 }
 
 impl SizeSnapshots {
-    /// Retains a completed observation only with known native keys and available capacity.
+    /// Retains larger completed native directories; equal sizes favor later completed parents.
     pub(super) fn insert(&mut self, observation: DirectorySizeObservation) {
         let Some(key) = Key::from_identity(&observation.identity) else {
             return;
@@ -149,7 +156,8 @@ impl SizeSnapshots {
         // Include owned strings, reason vectors, map overhead and both key/value storage. The
         // second cap prevents unusually long scan IDs from defeating the directory-count cap.
         let cost = std::mem::size_of::<(Key, DirectoryAggregate)>() * 2
-            + key.root.to_string().len()
+            + std::mem::size_of::<((u128, u128), (Key, usize))>() * 2
+            + key.root.as_str().len() * 2
             + aggregate.scan_id.len()
             + aggregate.directory_identity.len()
             + aggregate.coverage.incomplete_reasons.len()
@@ -168,20 +176,46 @@ impl SizeSnapshots {
                 }
                 sweepx_model::FieldProvenance::Unknown { .. } => 0,
             };
-        if self.values.contains_key(&key)
-            || self.values.len() >= MAX_DIRECTORIES
-            || self.bytes.saturating_add(cost) > MAX_BYTES
-        {
+        if self.values.contains_key(&key) || cost > MAX_BYTES {
             return;
         }
+        let Some(sequence) = self.sequence.checked_add(1) else {
+            return;
+        };
+        self.sequence = sequence;
+        let rank = match aggregate.apparent_logical_bytes {
+            sweepx_model::EvidenceValue::Known { value }
+            | sweepx_model::EvidenceValue::LowerBound { value, .. } => value.0,
+            _ => 0, // Storage priority only; missing evidence never becomes a zero-size fact.
+        };
+        let priority = (rank, sequence);
+        // Parents contain their counted descendants. Size priority protects enclosing and large
+        // directories across millions of tiny Data leaves; completion order resolves size ties.
+        while self.values.len() >= MAX_DIRECTORIES || self.bytes.saturating_add(cost) > MAX_BYTES {
+            if self
+                .order
+                .first_key_value()
+                .is_none_or(|(minimum, _)| *minimum >= priority)
+            {
+                return;
+            }
+            let Some((_, (evicted, cost))) = self.order.pop_first() else {
+                return;
+            };
+            self.values.remove(&evicted);
+            self.bytes -= cost;
+        }
         self.bytes += cost;
+        self.order.insert(priority, (key.clone(), cost));
         self.values.insert(key, aggregate);
     }
 
     /// Publishes a successful traversal's staged sizes; existing scan-time observations survive.
-    pub(super) fn merge(&mut self, staged: Self) {
-        for (key, aggregate) in staged.values {
-            self.insert_value(key, aggregate);
+    pub(super) fn merge(&mut self, mut staged: Self) {
+        while let Some((_, (key, _))) = staged.order.pop_first() {
+            if let Some(aggregate) = staged.values.remove(&key) {
+                self.insert_value(key, aggregate);
+            }
         }
     }
 
@@ -189,7 +223,14 @@ impl SizeSnapshots {
     /// Returns whether the target's recursive size was retained with the same direct-child count.
     pub(super) fn apply(&self, detail: &mut DetailRescanResult) -> bool {
         for row in &mut detail.rows {
-            if row.object_type != ObjectType::Directory {
+            if row.object_type != ObjectType::Directory
+                || matches!(
+                    row.logical_bytes,
+                    sweepx_model::EvidenceValue::NotChecked {
+                        reason: sweepx_model::ReasonCode::NotRevalidated
+                    }
+                )
+            {
                 continue;
             }
             if let Some(size) = row
@@ -315,11 +356,52 @@ mod tests {
         assert!(!snapshots.values.is_empty());
         assert!(snapshots.values.len() <= MAX_DIRECTORIES);
         assert!(snapshots.bytes <= MAX_BYTES);
-        let before = (snapshots.values.len(), snapshots.bytes);
+        assert_eq!(snapshots.values.len(), snapshots.order.len());
+        assert!(
+            !snapshots
+                .values
+                .contains_key(&Key::from_identity(&observation(2).identity).unwrap())
+        );
         let mut staged = SizeSnapshots::default();
         staged.insert(observation(40_003));
         snapshots.merge(staged);
-        assert_eq!((snapshots.values.len(), snapshots.bytes), before);
+        assert!(
+            snapshots
+                .values
+                .contains_key(&Key::from_identity(&observation(40_003).identity).unwrap())
+        );
+        assert_eq!(snapshots.values.len(), snapshots.order.len());
+        assert!(snapshots.bytes <= MAX_BYTES);
+    }
+
+    #[test]
+    fn large_directories_and_late_parents_survive_small_leaf_pressure_and_publication() {
+        let mut staged = SizeSnapshots::default();
+        let mut large = observation(2);
+        large.aggregate.apparent_logical_bytes = EvidenceValue::Known {
+            value: DecimalU128::new(10_000),
+        };
+        let large_key = Key::from_identity(&large.identity).unwrap();
+        staged.insert(large);
+        for ordinal in 3..40_003 {
+            staged.insert(observation(ordinal));
+        }
+        assert!(staged.values.contains_key(&large_key));
+        let mut parent = observation(40_003);
+        parent.aggregate.apparent_logical_bytes = EvidenceValue::Known {
+            value: DecimalU128::new(100_000),
+        };
+        let parent_key = Key::from_identity(&parent.identity).unwrap();
+        staged.insert(parent);
+        let mut published = SizeSnapshots::default();
+        published.merge(staged);
+        for ordinal in 40_004..80_004 {
+            published.insert(observation(ordinal));
+        }
+        assert!(published.values.contains_key(&large_key));
+        assert!(published.values.contains_key(&parent_key));
+        assert_eq!(published.values.len(), published.order.len());
+        assert!(published.bytes <= MAX_BYTES);
     }
 
     #[test]

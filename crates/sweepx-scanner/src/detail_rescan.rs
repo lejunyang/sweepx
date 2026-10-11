@@ -23,6 +23,7 @@ use sweepx_platform::{
 use thiserror::Error;
 
 mod file_content;
+mod volume_scope;
 pub use file_content::{FileContentError, FileContentRequest};
 #[cfg(all(
     test,
@@ -192,6 +193,9 @@ pub enum DetailRescanError {
     InvalidRequest,
     #[error("required native identity evidence is unavailable")]
     IdentityUnavailable,
+    /// The native operation explicitly denied read access, rather than losing identity evidence.
+    #[error("read permission denied")]
+    AccessDenied,
     #[error("a reopened filesystem object no longer matches its recorded identity")]
     IdentityMismatch,
     #[error("the reopened target crossed or changed its recorded mount")]
@@ -216,13 +220,17 @@ enum TargetTraversal {
 
 /// Scanner-owned, read-only targeted rescans.
 ///
-/// Only the lossless native root in `NativeLocatorEvidence` is admitted as a root. Every
+/// Strict operations admit only the lossless root in `NativeLocatorEvidence`. Read-only size
+/// browsing can independently admit macOS Data and verify its native aliases. Every
 /// descendant component is then reopened relative to the retained parent handle with
 /// `inspect_bound_child_with_mount_identity`; no display path is accepted as input or used to
 /// regain authority.
 pub struct DetailRescanner<P> {
     platform: P,
     limits: ScanResourceLimits,
+    size_browser: bool,
+    #[cfg(test)]
+    scope_override: Option<volume_scope::VolumeScope>,
 }
 
 impl<P> DetailRescanner<P>
@@ -230,7 +238,21 @@ where
     P: PlatformScanner,
 {
     pub fn new(platform: P, limits: ScanResourceLimits) -> Self {
-        Self { platform, limits }
+        Self {
+            platform,
+            limits,
+            size_browser: false,
+            #[cfg(test)]
+            scope_override: None,
+        }
+    }
+
+    /// Enables read-only size browsing with visible exclusions. On macOS, a captured `/` root
+    /// additionally admits its Data volume and verifies firmlink aliases before deduplication.
+    /// Other mounts remain excluded. This does not change cleanup or strict inventory policy.
+    pub fn with_size_browser(mut self) -> Self {
+        self.size_browser = true;
+        self
     }
 
     /// Observes one fixed native child without enumerating siblings or following links.
@@ -244,7 +266,7 @@ where
         cancel: &CancellationToken,
     ) -> Result<ScannedEntry, DetailRescanError> {
         self.validate_request(&request, ids)?;
-        let reopened = self.reopen_target(&request, cancel)?;
+        let reopened = self.reopen_target(&request, cancel, false)?;
         let child = DirectoryEntryRecord::from_parent_and_name(
             &reopened.target_metadata.path,
             name.clone(),
@@ -311,7 +333,7 @@ where
             return Err(DetailRescanError::Cancelled);
         }
 
-        let reopened = self.reopen_target(&request, cancel)?;
+        let reopened = self.reopen_target(&request, cancel, false)?;
         let observed_root = reopened.observed_root.clone();
         let observed_directory = reopened.observed_directory.clone();
         let (rows, aggregate) = self.scan_target_directory(
@@ -346,7 +368,7 @@ where
         if cancel.is_cancelled() {
             return Err(DetailRescanError::Cancelled);
         }
-        let reopened = self.reopen_target(&request, cancel)?;
+        let reopened = self.reopen_target(&request, cancel, false)?;
         Ok((reopened.observed_root, reopened.observed_directory))
     }
 
@@ -448,7 +470,8 @@ where
             return Err(DetailRescanError::Cancelled);
         }
 
-        let reopened = self.reopen_target(&request, cancel)?;
+        let reopened =
+            self.reopen_target(&request, cancel, mode == TargetTraversal::RecursiveLogical)?;
         let observed_root = reopened.observed_root.clone();
         let observed_directory = reopened.observed_directory.clone();
         let (rows, aggregate) =
@@ -475,7 +498,7 @@ where
         if cancel.is_cancelled() {
             return Err(DetailRescanError::Cancelled);
         }
-        let reopened = self.reopen_target(&request, cancel)?;
+        let reopened = self.reopen_target(&request, cancel, true)?;
         let observed_root = reopened.observed_root.clone();
         let observed_directory = reopened.observed_directory.clone();
         let (rows, aggregate) = self.scan_target_directory(
@@ -508,7 +531,7 @@ where
         if cancel.is_cancelled() {
             return Err(DetailRescanError::Cancelled);
         }
-        let reopened = self.reopen_target(&request, cancel)?;
+        let reopened = self.reopen_target(&request, cancel, false)?;
         self.scan_target_directory(
             &request,
             reopened,
@@ -561,6 +584,7 @@ where
         &self,
         request: &DetailRescanRequest<'_>,
         cancel: &CancellationToken,
+        size_scope: bool,
     ) -> Result<ReopenedTarget<P::DirectoryHandle>, DetailRescanError> {
         if self.limits.max_frontier_entries == 0 {
             return Err(DetailRescanError::ResourceLimit);
@@ -594,6 +618,11 @@ where
             &root_metadata,
             request.source_root_identity,
         )?;
+        let scope = if size_scope {
+            self.volume_scope(&root_metadata, cancel)?
+        } else {
+            volume_scope::VolumeScope::default()
+        };
         let observed_root_component =
             native_path_component(request.source_root_identity, &root_metadata);
         let observed_root_locator = NativeLocatorEvidence {
@@ -623,6 +652,7 @@ where
                     parent_reopen_recipe: Vec::new(),
                     entry: observed_root_component,
                 },
+                scope,
             });
         }
 
@@ -669,7 +699,7 @@ where
                 identity_from_component(expected, request.source_root_identity)
             };
             validate_expected_directory(expected, &opened.metadata, &expected_identity)?;
-            require_same_mount(&self.platform, &root_metadata, &opened.metadata)?;
+            scope.require_admitted_mount(&self.platform, &root_metadata, &opened.metadata)?;
             let observed_identity = expected_identity;
             let observed_component = native_path_component(&observed_identity, &opened.metadata);
             current_path = opened.metadata.path.clone();
@@ -704,7 +734,27 @@ where
             observed_root,
             observed_directory,
             observed_locator,
+            scope,
         })
+    }
+
+    fn volume_scope(
+        &self,
+        root: &EntryMetadata,
+        cancel: &CancellationToken,
+    ) -> Result<volume_scope::VolumeScope, DetailRescanError> {
+        #[cfg(test)]
+        if let Some(scope) = &self.scope_override {
+            return Ok(scope.clone());
+        }
+        #[cfg(target_os = "macos")]
+        if self.size_browser && root.path == Path::new("/") && self.limits.max_frontier_entries < 3
+        {
+            // Root plus two temporary alias-admission capabilities. All scope handles are
+            // released before DFS starts, so they never accumulate with retained ancestors.
+            return Err(DetailRescanError::ResourceLimit);
+        }
+        volume_scope::VolumeScope::prepare(&self.platform, root, self.size_browser, cancel)
     }
 
     fn scan_target_directory(
@@ -730,6 +780,7 @@ where
             target_metadata,
             target_handle,
             observed_locator,
+            scope,
             ..
         } = reopened;
         if self.limits.max_retained_aggregates == 0 {
@@ -822,11 +873,11 @@ where
                             detail_directory_admission(self.limits.max_frontier_entries, 1),
                         ),
                     )?;
-                    let walked =
-                        restrict_detail_child_to_mount(&self.platform, &root_metadata, walked)?;
+                    let walked = scope.restrict_child(&self.platform, &root_metadata, walked)?;
 
                     match walked {
                         WalkEntry::Directory(opened) => {
+                            let alias = !strict && scope.is_counted_alias(&opened.metadata)?;
                             if direct_directory_aggregates.len().saturating_add(1)
                                 >= self.limits.max_retained_aggregates
                             {
@@ -868,6 +919,13 @@ where
                                 ),
                                 complete_coverage(),
                             ));
+                            if alias {
+                                rows.last_mut().expect("retained alias").logical_bytes =
+                                    EvidenceValue::NotChecked {
+                                        reason: ReasonCode::NotRevalidated,
+                                    };
+                                continue;
+                            }
                             direct_directory_aggregates
                                 .insert(direct_child_id.clone(), TargetAggregateState::new());
                             if recursive {
@@ -887,7 +945,7 @@ where
                                     logical_only: mode == TargetTraversal::RecursiveLogical,
                                 };
                                 self.scan_nested_directories(
-                                    &root_metadata,
+                                    (&root_metadata, &scope),
                                     NestedDirectory {
                                         path: opened.metadata.path,
                                         handle: opened.handle,
@@ -984,7 +1042,23 @@ where
                             }
                             // A mount/reparse boundary makes totals incomplete, but it must not
                             // erase safe siblings that are already available for browsing.
-                            aggregate.mark_incomplete(boundary.reason);
+                            let reason = detail_boundary_reason(&boundary, self.size_browser);
+                            aggregate.mark_incomplete(reason.clone());
+                            if self.size_browser {
+                                note_retained_direct_child(
+                                    &mut aggregate,
+                                    &rows,
+                                    request.max_rows,
+                                    &self.limits,
+                                )?;
+                                rows.push(excluded_row(
+                                    request,
+                                    &current,
+                                    &boundary.path,
+                                    reason,
+                                    ids,
+                                )?);
+                            }
                         }
                         WalkEntry::Error(error) => {
                             if strict {
@@ -996,7 +1070,22 @@ where
                             ) {
                                 return Err(map_walk_error(error.kind));
                             }
-                            aggregate.mark_incomplete(error.reason);
+                            aggregate.mark_incomplete(error.reason.clone());
+                            if self.size_browser {
+                                note_retained_direct_child(
+                                    &mut aggregate,
+                                    &rows,
+                                    request.max_rows,
+                                    &self.limits,
+                                )?;
+                                rows.push(excluded_row(
+                                    request,
+                                    &current,
+                                    &error.path,
+                                    error.reason,
+                                    ids,
+                                )?);
+                            }
                         }
                         // Detail rescan does not use the cache; treat a cached file as an invariant
                         // violation rather than silently accepting it.
@@ -1073,13 +1162,14 @@ where
 
     fn scan_nested_directories(
         &self,
-        root_metadata: &EntryMetadata,
+        scope_binding: (&EntryMetadata, &volume_scope::VolumeScope),
         initial: NestedDirectory<P::DirectoryHandle>,
         ids: &mut DetailEntryIdAllocator,
         cancel: &CancellationToken,
         aggregates: &mut RecursiveAggregateContext<'_>,
         progress: &mut RecursiveProgressContext<'_, '_, '_>,
     ) -> Result<(), DetailRescanError> {
+        let (root_metadata, scope) = scope_binding;
         // The outer target owns one capability. Each frame keeps one ancestor cursor and at
         // most one bounded batch of uninspected tokens; siblings never own retained handles.
         // This is iterative so arbitrary filesystem depth cannot exhaust the Rust call stack.
@@ -1187,7 +1277,7 @@ where
                         ),
                     )?
                 };
-                let walked = restrict_detail_child_to_mount(&self.platform, root_metadata, walked)?;
+                let walked = scope.restrict_child(&self.platform, root_metadata, walked)?;
                 let entry_id = ids.allocate()?;
                 if let Some(size) = &mut frame.size {
                     size.note_entry()?;
@@ -1207,7 +1297,9 @@ where
                         | WalkEntry::File(_)
                         | WalkEntry::Link(_)
                         | WalkEntry::CachedFile(_)
-                ) {
+                ) || (self.size_browser
+                    && matches!(walked, WalkEntry::Boundary(_) | WalkEntry::Error(_)))
+                {
                     if let Some(size) = &mut frame.size {
                         size.note_direct_child()?;
                     }
@@ -1221,6 +1313,12 @@ where
                 }
                 match walked {
                     WalkEntry::Directory(opened) => {
+                        if scope.is_counted_alias(&opened.metadata)? {
+                            // The same native directory is traversed through its verified logical
+                            // firmlink. Keep its direct-list row, but never accumulate it twice.
+                            progress.clock.changed = Some(current.direct_child_id.clone());
+                            continue;
+                        }
                         let identity = scan_object_identity(
                             entry_id,
                             current.identity.scan_root_id.clone(),
@@ -1260,11 +1358,12 @@ where
                         ) {
                             return Err(map_boundary(&boundary.kind));
                         }
+                        let reason = detail_boundary_reason(&boundary, self.size_browser);
                         if let Some(size) = &mut frame.size {
-                            size.mark_incomplete(boundary.reason.clone());
+                            size.mark_incomplete(reason.clone());
                         }
-                        aggregates.target.mark_incomplete(boundary.reason.clone());
-                        direct.mark_incomplete(boundary.reason);
+                        aggregates.target.mark_incomplete(reason.clone());
+                        direct.mark_incomplete(reason);
                     }
                     WalkEntry::Error(error) => {
                         if matches!(
@@ -1665,6 +1764,98 @@ struct ReopenedTarget<D> {
     observed_root: ScannedEntry,
     observed_directory: ScannedEntry,
     observed_locator: NativeLocatorEvidence,
+    scope: volume_scope::VolumeScope,
+}
+
+// Exclusions are presentation leaves with scan-scoped IDs but explicitly unknown native
+// identities and no locator. They cannot become navigation or Trash authority.
+fn excluded_row<D>(
+    request: &DetailRescanRequest<'_>,
+    parent: &TargetDirectory<D>,
+    path: &Path,
+    reason: ReasonCode,
+    ids: &mut DetailEntryIdAllocator,
+) -> Result<ScannedEntry, DetailRescanError> {
+    let child = DirectoryEntryRecord::from_parent_and_name(
+        &parent.path,
+        native_basename_for_exclusion(path)?,
+    )
+    .map_err(|_| DetailRescanError::InvalidRequest)?;
+    if child.path != path {
+        return Err(DetailRescanError::InvalidRequest);
+    }
+    let provenance = sweepx_model::FieldProvenance::Unknown {
+        reason: reason.clone(),
+    };
+    Ok(ScannedEntry {
+        scan_id: request.source_scan_id.clone(),
+        identity: Some(ScanObjectIdentity {
+            entry_id: ids.allocate()?,
+            scan_root_id: request.source_root_identity.entry_id.clone(),
+            parent_id: Some(parent.identity.entry_id.clone()),
+            platform_file_identity: IdentityEvidence::unknown(reason.clone()),
+            filesystem_object_domain_identity: IdentityEvidence::unknown(reason.clone()),
+            volume_or_mount_identity: IdentityEvidence::unknown(reason.clone()),
+        }),
+        native_locator: None,
+        display_path: path.to_string_lossy().into_owned(),
+        native_basename: child.file_name,
+        object_type: ObjectType::Other,
+        logical_bytes: EvidenceValue::Unknown {
+            reason: reason.clone(),
+        },
+        allocated_bytes: EvidenceValue::Unknown {
+            reason: reason.clone(),
+        },
+        hard_link_count: None,
+        reclaimable_estimate: EvidenceValue::Unknown {
+            reason: reason.clone(),
+        },
+        metadata_fingerprint: String::new(),
+        coverage: Coverage {
+            state: CoverageState::Incomplete,
+            complete: false,
+            details_lost: false,
+            incomplete_reasons: vec![reason],
+            provenance: provenance.clone(),
+        },
+        provenance,
+    })
+}
+
+fn detail_boundary_reason(boundary: &BoundaryRecord, size_browser: bool) -> ReasonCode {
+    if size_browser
+        && boundary.reason == ReasonCode::UnsupportedFilesystem
+        && boundary.kind != BoundaryKind::Mount
+    {
+        // Sockets, special files and unsupported reparse objects are not other volumes.
+        ReasonCode::AdapterCapabilityAbsent
+    } else {
+        boundary.reason.clone()
+    }
+}
+
+fn native_basename_for_exclusion(
+    path: &Path,
+) -> Result<sweepx_model::NativeName, DetailRescanError> {
+    let name = path.file_name().ok_or(DetailRescanError::InvalidRequest)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        Ok(sweepx_model::NativeName::unix(name.as_bytes()))
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        Ok(sweepx_model::NativeName::windows_utf16(
+            name.encode_wide().collect::<Vec<_>>(),
+        ))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = name;
+        Err(DetailRescanError::Unavailable)
+    }
 }
 
 fn component_matches_identity(
@@ -1843,6 +2034,7 @@ fn map_platform_error(error: PlatformError) -> DetailRescanError {
         }
         PlatformError::RootRejected(_) => DetailRescanError::IdentityMismatch,
         PlatformError::Io { io_kind, .. } => match io_kind {
+            Some(std::io::ErrorKind::PermissionDenied) => DetailRescanError::AccessDenied,
             Some(std::io::ErrorKind::NotFound) => DetailRescanError::IdentityMismatch,
             Some(std::io::ErrorKind::Interrupted) => DetailRescanError::Cancelled,
             _ => DetailRescanError::IdentityUnavailable,
@@ -1858,8 +2050,8 @@ fn map_boundary(kind: &BoundaryKind) -> DetailRescanError {
         BoundaryKind::Mount => DetailRescanError::MountChanged,
         BoundaryKind::ResourceLimit => DetailRescanError::ResourceLimit,
         BoundaryKind::Cancelled => DetailRescanError::Cancelled,
-        // Match the walk-error mapping: a denied subtree leaves its identity unavailable.
-        BoundaryKind::AccessDenied => DetailRescanError::IdentityUnavailable,
+        // Preserve an explicit permission denial rather than folding it into missing identity.
+        BoundaryKind::AccessDenied => DetailRescanError::AccessDenied,
         BoundaryKind::OtherFilesystem => DetailRescanError::Unavailable,
     }
 }
@@ -1870,9 +2062,8 @@ fn map_walk_error(kind: ErrorKind) -> DetailRescanError {
         ErrorKind::Interrupted => DetailRescanError::Cancelled,
         ErrorKind::ResourceLimit => DetailRescanError::ResourceLimit,
         ErrorKind::Unsupported => DetailRescanError::Unavailable,
-        ErrorKind::AccessDenied | ErrorKind::InvalidInput | ErrorKind::Io => {
-            DetailRescanError::IdentityUnavailable
-        }
+        ErrorKind::AccessDenied => DetailRescanError::AccessDenied,
+        ErrorKind::InvalidInput | ErrorKind::Io => DetailRescanError::IdentityUnavailable,
     }
 }
 

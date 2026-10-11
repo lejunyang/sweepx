@@ -32,6 +32,8 @@ CLI 和 TUI 支持 `zh-CN` 与 `en-US`。它们会从 locale 环境自动选择�
 
 库调用扫描与分类只需 `sweepx-core`，不依赖终端浏览器。CLI 在 `tui_adapter` 模块连接 `sweepx-scanner` 和 `sweepx-tui`；身份重验、取消和扫描资源限制继续由 scanner 负责。
 
+macOS 上 `sweepx scan --tui /` 统一统计系统卷和数据卷。`/Users`、`/Applications` 等入口保留可浏览；系统映射的重复入口经原生身份核验后只计一次，并标明“已从其他路径统计”。无权限、消失和其他卷的条目保留原因，缺少大小显示 `—`；子目录列表、大小和降序排列继续实时更新。详见[两卷扫描与去重核验](docs/architecture/scan-tui-volumes-2026-10-11.md)。
+
 npx 工具可用 `sweepx npx-cache` 查看实际版本与包含依赖的安装大小；`--package NAME --older-versions` 预览保留最高已安装版本的计划，加 `--trash` 放入回收站，也可用 `--entry ID` 选择整套安装。活动或原生校验不可用时拒绝回收；多包安装不能拆删。详见 [CLI 说明](site/cli.md#npx-cache)。
 
 Chrome 基础模型可用 `sweepx browser-model` 查看版本；`--trash` 在 Chrome 完全退出后回收已识别载荷，`--disable-download-config /absolute/new.mobileconfig` 导出专用禁用策略。该入口只生成配置文件，不自动写入或安装系统策略；安装后需在 `chrome://policy` 核验值为 1。

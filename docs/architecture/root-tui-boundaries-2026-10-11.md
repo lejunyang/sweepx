@@ -1,5 +1,7 @@
 # Root-directory TUI boundary handling — 2026-10-11
 
+Historical boundary-only repair: the System-only `/` scope below is superseded for ordinary macOS TUI browsing by [System + Data admission and verified alias deduplication](scan-tui-volumes-2026-10-11.md).
+
 `scan --tui /` could fail before displaying any children. Detail traversal treated a newly
 observed child on another mount as a change to the captured target. macOS APFS paths such as
 `/Library` and `/Users` can share the reported device with `/` while having a different native

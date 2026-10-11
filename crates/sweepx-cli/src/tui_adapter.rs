@@ -121,7 +121,11 @@ fn live_tui_detail_rescan_provider(
     let limits =
         detail_limits_for_mode(sweepx_platform::ScanResourceLimits::default(), logical_only);
     Ok(LiveTuiDetailRescanProvider {
-        scanner: DetailRescanner::new(HostPlatformScanner::new(), limits),
+        scanner: if logical_only {
+            DetailRescanner::new(HostPlatformScanner::new(), limits).with_size_browser()
+        } else {
+            DetailRescanner::new(HostPlatformScanner::new(), limits)
+        },
         logical_only,
         sizes: Mutex::new(Default::default()),
         live_sizes: Mutex::new(Default::default()),
@@ -140,9 +144,13 @@ fn detail_limits_for_mode(
     if logical_only {
         // Ordinary size browsing streams descendant lengths without retaining file rows or
         // hard-link ledgers. Total work need not fit the full-fact inventory's 131K entry cap.
-        // Keep bounded batches, per-directory reads, visible rows and ancestor handles; users
-        // can cancel between native observations. Full-fact junk inventories retain the cap.
+        // Per-directory cumulative work also need not fit an inventory cap: a single build
+        // output directory can contain more than 131K files. Only one bounded batch is held
+        // at a time. Visible rows, batches and ancestor handles stay bounded; cancellation
+        // is checked between observations. Full-fact junk inventories retain every cap.
         limits.max_visited_entries = usize::MAX;
+        limits.max_directory_entries = usize::MAX;
+        limits.max_directory_bytes = usize::MAX;
     }
     limits
 }
@@ -345,7 +353,14 @@ impl TuiDetailRescanProvider {
                 Ok(mut detail) => {
                     if listing && live.logical_only {
                         for row in &mut detail.rows {
-                            if row.object_type == sweepx_model::ObjectType::Directory {
+                            if row.object_type == sweepx_model::ObjectType::Directory
+                                && !matches!(
+                                    row.logical_bytes,
+                                    sweepx_model::EvidenceValue::NotChecked {
+                                        reason: sweepx_model::ReasonCode::NotRevalidated
+                                    }
+                                )
+                            {
                                 row.logical_bytes = sweepx_model::EvidenceValue::NotChecked {
                                     reason: sweepx_model::ReasonCode::IncompleteStreamCoverage,
                                 };
@@ -392,6 +407,7 @@ fn map_tui_detail_rescan_error(error: DetailRescanError) -> TuiDetailRescanFailu
     match error {
         DetailRescanError::InvalidRequest => TuiDetailRescanFailure::InvalidResult,
         DetailRescanError::IdentityUnavailable => TuiDetailRescanFailure::IdentityUnavailable,
+        DetailRescanError::AccessDenied => TuiDetailRescanFailure::AccessDenied,
         DetailRescanError::IdentityMismatch => TuiDetailRescanFailure::IdentityMismatch,
         DetailRescanError::MountChanged => TuiDetailRescanFailure::MountChanged,
         DetailRescanError::SymlinkOrReparse => TuiDetailRescanFailure::SymlinkOrReparse,
@@ -520,6 +536,10 @@ mod tui_detail_rescan_provider_tests {
     fn scanner_error_mapping_is_conservative() {
         let cases = [
             (
+                DetailRescanError::AccessDenied,
+                TuiDetailRescanFailure::AccessDenied,
+            ),
+            (
                 DetailRescanError::InvalidRequest,
                 TuiDetailRescanFailure::InvalidResult,
             ),
@@ -637,6 +657,8 @@ mod tui_detail_rescan_provider_tests {
             max_retained_entries: 1,
             max_frontier_entries: 3,
             max_directory_batch_entries: 2,
+            max_directory_entries: 2,
+            max_directory_bytes: 1024,
             ..Default::default()
         };
         for logical_only in [false, true] {

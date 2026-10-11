@@ -89,6 +89,8 @@ pub struct DetailRescanRequest {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DetailRescanFailure {
+    /// Native read permission denial; retains an explicit user-visible failure reason.
+    AccessDenied,
     IdentityUnavailable,
     IdentityMismatch,
     MountChanged,
@@ -104,6 +106,7 @@ pub enum DetailRescanFailure {
 impl DetailRescanFailure {
     const fn label(self) -> &'static str {
         match self {
+            Self::AccessDenied => "permission_denied",
             Self::IdentityUnavailable => "identity_unavailable",
             Self::IdentityMismatch => "identity_mismatch",
             Self::MountChanged => "mount_changed",
@@ -158,6 +161,8 @@ pub struct LiveDirectorySize {
     pub identity: ScanObjectIdentity,
     /// Recursive byte lower bound; allocation and reclaimable space are not inferred.
     pub bytes: sweepx_model::ByteValue,
+    /// Bounded exclusion reasons encountered in this subtree; these must survive size updates.
+    pub incomplete_reasons: Vec<sweepx_model::ReasonCode>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1771,7 +1776,15 @@ impl BrowserModel {
         // window: an off-screen folder may become the largest and must move into view.
         let indices = std::iter::once(current)
             .chain(self.children_by_index[current].iter().copied())
-            .filter(|index| self.nodes[*index].entry.object_type == ObjectType::Directory)
+            .filter(|index| {
+                self.nodes[*index].entry.object_type == ObjectType::Directory
+                    && !matches!(
+                        self.nodes[*index].entry.logical_bytes,
+                        sweepx_model::EvidenceValue::NotChecked {
+                            reason: sweepx_model::ReasonCode::NotRevalidated
+                        }
+                    )
+            })
             .collect::<Vec<_>>();
         let identities = indices
             .iter()
@@ -1800,6 +1813,12 @@ impl BrowserModel {
             if self.nodes[index].entry.identity.as_ref() != Some(&sample.identity)
                 || !identity_is_known(&sample.identity)
                 || !matches!(sample.bytes, sweepx_model::EvidenceValue::LowerBound { .. })
+                || sample.incomplete_reasons.len() > 16
+                || sample
+                    .incomplete_reasons
+                    .iter()
+                    .enumerate()
+                    .any(|(i, reason)| sample.incomplete_reasons[..i].contains(reason))
                 || !seen.insert(index)
             {
                 return;
@@ -1810,17 +1829,33 @@ impl BrowserModel {
                 .as_ref()
                 .map(|aggregate| &aggregate.apparent_logical_bytes)
                 .unwrap_or(&node.entry.logical_bytes);
-            if lower_bound_bytes(&sample.bytes) < lower_bound_bytes(old) || &sample.bytes == old {
+            if lower_bound_bytes(&sample.bytes) < lower_bound_bytes(old)
+                || (&sample.bytes == old
+                    && sample
+                        .incomplete_reasons
+                        .iter()
+                        .all(|reason| node.entry.coverage.incomplete_reasons.contains(reason)))
+            {
                 continue;
             }
-            updates.push((index, sample.bytes));
+            updates.push((index, sample.bytes, sample.incomplete_reasons));
         }
         if updates.is_empty() {
             return;
         }
-        for (index, bytes) in updates {
+        for (index, bytes, reasons) in updates {
             let node = &mut self.nodes[index];
+            for reason in &reasons {
+                if !node.entry.coverage.incomplete_reasons.contains(reason) {
+                    node.entry.coverage.incomplete_reasons.push(reason.clone());
+                }
+            }
             if let Some(aggregate) = &mut node.aggregate {
+                for reason in reasons {
+                    if !aggregate.coverage.incomplete_reasons.contains(&reason) {
+                        aggregate.coverage.incomplete_reasons.push(reason);
+                    }
+                }
                 aggregate.apparent_logical_bytes = bytes.clone();
                 aggregate.arithmetic_state = ArithmeticState::LowerBound;
                 mark_coverage_in_progress(&mut aggregate.coverage);
@@ -2631,7 +2666,7 @@ fn validate_detail_rows(
             .validated_identity()
             .map_err(|_| DetailRescanFailure::InvalidResult)?
             .ok_or(DetailRescanFailure::IdentityUnavailable)?;
-        if !identity_is_known(identity)
+        if (!identity_is_known(identity) && !is_presentation_exclusion(row))
             || identity.parent_id.as_ref() != Some(&directory_identity.entry_id)
             || identity.scan_root_id != directory_identity.scan_root_id
             || !seen.insert(identity.entry_id.clone())
@@ -2660,6 +2695,31 @@ fn validate_detail_rows(
         }
     }
     Ok(())
+}
+
+// Scanner exclusions retain only list membership. Unknown native IDs must never be accepted
+// for navigable directories or mutation; tolerate them solely on visibly incomplete leaves.
+fn is_presentation_exclusion(row: &ScannedEntry) -> bool {
+    row.object_type == ObjectType::Other
+        && row.native_locator.is_none()
+        && !row.coverage.complete
+        && !row.coverage.incomplete_reasons.is_empty()
+        && matches!(
+            row.logical_bytes,
+            sweepx_model::EvidenceValue::Unknown { .. }
+        )
+        && row.identity.as_ref().is_some_and(|identity| {
+            matches!(
+                identity.platform_file_identity,
+                sweepx_model::IdentityEvidence::Unknown { .. }
+            ) && matches!(
+                identity.filesystem_object_domain_identity,
+                sweepx_model::IdentityEvidence::Unknown { .. }
+            ) && matches!(
+                identity.volume_or_mount_identity,
+                sweepx_model::IdentityEvidence::Unknown { .. }
+            )
+        })
 }
 
 fn insert_pending_node(
@@ -2812,7 +2872,12 @@ impl BrowserReducer for ReadOnlyBrowserReducer {
             BrowserAction::TogglePathDetail => model.toggle_path_detail(),
             BrowserAction::ToggleReviewPath => model.toggle_review_path(),
             BrowserAction::Refresh => {}
-            BrowserAction::TrashSelected if model.inspection.is_none() => {
+            BrowserAction::TrashSelected
+                if model.inspection.is_none()
+                    && !model
+                        .selected_row()
+                        .is_some_and(|row| is_presentation_exclusion(row.entry())) =>
+            {
                 return BrowserControl::TrashSelected;
             }
             BrowserAction::TrashSelected => {}
@@ -3235,7 +3300,12 @@ impl<P: DetailRescanProvider> DetailRescanBrowserReducer<P> {
 impl<P: DetailRescanProvider> BrowserReducer for DetailRescanBrowserReducer<P> {
     fn reduce(&self, model: &mut BrowserModel, action: BrowserAction) -> BrowserControl {
         self.complete_or_expire(model);
-        if action == BrowserAction::TrashSelected && model.inspection.is_some() {
+        if action == BrowserAction::TrashSelected
+            && (model.inspection.is_some()
+                || model
+                    .selected_row()
+                    .is_some_and(|row| is_presentation_exclusion(row.entry())))
+        {
             return BrowserControl::Continue;
         }
         if matches!(action, BrowserAction::Quit | BrowserAction::TrashSelected) {
@@ -3891,7 +3961,7 @@ fn render_browser_rows(frame: &mut Frame<'_>, area: Rect, model: &BrowserModel, 
         Constraint::Min(12),
         Constraint::Length(11),
         Constraint::Length(16),
-        Constraint::Length(18),
+        Constraint::Length(28),
     ];
     let columns = if simple {
         &simple_columns[..]
@@ -3990,10 +4060,57 @@ fn render_browser_rows(frame: &mut Frame<'_>, area: Rect, model: &BrowserModel, 
                         model.size_unit,
                     )
                 }
-                sweepx_model::EvidenceValue::NotChecked { .. } => "—".into(),
+                sweepx_model::EvidenceValue::NotChecked { .. }
+                | sweepx_model::EvidenceValue::Unknown { .. }
+                | sweepx_model::EvidenceValue::Unsupported { .. } => "—".into(),
                 _ => logical,
             };
             let status = match (value, row.detail_rescan_state().is_stale()) {
+                (
+                    sweepx_model::EvidenceValue::NotChecked {
+                        reason: sweepx_model::ReasonCode::NotRevalidated,
+                    },
+                    _,
+                ) => match model.locale {
+                    Locale::ZhCn => "已从其他路径统计",
+                    Locale::EnUs => "Counted at another path",
+                },
+                (
+                    sweepx_model::EvidenceValue::Unknown {
+                        reason: sweepx_model::ReasonCode::StrictReadOnly,
+                    },
+                    _,
+                ) => match model.locale {
+                    Locale::ZhCn => "无读取权限",
+                    Locale::EnUs => "Permission denied",
+                },
+                (
+                    sweepx_model::EvidenceValue::Unknown {
+                        reason: sweepx_model::ReasonCode::UnsupportedFilesystem,
+                    },
+                    _,
+                ) => match model.locale {
+                    Locale::ZhCn => "其他卷，未纳入扫描",
+                    Locale::EnUs => "Other volume: excluded",
+                },
+                (
+                    sweepx_model::EvidenceValue::Unknown {
+                        reason: sweepx_model::ReasonCode::AdapterCapabilityAbsent,
+                    },
+                    _,
+                ) => match model.locale {
+                    Locale::ZhCn => "不支持此类对象",
+                    Locale::EnUs => "Unsupported object type",
+                },
+                (
+                    sweepx_model::EvidenceValue::Unknown {
+                        reason: sweepx_model::ReasonCode::UnknownIdentity,
+                    },
+                    _,
+                ) => match model.locale {
+                    Locale::ZhCn => "已消失或无法确认身份",
+                    Locale::EnUs => "Gone or identity unavailable",
+                },
                 (_, true) => match model.locale {
                     Locale::ZhCn => "扫描失败",
                     Locale::EnUs => "Scan failed",
@@ -4003,7 +4120,27 @@ fn render_browser_rows(frame: &mut Frame<'_>, area: Rect, model: &BrowserModel, 
                     Locale::EnUs => "Complete",
                 },
                 (sweepx_model::EvidenceValue::LowerBound { .. }, _) => {
-                    if model.current_size_scanning() {
+                    if row
+                        .entry()
+                        .coverage
+                        .incomplete_reasons
+                        .contains(&sweepx_model::ReasonCode::StrictReadOnly)
+                    {
+                        match model.locale {
+                            Locale::ZhCn => "含无读取权限的项目",
+                            Locale::EnUs => "Contains unreadable entries",
+                        }
+                    } else if row
+                        .entry()
+                        .coverage
+                        .incomplete_reasons
+                        .contains(&sweepx_model::ReasonCode::UnsupportedFilesystem)
+                    {
+                        match model.locale {
+                            Locale::ZhCn => "含未纳入扫描的其他卷",
+                            Locale::EnUs => "Contains excluded volumes",
+                        }
+                    } else if model.current_size_scanning() {
                         match model.locale {
                             Locale::ZhCn => "统计中",
                             Locale::EnUs => "Counting",
@@ -4128,6 +4265,13 @@ fn browser_footer_text(model: &BrowserModel) -> String {
     };
     let detail = if model.progressive_navigation && model.inspection.is_none() {
         let state = match model.current_detail_rescan_state() {
+            Some(DetailRescanState::Stale {
+                failure: DetailRescanFailure::AccessDenied,
+                ..
+            }) => match model.locale {
+                Locale::ZhCn => "无读取权限",
+                Locale::EnUs => "Permission denied",
+            },
             _ if model.current_listing_waiting() => waiting_listing_label(model.locale),
             _ if model.background_directory().is_some()
                 && !matches!(
@@ -5834,6 +5978,116 @@ mod tests {
         screen
     }
 
+    #[test]
+    fn excluded_rows_are_visible_with_reasons_and_have_no_navigation_or_trash_authority() {
+        for (locale, denied_label, mount_label, alias_label) in [
+            (
+                Locale::EnUs,
+                "Permission denied",
+                "Other volume: excluded",
+                "Counted at another path",
+            ),
+            (
+                Locale::ZhCn,
+                "无读取权限",
+                "其他卷，未纳入扫描",
+                "已从其他路径统计",
+            ),
+        ] {
+            let mut model = navigation_model();
+            model.locale = locale;
+            model.enter_selected();
+            let pending = model.begin_detail_rescan_at(0).unwrap();
+            let mut rows = Vec::new();
+            for (ordinal, path, reason) in [
+                (2, "/root/denied", ReasonCode::StrictReadOnly),
+                (3, "/root/mount", ReasonCode::UnsupportedFilesystem),
+            ] {
+                let mut row = entry(path, ObjectType::Other, ordinal, 1, Some(1));
+                let identity = row.identity.as_mut().unwrap();
+                identity.platform_file_identity = IdentityEvidence::unknown(reason.clone());
+                identity.filesystem_object_domain_identity =
+                    IdentityEvidence::unknown(reason.clone());
+                identity.volume_or_mount_identity = IdentityEvidence::unknown(reason.clone());
+                row.native_locator = None;
+                row.logical_bytes = EvidenceValue::Unknown {
+                    reason: reason.clone(),
+                };
+                row.coverage = incomplete_coverage();
+                row.coverage.incomplete_reasons.push(reason);
+                rows.push(row);
+            }
+            let mut alias = entry("/root/alias", ObjectType::Directory, 4, 1, Some(1));
+            alias.logical_bytes = EvidenceValue::NotChecked {
+                reason: ReasonCode::NotRevalidated,
+            };
+            rows.push(alias);
+            let result = progressive_listing_result(&pending.request, rows);
+            model.finish_detail_rescan(pending, result);
+            let screen = navigation_screen(&model);
+            for label in [denied_label, mount_label, alias_label] {
+                assert!(screen.contains(label), "{screen}");
+            }
+            for label in ["denied", "mount"] {
+                let index = model
+                    .visible_rows()
+                    .iter()
+                    .position(|row| row.label() == label)
+                    .unwrap();
+                model.set_selected(index);
+                assert!(!model.selected_row().unwrap().can_enter());
+                assert_eq!(
+                    ReadOnlyBrowserReducer.reduce(&mut model, BrowserAction::TrashSelected),
+                    BrowserControl::Continue
+                );
+                assert!(
+                    model
+                        .detail_rescan_request(
+                            model.selected_node_index().unwrap(),
+                            DetailRescanReason::ProgressiveListing,
+                            DecimalU128::ZERO,
+                            DecimalU128::new(1)
+                        )
+                        .is_none()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn equal_live_size_still_publishes_new_permission_reason() {
+        struct Samples(Vec<LiveDirectorySize>);
+        impl DetailRescanProvider for Samples {
+            fn rescan_detail(&self, _: &DetailRescanRequest) -> DetailRescanResult {
+                unreachable!()
+            }
+            fn live_directory_sizes(&self, _: &[ScanObjectIdentity]) -> Vec<LiveDirectorySize> {
+                self.0.clone()
+            }
+        }
+        let mut model = navigation_model();
+        model.enter_selected();
+        let pending = model.begin_detail_rescan_at(0).unwrap();
+        let mut folder = entry("/root/folder", ObjectType::Directory, 2, 1, Some(1));
+        folder.logical_bytes = EvidenceValue::LowerBound {
+            value: DecimalU128::new(10),
+            reason: ReasonCode::IncompleteStreamCoverage,
+        };
+        let result = progressive_listing_result(&pending.request, vec![folder]);
+        model.finish_detail_rescan(pending, result);
+        let identity = model.visible_rows()[0].entry().identity.clone().unwrap();
+        model.update_visible_directory_sizes(&Samples(vec![LiveDirectorySize {
+            identity,
+            bytes: EvidenceValue::LowerBound {
+                value: DecimalU128::new(10),
+                reason: ReasonCode::IncompleteStreamCoverage,
+            },
+            incomplete_reasons: vec![ReasonCode::StrictReadOnly],
+        }]));
+        assert!(navigation_screen(&model).contains("Contains unreadable entries"));
+        assert!(model.visible_rows()[0].entry().coverage.details_lost);
+    }
+
     #[derive(Clone, Default)]
     struct FolderProgressGate {
         root: NavigationGate,
@@ -5936,6 +6190,7 @@ mod tests {
             .unwrap();
         let sample = |identity, value| LiveDirectorySize {
             identity,
+            incomplete_reasons: Vec::new(),
             bytes: EvidenceValue::LowerBound {
                 value: DecimalU128::new(value),
                 reason: ReasonCode::IncompleteStreamCoverage,
@@ -5994,6 +6249,7 @@ mod tests {
         model.finish_detail_rescan(pending, result);
         let sample = |identity| LiveDirectorySize {
             identity,
+            incomplete_reasons: Vec::new(),
             bytes: EvidenceValue::LowerBound {
                 value: DecimalU128::new(100),
                 reason: ReasonCode::IncompleteStreamCoverage,

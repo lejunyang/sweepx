@@ -16,6 +16,9 @@ sweepx-model = { version = "0.0.1", path = "../sweepx-model" }
 sweepx-platform = { version = "0.0.1", path = "../sweepx-platform" }
 thiserror = "2.0.16"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2.189"
+
 [dev-dependencies]
 tempfile = "3.21.0"
 
