@@ -64,13 +64,15 @@ struct DetailCallbacks<'a> {
 
 /// A source-scan allocator used by repeated detail rescans.
 ///
-/// The allocator starts after the greatest already-observed ordinal and never rewinds, including
-/// after a failed rescan. This preserves scan-scoped identity uniqueness without retaining a
-/// second copy of every entry id in the browser.
+/// The allocator descends through the upper half of the scan's ordinal namespace and never
+/// rewinds after a failed rescan. Independent queries reserve disjoint ranges before native I/O,
+/// preserving identity uniqueness without retaining a second copy of every entry ID. A manual
+/// clone copies the same cursor and must not be used as an independent allocator.
 #[derive(Debug, Clone)]
 pub struct DetailEntryIdAllocator {
     scan_id: ScanId,
     next_ordinal: Option<u128>,
+    minimum_ordinal: u128,
 }
 
 impl DetailEntryIdAllocator {
@@ -83,11 +85,32 @@ impl DetailEntryIdAllocator {
             // half, giving targeted rescans a disjoint namespace even when ordinary rows were
             // evicted before the provider was constructed.
             next_ordinal: Some(u128::MAX),
+            minimum_ordinal: DETAIL_SCAN_MIN_ORDINAL,
         })
     }
 
     pub fn scan_id(&self) -> &ScanId {
         &self.scan_id
+    }
+
+    /// Reserves a disjoint, bounded namespace for an independently running detail query.
+    ///
+    /// Allocation within the returned range needs no shared lock. Exhaustion fails closed;
+    /// a failed reservation leaves this allocator unchanged. Callers must not clone allocators
+    /// to create concurrent namespaces, since a clone retains the same cursor and range.
+    pub fn reserve_query_range(&mut self, capacity: usize) -> Result<Self, DetailRescanError> {
+        let last = self.next_ordinal.ok_or(DetailRescanError::ResourceLimit)?;
+        let first = capacity
+            .checked_sub(1)
+            .and_then(|remaining| last.checked_sub(remaining as u128))
+            .filter(|first| *first >= self.minimum_ordinal)
+            .ok_or(DetailRescanError::ResourceLimit)?;
+        self.next_ordinal = first.checked_sub(1);
+        Ok(Self {
+            scan_id: self.scan_id.clone(),
+            next_ordinal: Some(last),
+            minimum_ordinal: first,
+        })
     }
 
     pub fn reserve(&mut self, entry_id: &ScanEntryId) -> Result<(), DetailRescanError> {
@@ -100,8 +123,7 @@ impl DetailEntryIdAllocator {
             .and_then(|(_, ordinal)| ordinal.parse::<u128>().ok())
             .filter(|ordinal| *ordinal != 0)
             .ok_or(DetailRescanError::InvalidRequest)?;
-        if ordinal >= DETAIL_SCAN_MIN_ORDINAL
-            && self.next_ordinal.is_some_and(|next| ordinal <= next)
+        if ordinal >= self.minimum_ordinal && self.next_ordinal.is_some_and(|next| ordinal <= next)
         {
             self.next_ordinal = ordinal.checked_sub(1);
         }
@@ -113,7 +135,7 @@ impl DetailEntryIdAllocator {
             .next_ordinal
             .take()
             .ok_or(DetailRescanError::ResourceLimit)?;
-        if ordinal < DETAIL_SCAN_MIN_ORDINAL {
+        if ordinal < self.minimum_ordinal {
             return Err(DetailRescanError::ResourceLimit);
         }
         self.next_ordinal = ordinal.checked_sub(1);
@@ -1163,7 +1185,6 @@ where
                 let entry_id = ids.allocate()?;
                 if let Some(size) = &mut frame.size {
                     size.note_entry()?;
-                    size.note_direct_child()?;
                 }
                 aggregates.target.note_entry()?;
                 let direct = aggregates
@@ -1171,8 +1192,22 @@ where
                     .get_mut(&current.direct_child_id)
                     .ok_or(DetailRescanError::InvalidRequest)?;
                 direct.note_entry()?;
-                if current.identity.entry_id == current.direct_child_id {
-                    direct.note_direct_child()?;
+                // Direct inventories count admitted rows, just like scan_target_directory.
+                // Excluded mounts/errors still count as traversal attempts and make coverage
+                // incomplete, but cannot invalidate a matching direct-list display snapshot.
+                if matches!(
+                    walked,
+                    WalkEntry::Directory(_)
+                        | WalkEntry::File(_)
+                        | WalkEntry::Link(_)
+                        | WalkEntry::CachedFile(_)
+                ) {
+                    if let Some(size) = &mut frame.size {
+                        size.note_direct_child()?;
+                    }
+                    if current.identity.entry_id == current.direct_child_id {
+                        direct.note_direct_child()?;
+                    }
                 }
                 if aggregates.target.recursive_entry_count > self.limits.max_visited_entries as u128
                 {
@@ -1814,6 +1849,69 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_query_ranges_do_not_overlap_or_escape_their_reservations() {
+        let scan_id = ScanId::new("parallel-detail-ids");
+        let mut pool = DetailEntryIdAllocator::new(scan_id.clone()).unwrap();
+        let mut first = pool.reserve_query_range(3).unwrap();
+        let mut second = pool.reserve_query_range(2).unwrap();
+        // A pre-existing directory outside the range must not consume the query's cursor.
+        first
+            .reserve(&ScanEntryId::for_scan_ordinal(&scan_id, u128::MAX - 4).unwrap())
+            .unwrap();
+        let a = std::thread::spawn(move || {
+            let ids = (0..3)
+                .map(|_| first.allocate().unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(first.allocate(), Err(DetailRescanError::ResourceLimit));
+            ids
+        });
+        let b = std::thread::spawn(move || {
+            let ids = (0..2)
+                .map(|_| second.allocate().unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(second.allocate(), Err(DetailRescanError::ResourceLimit));
+            ids
+        });
+        let mut actual = a.join().unwrap();
+        actual.extend(b.join().unwrap());
+        let expected = (0..5)
+            .map(|offset| ScanEntryId::for_scan_ordinal(&scan_id, u128::MAX - offset).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+        assert_eq!(
+            pool.allocate().unwrap(),
+            ScanEntryId::for_scan_ordinal(&scan_id, u128::MAX - 5).unwrap()
+        );
+    }
+
+    #[test]
+    fn failed_query_reservation_leaves_the_pool_usable() {
+        let scan_id = ScanId::new("range-exhaustion");
+        let mut pool = DetailEntryIdAllocator {
+            scan_id: scan_id.clone(),
+            next_ordinal: Some(DETAIL_SCAN_MIN_ORDINAL + 2),
+            minimum_ordinal: DETAIL_SCAN_MIN_ORDINAL,
+        };
+        assert!(matches!(
+            pool.reserve_query_range(0),
+            Err(DetailRescanError::ResourceLimit)
+        ));
+        assert!(matches!(
+            pool.reserve_query_range(4),
+            Err(DetailRescanError::ResourceLimit)
+        ));
+        let mut reserved = pool.reserve_query_range(3).unwrap();
+        for ordinal in (DETAIL_SCAN_MIN_ORDINAL..=DETAIL_SCAN_MIN_ORDINAL + 2).rev() {
+            assert_eq!(
+                reserved.allocate().unwrap(),
+                ScanEntryId::for_scan_ordinal(&scan_id, ordinal).unwrap()
+            );
+        }
+        assert_eq!(reserved.allocate(), Err(DetailRescanError::ResourceLimit));
+        assert_eq!(pool.allocate(), Err(DetailRescanError::ResourceLimit));
+    }
+
+    #[test]
     fn reserving_existing_detail_ids_never_reuses_them() {
         let scan_id = ScanId::new("detail-reserve-test");
         let mut ids = DetailEntryIdAllocator::new(scan_id.clone()).unwrap();
@@ -1845,6 +1943,7 @@ mod tests {
         let mut ids = DetailEntryIdAllocator {
             scan_id: scan_id.clone(),
             next_ordinal: Some(DETAIL_SCAN_MIN_ORDINAL),
+            minimum_ordinal: DETAIL_SCAN_MIN_ORDINAL,
         };
 
         assert_eq!(

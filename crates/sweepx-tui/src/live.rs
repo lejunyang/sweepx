@@ -175,6 +175,18 @@ pub trait DetailRescanProvider: Send + Sync + 'static {
 
     fn rescan_detail(&self, request: &DetailRescanRequest) -> DetailRescanResult;
 
+    /// Prepares an independent direct-listing query without resetting recursive cancellation.
+    fn prepare_directory_listing(&self) {}
+
+    /// Reads only this directory's direct rows, independently of an active recursive query.
+    /// Implementations must provide separate cancellation/ID state for concurrently running work.
+    fn rescan_directory_listing(&self, request: &DetailRescanRequest) -> DetailRescanResult {
+        self.rescan_detail(request)
+    }
+
+    /// Cancels the direct-listing lane without cancelling recursive measurement.
+    fn cancel_directory_listing(&self) {}
+
     /// Installs a non-blocking sink for advisory lower-bound progress snapshots.
     ///
     /// Providers which cannot stream progress may ignore this hook. The reducer validates every
@@ -633,6 +645,7 @@ struct BrowserNode {
     listing_loaded: bool,
     listing_pending: bool,
     recursive_size_observed: bool,
+    needs_size_update: bool,
     root: bool,
 }
 
@@ -1083,6 +1096,7 @@ impl BrowserModel {
                     listing_loaded: !pending.entry.coverage.details_lost,
                     listing_pending: false,
                     recursive_size_observed: aggregate.is_some(),
+                    needs_size_update: false,
                     entry: pending.entry,
                     aggregate,
                     detail_rescan_state: DetailRescanState::Snapshot { revision },
@@ -1222,7 +1236,15 @@ impl BrowserModel {
         self.progressive_navigation.then_some(())?;
         self.nodes
             .iter()
-            .find(|node| matches!(node.detail_rescan_state, DetailRescanState::Pending { .. }))
+            .find(|node| {
+                !node.listing_pending
+                    && matches!(node.detail_rescan_state, DetailRescanState::Pending { .. })
+            })
+            .or_else(|| {
+                self.nodes.iter().find(|node| {
+                    matches!(node.detail_rescan_state, DetailRescanState::Pending { .. })
+                })
+            })
     }
 
     fn current_listing_waiting(&self) -> bool {
@@ -1232,6 +1254,14 @@ impl BrowserModel {
                 !node.listing_loaded
                     && !matches!(node.detail_rescan_state, DetailRescanState::Pending { .. })
             })
+    }
+
+    fn current_size_scanning(&self) -> bool {
+        self.levels.iter().any(|level| {
+            let node = &self.nodes[level.directory_index];
+            !node.listing_pending
+                && matches!(node.detail_rescan_state, DetailRescanState::Pending { .. })
+        })
     }
 
     fn begin_detail_rescan(&mut self) -> Option<PendingDetailRescan> {
@@ -1247,10 +1277,13 @@ impl BrowserModel {
             if self.nodes[node_index].listing_loaded
                 && !self.nodes[node_index].detail_rescan_state.is_stale()
             {
-                if self.nodes[node_index].recursive_size_observed {
+                if self.nodes[node_index].needs_size_update {
+                    DetailRescanReason::ProgressiveListing
+                } else if self.nodes[node_index].recursive_size_observed {
                     return None;
+                } else {
+                    DetailRescanReason::ProgressiveAggregate
                 }
-                DetailRescanReason::ProgressiveAggregate
             } else {
                 DetailRescanReason::ProgressiveListing
             }
@@ -1278,6 +1311,7 @@ impl BrowserModel {
         };
 
         let previous_state = self.nodes[node_index].detail_rescan_state.clone();
+        let size_refresh = self.nodes[node_index].needs_size_update;
         self.activity = None;
         self.nodes[node_index].detail_rescan_state = DetailRescanState::Pending { revision };
         self.nodes[node_index].listing_pending = matches!(
@@ -1291,6 +1325,8 @@ impl BrowserModel {
             previous_state,
             last_activity_at: Instant::now(),
             timed_out: false,
+            size_refresh,
+            abandoned: false,
         })
     }
 
@@ -1314,6 +1350,7 @@ impl BrowserModel {
             if node.entry.object_type == ObjectType::Directory {
                 node.listing_loaded = false;
                 node.recursive_size_observed = false;
+                node.needs_size_update = false;
                 node.aggregate = None;
                 node.entry.logical_bytes = sweepx_model::EvidenceValue::NotChecked {
                     reason: sweepx_model::ReasonCode::IncompleteStreamCoverage,
@@ -1331,6 +1368,8 @@ impl BrowserModel {
             previous_state,
             last_activity_at: Instant::now(),
             timed_out: false,
+            size_refresh: false,
+            abandoned: false,
         })
     }
 
@@ -1338,7 +1377,12 @@ impl BrowserModel {
         if !self.progressive_navigation {
             return None;
         }
-        if self.nodes[node_index].recursive_size_observed
+        if !self.nodes[node_index].listing_loaded
+            || matches!(
+                self.nodes[node_index].detail_rescan_state,
+                DetailRescanState::Pending { .. }
+            )
+            || self.nodes[node_index].recursive_size_observed
             || self.nodes[node_index].detail_rescan_state.is_stale()
         {
             return None;
@@ -1362,6 +1406,8 @@ impl BrowserModel {
             previous_state,
             last_activity_at: Instant::now(),
             timed_out: false,
+            size_refresh: false,
+            abandoned: false,
         })
     }
 
@@ -1381,7 +1427,12 @@ impl BrowserModel {
         }
         let revision = pending.request.binding.revision;
         let failure = self
-            .apply_detail_rescan_result(pending.node_index, &pending.request, result)
+            .apply_detail_rescan_result(
+                pending.node_index,
+                &pending.request,
+                result,
+                pending.size_refresh,
+            )
             .err();
         if let Some(failure) = failure
             && self.node_binding_matches(pending.node_index, &pending.request.binding)
@@ -1496,6 +1547,7 @@ impl BrowserModel {
         node_index: usize,
         request: &DetailRescanRequest,
         result: DetailRescanResult,
+        size_refresh: bool,
     ) -> Result<(), DetailRescanFailure> {
         let (
             binding,
@@ -1552,6 +1604,7 @@ impl BrowserModel {
             }
         }
 
+        let needs_size_update = self.nodes[node_index].needs_size_update;
         let mut replacement = self.rebuilt_with_detail_rows(
             node_index,
             observed_directory,
@@ -1570,6 +1623,30 @@ impl BrowserModel {
             .ok_or(DetailRescanFailure::InvalidResult)?;
         target.listing_loaded = true;
         target.recursive_size_observed = recursive_size_observed;
+        target.needs_size_update = needs_size_update && !size_refresh && !recursive_size_observed;
+        if request.reason == DetailRescanReason::ProgressiveAggregate {
+            let target_index = replacement
+                .nodes
+                .iter()
+                .position(|node| {
+                    node.entry.identity.as_ref().is_some_and(|identity| {
+                        identity.entry_id == binding.source_directory_identity.entry_id
+                    })
+                })
+                .expect("validated target");
+            // Lists read concurrently can precede the enclosing traversal's committed sizes.
+            // Refresh those display sizes with a direct listing, never another ancestor walk.
+            let mut frontier = replacement.children_by_index[target_index].clone();
+            while let Some(index) = frontier.pop() {
+                let node = &mut replacement.nodes[index];
+                if node.entry.object_type == ObjectType::Directory
+                    && (node.listing_loaded || node.listing_pending)
+                {
+                    node.needs_size_update = true;
+                }
+                frontier.extend(replacement.children_by_index[index].iter().copied());
+            }
+        }
         std::mem::swap(self, &mut replacement);
         Ok(())
     }
@@ -1646,6 +1723,11 @@ impl BrowserModel {
             updates.push((index, row));
         }
         for (index, row) in updates {
+            if let Some(aggregate) = self.nodes[index].aggregate.as_mut() {
+                // The enclosing recursive query measures this same native child. Its live
+                // byte lower bound also updates an independently opened child's size header.
+                aggregate.apparent_logical_bytes = row.logical_bytes.clone();
+            }
             self.nodes[index].entry.logical_bytes = row.logical_bytes;
             self.nodes[index].entry.allocated_bytes = row.allocated_bytes;
             self.nodes[index].entry.reclaimable_estimate = row.reclaimable_estimate;
@@ -1727,6 +1809,7 @@ impl BrowserModel {
                             node.listing_loaded,
                             node.recursive_size_observed,
                             node.listing_pending,
+                            node.needs_size_update,
                         ),
                     )
                 })
@@ -1867,6 +1950,7 @@ impl BrowserModel {
                 node.listing_loaded = state.1;
                 node.recursive_size_observed = state.2;
                 node.listing_pending = state.3;
+                node.needs_size_update = state.4;
             }
         }
 
@@ -2640,6 +2724,8 @@ struct PendingDetailRescan {
     previous_state: DetailRescanState,
     last_activity_at: Instant,
     timed_out: bool,
+    size_refresh: bool,
+    abandoned: bool,
 }
 
 struct CompletedDetailRescan {
@@ -2693,11 +2779,30 @@ impl Drop for DetailRescanWorkerPermit {
     }
 }
 
-/// Navigation reducer which delegates bounded detail enumeration to one
-/// background worker. The bounded channels and `pending` slot permit at most
-/// one outstanding query, while the terminal thread keeps polling input and
-/// redrawing.
+/// Progressive navigation uses at most two independently cancellable workers: one recursive
+/// query and one direct listing. Each lane retains one request and bounded event channels;
+/// superseded listings cooperate with cancellation while the original recursive query continues.
 pub struct DetailRescanBrowserReducer<P: DetailRescanProvider> {
+    scan: DetailRescanWorker<P>,
+    listing: RefCell<Option<DetailRescanWorker<ListingProvider<P>>>>,
+    limiter: Arc<DetailRescanWorkerLimiter>,
+}
+
+struct ListingProvider<P: DetailRescanProvider>(Arc<P>);
+
+impl<P: DetailRescanProvider> DetailRescanProvider for ListingProvider<P> {
+    fn prepare_detail_rescan(&self) {
+        self.0.prepare_directory_listing();
+    }
+    fn rescan_detail(&self, request: &DetailRescanRequest) -> DetailRescanResult {
+        self.0.rescan_directory_listing(request)
+    }
+    fn cancel_detail_rescan(&self) {
+        self.0.cancel_directory_listing();
+    }
+}
+
+struct DetailRescanWorker<P: DetailRescanProvider> {
     provider: Option<Arc<P>>,
     requests: Option<SyncSender<DetailRescanRequest>>,
     completions: Receiver<CompletedDetailRescan>,
@@ -2708,22 +2813,13 @@ pub struct DetailRescanBrowserReducer<P: DetailRescanProvider> {
     deadline: Duration,
 }
 
-impl<P: DetailRescanProvider> DetailRescanBrowserReducer<P> {
-    pub fn new(provider: P) -> Result<Self, BrowserError> {
-        Self::try_new_with_deadline(provider, DETAIL_RESCAN_QUERY_DEADLINE)
-    }
-
-    fn try_new_with_deadline(provider: P, deadline: Duration) -> Result<Self, BrowserError> {
-        Self::try_new_with_limiter(provider, deadline, detail_rescan_worker_limiter())
-    }
-
-    fn try_new_with_limiter(
-        provider: P,
+impl<P: DetailRescanProvider> DetailRescanWorker<P> {
+    fn new(
+        provider: Arc<P>,
         deadline: Duration,
         limiter: Arc<DetailRescanWorkerLimiter>,
     ) -> Result<Self, BrowserError> {
         let worker_permit = limiter.acquire()?;
-        let provider = Arc::new(provider);
         let worker_provider = Arc::clone(&provider);
         let (request_sender, request_receiver) = sync_channel::<DetailRescanRequest>(1);
         let (completion_sender, completion_receiver) = sync_channel(1);
@@ -2819,24 +2915,31 @@ impl<P: DetailRescanProvider> DetailRescanBrowserReducer<P> {
         }
     }
 
-    fn resume_current_directory(&self, model: &mut BrowserModel) {
-        // One worker and one pending request remain the resource bound. While it is busy,
-        // navigation records only the current breadcrumb, not an unbounded queue of visits.
-        // Once free, list the directory still on screen; obsolete visits need no filesystem work.
-        if self.pending.borrow().is_none()
-            && model.progressive_navigation
-            && let Some(level) = model.levels.last()
-            && !model.nodes[level.directory_index]
-                .detail_rescan_state
-                .is_stale()
-            && let Some(next) = model.begin_detail_rescan_at(level.directory_index)
+    fn abandon(&self, model: &mut BrowserModel) {
+        if let Some(pending) = self.pending.borrow_mut().as_mut()
+            && !pending.abandoned
         {
-            self.submit_or_fail(model, next);
+            self.provider().cancel_detail_rescan();
+            model.restore_detail_rescan_state(pending);
+            pending.abandoned = true;
         }
     }
 
-    fn complete_or_expire(&self, model: &mut BrowserModel) {
+    fn complete_or_expire(
+        &self,
+        model: &mut BrowserModel,
+    ) -> Option<(ScanEntryId, DetailRescanReason)> {
         if let Some(pending) = self.pending.borrow_mut().as_mut() {
+            pending.node_index = model
+                .nodes
+                .iter()
+                .position(|node| {
+                    node.entry.identity.as_ref().is_some_and(|identity| {
+                        identity.entry_id
+                            == pending.request.binding.source_directory_identity.entry_id
+                    })
+                })
+                .unwrap_or(usize::MAX);
             while let Ok(progress) = self.progress.try_recv() {
                 if model.apply_detail_rescan_progress(pending, progress) {
                     pending.last_activity_at = Instant::now();
@@ -2847,20 +2950,15 @@ impl<P: DetailRescanProvider> DetailRescanBrowserReducer<P> {
         }
         match self.completions.try_recv() {
             Ok(completed) => {
-                let Some(pending) = self.pending.borrow_mut().take() else {
-                    return;
-                };
-                let progressive_listing = matches!(
-                    pending.request.reason,
-                    DetailRescanReason::ProgressiveListing | DetailRescanReason::RefreshListing
-                );
+                let pending = self.pending.borrow_mut().take()?;
+                let reason = pending.request.reason;
                 let target_id = pending
                     .request
                     .binding
                     .source_directory_identity
                     .entry_id
                     .clone();
-                if !pending.timed_out {
+                if !pending.timed_out && !pending.abandoned {
                     let completed_in_time = completed
                         .finished_at
                         .saturating_duration_since(pending.last_activity_at)
@@ -2875,19 +2973,8 @@ impl<P: DetailRescanProvider> DetailRescanBrowserReducer<P> {
                     if should_enter {
                         model.enter_selected();
                     }
-                    if progressive_listing
-                        && let Some(target) = model.nodes.iter().position(|node| {
-                            node.entry
-                                .identity
-                                .as_ref()
-                                .is_some_and(|identity| identity.entry_id == target_id)
-                        })
-                        && let Some(next) = model.begin_progressive_aggregate_at(target)
-                    {
-                        self.submit_or_fail(model, next);
-                    }
                 }
-                self.resume_current_directory(model);
+                return Some((target_id, reason));
             }
             Err(TryRecvError::Disconnected) => {
                 if let Some(pending) = self.pending.borrow_mut().take()
@@ -2911,6 +2998,7 @@ impl<P: DetailRescanProvider> DetailRescanBrowserReducer<P> {
                 }
             }
         }
+        None
     }
 
     fn provider(&self) -> &P {
@@ -2920,10 +3008,118 @@ impl<P: DetailRescanProvider> DetailRescanBrowserReducer<P> {
     }
 }
 
-impl<P> BrowserReducer for DetailRescanBrowserReducer<P>
-where
-    P: DetailRescanProvider,
-{
+impl<P: DetailRescanProvider> Drop for DetailRescanWorker<P> {
+    fn drop(&mut self) {
+        self.shutdown_worker();
+    }
+}
+
+impl<P: DetailRescanProvider> DetailRescanBrowserReducer<P> {
+    pub fn new(provider: P) -> Result<Self, BrowserError> {
+        Self::try_new_with_deadline(provider, DETAIL_RESCAN_QUERY_DEADLINE)
+    }
+
+    fn try_new_with_deadline(provider: P, deadline: Duration) -> Result<Self, BrowserError> {
+        Self::try_new_with_limiter(provider, deadline, detail_rescan_worker_limiter())
+    }
+
+    fn try_new_with_limiter(
+        provider: P,
+        deadline: Duration,
+        limiter: Arc<DetailRescanWorkerLimiter>,
+    ) -> Result<Self, BrowserError> {
+        Ok(Self {
+            scan: DetailRescanWorker::new(Arc::new(provider), deadline, Arc::clone(&limiter))?,
+            listing: RefCell::new(None),
+            limiter,
+        })
+    }
+
+    fn start_listing(&self, model: &mut BrowserModel, pending: PendingDetailRescan) {
+        if self.listing.borrow().is_none() {
+            let provider = ListingProvider(Arc::clone(
+                self.scan.provider.as_ref().expect("active provider"),
+            ));
+            match DetailRescanWorker::new(
+                Arc::new(provider),
+                self.scan.deadline,
+                Arc::clone(&self.limiter),
+            ) {
+                Ok(worker) => *self.listing.borrow_mut() = Some(worker),
+                Err(_) => {
+                    model.fail_detail_rescan(&pending, DetailRescanFailure::ResourceLimit);
+                    return;
+                }
+            }
+        }
+        if let Some(worker) = self.listing.borrow().as_ref() {
+            worker.submit_or_fail(model, pending);
+        }
+    }
+
+    fn schedule_current_directory(&self, model: &mut BrowserModel) {
+        if !model.progressive_navigation {
+            return;
+        }
+        let Some(index) = model.levels.last().map(|level| level.directory_index) else {
+            return;
+        };
+        let node = &model.nodes[index];
+        if node.detail_rescan_state.is_stale()
+            || matches!(node.detail_rescan_state, DetailRescanState::Pending { .. })
+        {
+            return;
+        }
+        if self
+            .listing
+            .borrow()
+            .as_ref()
+            .is_some_and(|worker| worker.pending.borrow().is_some())
+        {
+            return;
+        }
+        if !node.listing_loaded || node.needs_size_update {
+            let activity = model.activity.clone();
+            if let Some(pending) = model.begin_detail_rescan_at(index) {
+                model.activity = activity;
+                if self.scan.pending.borrow().is_none() && self.listing.borrow().is_none() {
+                    self.scan.submit_or_fail(model, pending);
+                } else {
+                    self.start_listing(model, pending);
+                }
+            }
+        } else if self.scan.pending.borrow().is_none()
+            && !node.recursive_size_observed
+            && let Some(pending) = model.begin_progressive_aggregate_at(index)
+        {
+            self.scan.submit_or_fail(model, pending);
+        }
+    }
+
+    fn complete_or_expire(&self, model: &mut BrowserModel) {
+        if let Some((target_id, reason)) = self.scan.complete_or_expire(model)
+            && matches!(
+                reason,
+                DetailRescanReason::ProgressiveListing | DetailRescanReason::RefreshListing
+            )
+            && let Some(target) = model.nodes.iter().position(|node| {
+                node.entry
+                    .identity
+                    .as_ref()
+                    .is_some_and(|identity| identity.entry_id == target_id)
+            })
+            && let Some(next) = model.begin_progressive_aggregate_at(target)
+        {
+            self.scan.submit_or_fail(model, next);
+        }
+        if let Some(worker) = self.listing.borrow().as_ref() {
+            worker.complete_or_expire(model);
+        }
+        self.schedule_current_directory(model);
+    }
+}
+
+impl<P: DetailRescanProvider> BrowserReducer for DetailRescanBrowserReducer<P> {
     fn reduce(&self, model: &mut BrowserModel, action: BrowserAction) -> BrowserControl {
         self.complete_or_expire(model);
         if action == BrowserAction::TrashSelected && model.inspection.is_some() {
@@ -2937,56 +3133,73 @@ where
                 BrowserControl::TrashSelected
             };
         }
+        if model.progressive_navigation {
+            if action == BrowserAction::Refresh {
+                if self.scan.pending.borrow().is_none()
+                    && self
+                        .listing
+                        .borrow()
+                        .as_ref()
+                        .is_none_or(|worker| worker.pending.borrow().is_none())
+                    && let Some(pending) = model.begin_refresh()
+                {
+                    self.scan.submit_or_fail(model, pending);
+                }
+                return BrowserControl::Continue;
+            }
+            let control = ReadOnlyBrowserReducer.reduce(model, action);
+            if matches!(
+                action,
+                BrowserAction::EnterDirectory | BrowserAction::ReturnToParent
+            ) && let Some(worker) = self.listing.borrow().as_ref()
+            {
+                let current = model
+                    .levels
+                    .last()
+                    .map(|level| request_entry_id(&model.nodes[level.directory_index].entry));
+                let superseded = worker.pending.borrow().as_ref().is_some_and(|pending| {
+                    current.as_ref()
+                        != Some(&pending.request.binding.source_directory_identity.entry_id)
+                });
+                if superseded {
+                    worker.abandon(model);
+                }
+            }
 
-        if self.pending.borrow().is_some() {
-            return if action == BrowserAction::EnterDirectory && !model.progressive_navigation {
+            self.schedule_current_directory(model);
+            return control;
+        }
+        if self.scan.pending.borrow().is_some() {
+            return if action == BrowserAction::EnterDirectory {
                 BrowserControl::Continue
             } else {
                 ReadOnlyBrowserReducer.reduce(model, action)
             };
         }
-
-        if action == BrowserAction::Refresh {
-            if let Some(pending) = model.begin_refresh()
-                && let Err(pending) = self.submit(pending)
-            {
-                model.fail_detail_rescan(&pending, DetailRescanFailure::Unavailable);
-            }
-            return BrowserControl::Continue;
-        }
-
         if action == BrowserAction::EnterDirectory
             && let Some(pending) = model.begin_detail_rescan()
         {
-            if let Err(pending) = self.submit(pending)
+            if let Err(pending) = self.scan.submit(pending)
                 && model.fail_detail_rescan(&pending, DetailRescanFailure::Unavailable)
             {
-                model.enter_selected();
-            }
-            if model.progressive_navigation {
-                // Product TUI navigation never waits for recursive aggregation. The entered
-                // directory renders immediately and its rows arrive from the background scan.
                 model.enter_selected();
             }
             return BrowserControl::Continue;
         }
         ReadOnlyBrowserReducer.reduce(model, action)
     }
-
     fn poll_background(&self, model: &mut BrowserModel) {
         self.complete_or_expire(model);
     }
-
     fn cancel_background(&self) {
-        if self.pending.borrow().is_some() {
-            self.provider().cancel_detail_rescan();
+        if self.scan.pending.borrow().is_some() {
+            self.scan.provider().cancel_detail_rescan();
         }
-    }
-}
-
-impl<P: DetailRescanProvider> Drop for DetailRescanBrowserReducer<P> {
-    fn drop(&mut self) {
-        self.shutdown_worker();
+        if let Some(worker) = self.listing.borrow().as_ref()
+            && worker.pending.borrow().is_some()
+        {
+            worker.provider().cancel_detail_rescan();
+        }
     }
 }
 
@@ -3343,9 +3556,11 @@ pub fn render_live_browser_at_phase(
                 }
             }
             Some(DetailRescanState::Pending { .. }) if model.current_listing_pending() => {
-                match model.locale {
-                    Locale::ZhCn => "正在读取目录",
-                    Locale::EnUs => "Opening directory",
+                match (model.locale, model.current_size_scanning()) {
+                    (Locale::ZhCn, true) => "正在读取目录 · 后台扫描中",
+                    (Locale::EnUs, true) => "Opening directory · background scan continues",
+                    (Locale::ZhCn, false) => "正在读取目录",
+                    (Locale::EnUs, false) => "Opening directory",
                 }
             }
             Some(DetailRescanState::Pending { .. }) => match model.locale {
@@ -3415,18 +3630,20 @@ pub fn render_live_browser_at_phase(
             (Locale::ZhCn, sweepx_model::EvidenceValue::Known { .. }) => "总大小",
             (Locale::EnUs, sweepx_model::EvidenceValue::Known { .. }) => "Total size",
             (Locale::ZhCn, _)
-                if matches!(
-                    model.current_detail_rescan_state(),
-                    Some(DetailRescanState::Pending { .. })
-                ) =>
+                if model.current_size_scanning()
+                    || matches!(
+                        model.current_detail_rescan_state(),
+                        Some(DetailRescanState::Pending { .. })
+                    ) =>
             {
                 "已扫描大小"
             }
             (Locale::EnUs, _)
-                if matches!(
-                    model.current_detail_rescan_state(),
-                    Some(DetailRescanState::Pending { .. })
-                ) =>
+                if model.current_size_scanning()
+                    || matches!(
+                        model.current_detail_rescan_state(),
+                        Some(DetailRescanState::Pending { .. })
+                    ) =>
             {
                 "Scanned size"
             }
@@ -4059,8 +4276,8 @@ fn pending_work_label(model: &BrowserModel) -> &'static str {
 
 fn waiting_listing_label(locale: Locale) -> &'static str {
     match locale {
-        Locale::ZhCn => "后台扫描继续，完成后读取此目录列表…",
-        Locale::EnUs => "Background scan continues; this directory will open afterwards…",
+        Locale::ZhCn => "正在读取当前层目录列表…",
+        Locale::EnUs => "Reading this directory's entries…",
     }
 }
 
@@ -4104,7 +4321,13 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(1);
         while Instant::now() < deadline {
             reducer.poll_background(model);
-            if reducer.pending.borrow().is_none() {
+            if reducer.scan.pending.borrow().is_none()
+                && reducer
+                    .listing
+                    .borrow()
+                    .as_ref()
+                    .is_none_or(|worker| worker.pending.borrow().is_none())
+            {
                 return;
             }
             thread::sleep(Duration::from_millis(1));
@@ -5326,6 +5549,9 @@ mod tests {
         requests: Vec<DetailRescanRequest>,
         released: usize,
         cancelled: bool,
+        listing_cancelled: bool,
+        listing_released: bool,
+        root_completed: bool,
         sink: Option<SyncSender<DetailRescanProgress>>,
     }
 
@@ -5333,6 +5559,12 @@ mod tests {
         fn release(&self, count: usize) {
             let (state, changed) = &*self.state;
             state.lock().unwrap().released = count;
+            changed.notify_all();
+        }
+
+        fn release_listing(&self) {
+            let (state, changed) = &*self.state;
+            state.lock().unwrap().listing_released = true;
             changed.notify_all();
         }
 
@@ -5381,34 +5613,43 @@ mod tests {
                 };
             }
             drop(state);
-            if request.binding.source_directory_identity.entry_id
-                == request.binding.source_root_identity.entry_id
-            {
-                let mut child = entry("/root/sub", ObjectType::Directory, 2, 1, Some(1));
-                if request.reason == DetailRescanReason::ProgressiveListing {
-                    return progressive_listing_result(request, vec![child]);
-                }
-                // The scanner re-enumerates the same native child using a fresh scan row ID.
-                child.identity.as_mut().unwrap().entry_id = entry_id(&scan_id(), 99);
-                return progressive_aggregate_result(request, vec![child]);
+            if request.reason == DetailRescanReason::ProgressiveAggregate {
+                self.state.0.lock().unwrap().root_completed = true;
             }
-            let mut file = entry("/root/sub/file", ObjectType::File, 3, 1, Some(2));
-            file.identity.as_mut().unwrap().parent_id =
-                Some(request.binding.source_directory_identity.entry_id.clone());
-            let DetailRescanResult::Refreshed(mut result) = refreshed_result(request, vec![file])
-            else {
+            navigation_gate_result(request)
+        }
+
+        fn prepare_directory_listing(&self) {
+            self.state.0.lock().unwrap().listing_cancelled = false;
+        }
+
+        fn rescan_directory_listing(&self, request: &DetailRescanRequest) -> DetailRescanResult {
+            let (state, changed) = &*self.state;
+            let mut state = state.lock().unwrap();
+            state.requests.push(request.clone());
+            changed.notify_all();
+            while !state.listing_released && !state.listing_cancelled {
+                state = changed.wait(state).unwrap();
+            }
+            if state.listing_cancelled {
+                return DetailRescanResult::Failed {
+                    binding: Box::new(request.binding.clone()),
+                    failure: DetailRescanFailure::Cancelled,
+                };
+            }
+            let recursive = state.root_completed;
+            drop(state);
+            let DetailRescanResult::Refreshed(mut result) = navigation_gate_result(request) else {
                 unreachable!()
             };
-            let mut directory = entry("/root/sub", ObjectType::Directory, 2, 1, Some(1));
-            directory.identity = Some(request.binding.source_directory_identity.clone());
-            directory.native_locator = Some(request.directory_locator.clone());
-            result.observed_directory = directory;
-            result.aggregate.directory_identity = request
-                .binding
-                .source_directory_identity
-                .entry_id
-                .to_string();
+            result.recursive_size_observed = recursive;
             DetailRescanResult::Refreshed(result)
+        }
+
+        fn cancel_directory_listing(&self) {
+            let (state, changed) = &*self.state;
+            state.lock().unwrap().listing_cancelled = true;
+            changed.notify_all();
         }
 
         fn cancel_detail_rescan(&self) {
@@ -5416,6 +5657,37 @@ mod tests {
             state.lock().unwrap().cancelled = true;
             changed.notify_all();
         }
+    }
+
+    fn navigation_gate_result(request: &DetailRescanRequest) -> DetailRescanResult {
+        if request.binding.source_directory_identity.entry_id
+            == request.binding.source_root_identity.entry_id
+        {
+            let mut child = entry("/root/sub", ObjectType::Directory, 2, 1, Some(1));
+            if request.reason == DetailRescanReason::ProgressiveListing {
+                return progressive_listing_result(request, vec![child]);
+            }
+            // The scanner re-enumerates the same native child using a fresh scan row ID.
+            child.identity.as_mut().unwrap().entry_id = entry_id(&scan_id(), 99);
+            return progressive_aggregate_result(request, vec![child]);
+        }
+        let mut file = entry("/root/sub/file", ObjectType::File, 3, 1, Some(2));
+        file.identity.as_mut().unwrap().parent_id =
+            Some(request.binding.source_directory_identity.entry_id.clone());
+        let DetailRescanResult::Refreshed(mut result) = refreshed_result(request, vec![file])
+        else {
+            unreachable!()
+        };
+        let mut directory = entry("/root/sub", ObjectType::Directory, 2, 1, Some(1));
+        directory.identity = Some(request.binding.source_directory_identity.clone());
+        directory.native_locator = Some(request.directory_locator.clone());
+        result.observed_directory = directory;
+        result.aggregate.directory_identity = request
+            .binding
+            .source_directory_identity
+            .entry_id
+            .to_string();
+        DetailRescanResult::Refreshed(result)
     }
 
     fn navigation_model() -> BrowserModel {
@@ -5487,13 +5759,13 @@ mod tests {
         assert!(model.nodes[0].recursive_size_observed);
         reducer.reduce(&mut model, BrowserAction::EnterDirectory);
         assert_eq!(model.visible_rows()[0].label(), "sub");
-        assert!(reducer.pending.borrow().is_none());
+        assert!(reducer.scan.pending.borrow().is_none());
         assert_eq!(gate.state.0.lock().unwrap().requests.len(), 2);
         assert!(!gate.state.0.lock().unwrap().cancelled);
     }
 
     #[test]
-    fn navigation_during_aggregation_keeps_progress_and_rebinds_the_open_child() {
+    fn navigation_lists_a_child_while_the_recursive_worker_remains_blocked() {
         let gate = NavigationGate::default();
         let reducer = DetailRescanBrowserReducer::new(gate.clone()).unwrap();
         let mut model = navigation_model();
@@ -5501,15 +5773,26 @@ mod tests {
         gate.release(1);
         gate.await_calls(2, &reducer, &mut model);
         reducer.reduce(&mut model, BrowserAction::EnterDirectory);
+        gate.await_calls(3, &reducer, &mut model);
         assert_eq!(model.current_directory(), Some("/root/sub"));
-        assert!(navigation_screen(&model).contains("this directory will open afterwards"));
+        assert!(navigation_screen(&model).contains("Reading this directory's entries"));
         model.locale = Locale::ZhCn;
-        let screen = navigation_screen(&model);
-        assert!(screen.contains("后台扫描中"), "{screen}");
-        assert!(screen.contains("后台扫描继续，完成后读取此目录列表"));
+        assert!(navigation_screen(&model).contains("读取当前层目录列表"));
         model.locale = Locale::EnUs;
-        reducer.reduce(&mut model, BrowserAction::ReturnToParent);
-        reducer.reduce(&mut model, BrowserAction::ReturnToParent);
+        gate.release_listing();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while model.visible_rows().is_empty() && Instant::now() < deadline {
+            reducer.poll_background(&mut model);
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(model.visible_rows()[0].label(), "file");
+        assert_eq!(gate.state.0.lock().unwrap().released, 1);
+        assert!(!gate.state.0.lock().unwrap().root_completed);
+        assert!(!gate.state.0.lock().unwrap().cancelled);
+        assert!(reducer.scan.pending.borrow().is_some());
+        assert!(navigation_screen(&model).contains("Scanning in background"));
+        // Both queues have advanced independently. Progress for the root remains valid after
+        // the child listing has rebuilt the browser indexes and supplied its own row IDs.
         let state = gate.state.0.lock().unwrap();
         state
             .sink
@@ -5522,49 +5805,73 @@ mod tests {
             ))
             .unwrap();
         drop(state);
-        // An accepted update remains activity even when its directory is offscreen; it must
-        // also renew the inactivity deadline rather than letting navigation time out the scan.
         reducer
+            .scan
             .pending
             .borrow_mut()
             .as_mut()
             .unwrap()
             .last_activity_at = Instant::now() - Duration::from_secs(10);
         reducer.poll_background(&mut model);
-        assert!(!reducer.pending.borrow().as_ref().unwrap().timed_out);
-        let screen = navigation_screen(&model);
-        assert!(screen.contains("Scanning in background"));
-        assert!(screen.contains("deep.txt"));
+        assert!(!reducer.scan.pending.borrow().as_ref().unwrap().timed_out);
+        assert!(navigation_screen(&model).contains("deep.txt"));
+        reducer.reduce(&mut model, BrowserAction::ReturnToParent);
         reducer.reduce(&mut model, BrowserAction::EnterDirectory);
-        assert!(model.activity.is_some());
-        reducer.reduce(&mut model, BrowserAction::EnterDirectory);
+        assert_eq!(model.visible_rows()[0].label(), "file");
+        assert_eq!(gate.state.0.lock().unwrap().requests.len(), 3);
         gate.release(2);
-        gate.await_calls(3, &reducer, &mut model);
+        finish_background(&reducer, &mut model);
         assert_eq!(model.current_directory(), Some("/root/sub"));
+        assert_eq!(model.visible_rows()[0].label(), "file");
+        let state = gate.state.0.lock().unwrap();
         assert_eq!(
-            gate.state.0.lock().unwrap().requests[2]
-                .binding
-                .source_directory_identity
-                .entry_id,
+            state.requests.len(),
+            4,
+            "after root completion only a cached-size direct listing is needed"
+        );
+        assert_eq!(
+            state.requests[3].reason,
+            DetailRescanReason::ProgressiveListing
+        );
+        assert_eq!(
+            state.requests[3].binding.source_directory_identity.entry_id,
             entry_id(&scan_id(), 2)
         );
-        assert!(model.nodes[0].recursive_size_observed);
-        gate.release(3);
-        finish_background(&reducer, &mut model);
-        assert_eq!(model.visible_rows()[0].label(), "file");
-        assert!(
-            model
-                .nodes
-                .iter()
-                .all(|node| !node.detail_rescan_state.is_stale())
-        );
+        assert!(!state.cancelled);
+        drop(state);
         for _ in 0..3 {
             reducer.reduce(&mut model, BrowserAction::ReturnToParent);
             reducer.reduce(&mut model, BrowserAction::EnterDirectory);
             assert_eq!(model.visible_rows()[0].label(), "file");
         }
-        assert_eq!(gate.state.0.lock().unwrap().requests.len(), 3);
+        assert_eq!(gate.state.0.lock().unwrap().requests.len(), 4);
+    }
+
+    #[test]
+    fn navigation_cancels_only_an_abandoned_listing_and_retries_the_current_page() {
+        let gate = NavigationGate::default();
+        let reducer = DetailRescanBrowserReducer::new(gate.clone()).unwrap();
+        let mut model = navigation_model();
+        reducer.reduce(&mut model, BrowserAction::EnterDirectory);
+        gate.release(1);
+        gate.await_calls(2, &reducer, &mut model);
+        reducer.reduce(&mut model, BrowserAction::EnterDirectory);
+        gate.await_calls(3, &reducer, &mut model);
+        reducer.reduce(&mut model, BrowserAction::ReturnToParent);
+        assert!(gate.state.0.lock().unwrap().listing_cancelled);
         assert!(!gate.state.0.lock().unwrap().cancelled);
+        reducer.reduce(&mut model, BrowserAction::EnterDirectory);
+        gate.await_calls(4, &reducer, &mut model);
+        gate.release_listing();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while model.visible_rows().is_empty() && Instant::now() < deadline {
+            reducer.poll_background(&mut model);
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(model.visible_rows()[0].label(), "file");
+        assert!(!gate.state.0.lock().unwrap().root_completed);
+        reducer.reduce(&mut model, BrowserAction::Quit);
+        assert!(gate.state.0.lock().unwrap().cancelled);
     }
 
     #[test]
@@ -5593,6 +5900,64 @@ mod tests {
                 .entry_id,
             entry_id(&scan_id(), 99)
         );
+    }
+
+    #[test]
+    fn recursive_completion_keeps_an_inflight_child_listing_bound() {
+        let gate = NavigationGate::default();
+        let reducer = DetailRescanBrowserReducer::new(gate.clone()).unwrap();
+        let mut model = navigation_model();
+        reducer.reduce(&mut model, BrowserAction::EnterDirectory);
+        gate.release(1);
+        gate.await_calls(2, &reducer, &mut model);
+        reducer.reduce(&mut model, BrowserAction::EnterDirectory);
+        gate.await_calls(3, &reducer, &mut model);
+        gate.release(2);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while reducer.scan.pending.borrow().is_some() && Instant::now() < deadline {
+            reducer.poll_background(&mut model);
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(model.nodes[0].recursive_size_observed);
+        assert_eq!(model.current_directory(), Some("/root/sub"));
+        assert!(model.current_listing_pending());
+        gate.release_listing();
+        finish_background(&reducer, &mut model);
+        assert_eq!(model.visible_rows()[0].label(), "file");
+        assert_eq!(gate.state.0.lock().unwrap().requests.len(), 3);
+        assert!(
+            model
+                .nodes
+                .iter()
+                .all(|node| !node.detail_rescan_state.is_stale())
+        );
+    }
+
+    #[test]
+    fn listing_capacity_failure_preserves_the_recursive_worker() {
+        let gate = NavigationGate::default();
+        let limiter = Arc::new(DetailRescanWorkerLimiter::new(1));
+        let reducer = DetailRescanBrowserReducer::try_new_with_limiter(
+            gate.clone(),
+            Duration::from_secs(1),
+            Arc::clone(&limiter),
+        )
+        .unwrap();
+        let mut model = navigation_model();
+        reducer.reduce(&mut model, BrowserAction::EnterDirectory);
+        gate.release(1);
+        gate.await_calls(2, &reducer, &mut model);
+        reducer.reduce(&mut model, BrowserAction::EnterDirectory);
+        assert!(matches!(
+            model.current_detail_rescan_state(),
+            Some(DetailRescanState::Stale {
+                failure: DetailRescanFailure::ResourceLimit,
+                ..
+            })
+        ));
+        assert!(!gate.state.0.lock().unwrap().cancelled);
+        assert_eq!(limiter.active.load(Ordering::Acquire), 1);
+        reducer.reduce(&mut model, BrowserAction::Quit);
     }
 
     #[test]
@@ -5676,7 +6041,7 @@ mod tests {
         assert_eq!(model.visible_rows()[0].label(), "sub");
         reducer.reduce(&mut model, BrowserAction::EnterDirectory);
         assert_eq!(model.visible_rows()[0].label(), "file");
-        assert!(reducer.pending.borrow().is_none());
+        assert!(reducer.scan.pending.borrow().is_none());
         assert_eq!(
             requests.lock().unwrap().len(),
             3,
@@ -5807,7 +6172,7 @@ mod tests {
         model.set_selected(position);
         reducer.reduce(&mut model, BrowserAction::EnterDirectory);
         assert_eq!(model.visible_rows().len(), 2);
-        assert!(reducer.pending.borrow().is_none());
+        assert!(reducer.scan.pending.borrow().is_none());
         reducer.reduce(&mut model, BrowserAction::ReturnToParent);
         let position = model
             .visible_rows()
@@ -5890,7 +6255,7 @@ mod tests {
             2,
             "a completed partial snapshot is reusable display evidence too"
         );
-        assert!(reducer.pending.borrow().is_none());
+        assert!(reducer.scan.pending.borrow().is_none());
     }
 
     #[test]

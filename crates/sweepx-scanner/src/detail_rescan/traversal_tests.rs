@@ -695,6 +695,86 @@ fn final_directory_observation_cancellation_never_publishes_success() {
 }
 
 #[test]
+fn nested_size_snapshot_inventory_matches_direct_listing_across_excluded_children() {
+    for denied in [false, true] {
+        let (_temp, root) = fixture();
+        fs::create_dir(root.join("child")).unwrap();
+        fs::write(root.join("child/file"), b"1234567").unwrap();
+        fs::create_dir(root.join("child/excluded")).unwrap();
+        fs::write(root.join("child/excluded/never-read"), vec![9; 1024]).unwrap();
+        let (scan_id, observed) = source(&root);
+        let probe = Arc::new(Probe::default());
+        let mut platform = ProbedPlatform::new(Arc::clone(&probe));
+        let excluded = root.join("child/excluded");
+        if denied {
+            platform
+                .child_io_errors
+                .insert(excluded.clone(), std::io::ErrorKind::PermissionDenied);
+        } else {
+            platform.mount_boundaries.insert(excluded.clone());
+        }
+        let scanner = DetailRescanner::new(platform, limits());
+        let mut sizes = Vec::new();
+        let mut ids = DetailEntryIdAllocator::new(scan_id.clone()).unwrap();
+        let detail = scanner
+            .rescan_logical_with_directory_observations(
+                request(&scan_id, &observed),
+                &mut ids,
+                &CancellationToken::new(),
+                |_| {},
+                |size| sizes.push(size),
+            )
+            .unwrap();
+        let child = detail
+            .rows
+            .iter()
+            .find(|row| row.object_type == ObjectType::Directory)
+            .unwrap();
+        let snapshot = sizes
+            .iter()
+            .find(|size| size.identity.entry_id == child.identity.as_ref().unwrap().entry_id)
+            .unwrap();
+        let listing = scanner
+            .rescan_direct_children(
+                DetailRescanRequest {
+                    source_directory_identity: child.identity.as_ref().unwrap(),
+                    directory_locator: child.executable_native_locator().unwrap().unwrap(),
+                    ..request(&scan_id, &observed)
+                },
+                &mut ids,
+                &CancellationToken::new(),
+            )
+            .unwrap();
+        let admitted = fs::read_dir(root.join("child"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path != &excluded)
+            .collect::<Vec<_>>();
+        assert_eq!(listing.rows.len(), admitted.len());
+        assert_eq!(
+            snapshot.aggregate.direct_child_count,
+            known_count(admitted.len() as u128)
+        );
+        assert_eq!(
+            snapshot.aggregate.direct_child_count,
+            listing.aggregate.direct_child_count
+        );
+        assert!(!snapshot.aggregate.coverage.complete);
+        assert!(!listing.aggregate.coverage.complete);
+        assert_eq!(
+            snapshot.aggregate.apparent_logical_bytes,
+            EvidenceValue::LowerBound {
+                value: DecimalU128::new(
+                    fs::metadata(root.join("child/file")).unwrap().len() as u128
+                ),
+                reason: ReasonCode::IncompleteStreamCoverage,
+            }
+        );
+        released(&probe);
+    }
+}
+
+#[test]
 fn logical_usage_honors_cancellation_in_final_progress_callback() {
     let (_temp, root) = fixture();
     fs::create_dir(root.join("nested")).unwrap();

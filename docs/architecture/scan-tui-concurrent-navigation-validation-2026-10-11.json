@@ -1,0 +1,505 @@
+{
+  "kind": "sweepx.scan-tui.concurrent-navigation.validation/v1",
+  "host": "macOS 26.5.2 arm64",
+  "date": "2026-10-11",
+  "limits": [
+    "Functional terminal acceptance, one run per locale; OS caches not cleared; compilation checks ran concurrently.",
+    "English root completed; Chinese verified active navigation and exited while root continued.",
+    "Independent direct-name comparison; incomplete root coverage, no full byte-total oracle.",
+    "Cross-target source checks only; native Linux/Windows TUI unverified."
+  ],
+  "runs": [
+    {
+      "date": "2026-10-11",
+      "root": "/",
+      "locale": "en-US",
+      "build": "debug Rust 1.98.0",
+      "os_cache": "not cleared",
+      "sweepx_cache": "new session, no state",
+      "repetitions": 1,
+      "phases": [
+        {
+          "name": "root actively scanning",
+          "seconds_since_start": 1.637,
+          "terminal": [
+            "SweepX | Scanning | 1119 entries | 0.1s | 9325/s",
+            "Scan roots > / | Scanned size: 326202621 B",
+            "Scanning: /usr/standalone/firmware/S4E/000000580231931B.pak",
+            "Name                                                                                                           Type        Size             status",
+            "usr                                                                                                            directory   326202621 B      Counting",
+            ".VolumeIcon.icns                                                                                               symlink     36 B             Complete",
+            "home                                                                                                           symlink     25 B             Complete",
+            "etc                                                                                                            symlink     11 B             Complete",
+            "tmp                                                                                                            symlink     11 B             Complete",
+            "var                                                                                                            symlink     11 B             Complete",
+            ".nofollow                                                                                                      directory   0 B              Counting",
+            ".resolve                                                                                                       directory   0 B              Counting",
+            ".vol                                                                                                           directory   0 B              Counting",
+            "System                                                                                                         directory   0 B              Counting",
+            "bin                                                                                                            directory   0 B              Counting",
+            "sbin                                                                                                           directory   0 B              Counting",
+            "↑/↓ select  Enter/→ open  Esc/Backspace/← back  p full path  d/Delete move to Trash  q/Ctrl-C quit | Scanning current directory…"
+          ]
+        },
+        {
+          "name": "child list visible while root continues",
+          "seconds_since_start": 1.926,
+          "terminal": [
+            "SweepX | Scanning in background | 2903 entries | 0.4s | 7660/s",
+            "Scan roots > / > /usr | Scanned size: 0 B",
+            "Scanning: /usr/lib/zsh",
+            "Name                                                                                                           Type        Size             status",
+            "X11                                                                                                            symlink     25 B             Complete",
+            "X11R6                                                                                                          symlink     25 B             Complete",
+            "bin                                                                                                            directory   0 B              Incomplete",
+            "lib                                                                                                            directory   0 B              Incomplete",
+            "libexec                                                                                                        directory   0 B              Incomplete",
+            "sbin                                                                                                           directory   0 B              Incomplete",
+            "share                                                                                                          directory   0 B              Incomplete",
+            "standalone                                                                                                     directory   0 B              Incomplete",
+            "↑/↓ select  Enter/→ open  Esc/Backspace/← back  p full path  d/Delete move to Trash  q/Ctrl-C quit | Background scan continues · enter/back available"
+          ]
+        },
+        {
+          "name": "root progress advanced while child stayed open",
+          "seconds_since_start": 7.97,
+          "terminal": [
+            "SweepX | Scanning in background | 23584 entries | 6.4s | 3661/s",
+            "Scan roots > / > /usr | Scanned size: 1665842660 B",
+            "Scanning: /System/iOSSupport/System/Library/AccessibilityBundles/MobileSafariFramework.axbundle/Contents",
+            "Name                                                                                                           Type        Size             status",
+            "X11                                                                                                            symlink     25 B             Complete",
+            "X11R6                                                                                                          symlink     25 B             Complete",
+            "bin                                                                                                            directory   0 B              Incomplete",
+            "lib                                                                                                            directory   0 B              Incomplete",
+            "libexec                                                                                                        directory   0 B              Incomplete",
+            "sbin                                                                                                           directory   0 B              Incomplete",
+            "share                                                                                                          directory   0 B              Incomplete",
+            "standalone                                                                                                     directory   0 B              Incomplete",
+            "↑/↓ select  Enter/→ open  Esc/Backspace/← back  p full path  d/Delete move to Trash  q/Ctrl-C quit | Background scan continues · enter/back available"
+          ]
+        },
+        {
+          "name": "back to running root 1",
+          "seconds_since_start": 7.974,
+          "terminal": [
+            "SweepX | Scanning | 23584 entries | 6.4s | 3661/s",
+            "Scan roots > / | Scanned size: 1699721465 B",
+            "Scanning: /System/iOSSupport/System/Library/AccessibilityBundles/MobileSafariFramework.axbundle/Contents",
+            "Name                                                                                                           Type        Size             status",
+            "usr                                                                                                            directory   1665842660 B     Counting",
+            "System                                                                                                         directory   12867589 B       Counting",
+            "bin                                                                                                            directory   11781168 B       Counting",
+            "sbin                                                                                                           directory   9230048 B        Counting",
+            ".VolumeIcon.icns                                                                                               symlink     36 B             Complete",
+            "home                                                                                                           symlink     25 B             Complete",
+            "etc                                                                                                            symlink     11 B             Complete",
+            "tmp                                                                                                            symlink     11 B             Complete",
+            "var                                                                                                            symlink     11 B             Complete",
+            ".nofollow                                                                                                      directory   0 B              Counting",
+            ".resolve                                                                                                       directory   0 B              Counting",
+            ".vol                                                                                                           directory   0 B              Counting",
+            "↑/↓ select  Enter/→ open  Esc/Backspace/← back  p full path  d/Delete move to Trash  q/Ctrl-C quit | Scanning current directory…      /back available"
+          ]
+        },
+        {
+          "name": "reenter retained child 1",
+          "seconds_since_start": 7.978,
+          "terminal": [
+            "SweepX | Scanning in background | 23584 entries | 6.4s | 3661/s",
+            "Scan roots > / > /usr | Scanned size: 1665842660 B",
+            "Scanning: /System/iOSSupport/System/Library/AccessibilityBundles/MobileSafariFramework.axbundle/Contents",
+            "Name                                                                                                           Type        Size             status",
+            "X11                                                                                                            symlink     25 B             Complete",
+            "X11R6                                                                                                          symlink     25 B             Complete",
+            "bin                                                                                                            directory   0 B              Incomplete",
+            "lib                                                                                                            directory   0 B              Incomplete",
+            "libexec                                                                                                        directory   0 B              Incomplete",
+            "sbin                                                                                                           directory   0 B              Incomplete",
+            "share                                                                                                          directory   0 B              Incomplete",
+            "standalone                                                                                                     directory   0 B              Incomplete",
+            "↑/↓ select  Enter/→ open  Esc/Backspace/← back  p full path  d/Delete move to Trash  q/Ctrl-C quit | Background scan continues · enter/"
+          ]
+        },
+        {
+          "name": "back to running root 2",
+          "seconds_since_start": 7.982,
+          "terminal": [
+            "SweepX | Scanning | 23584 entries | 6.4s | 3661/s",
+            "Scan roots > / | Scanned size: 1699721465 B",
+            "Scanning: /System/iOSSupport/System/Library/AccessibilityBundles/MobileSafariFramework.axbundle/Contents",
+            "Name                                                                                                           Type        Size             status",
+            "usr                                                                                                            directory   1665842660 B     Counting",
+            "System                                                                                                         directory   12867589 B       Counting",
+            "bin                                                                                                            directory   11781168 B       Counting",
+            "sbin                                                                                                           directory   9230048 B        Counting",
+            ".VolumeIcon.icns                                                                                               symlink     36 B             Complete",
+            "home                                                                                                           symlink     25 B             Complete",
+            "etc                                                                                                            symlink     11 B             Complete",
+            "tmp                                                                                                            symlink     11 B             Complete",
+            "var                                                                                                            symlink     11 B             Complete",
+            ".nofollow                                                                                                      directory   0 B              Counting",
+            ".resolve                                                                                                       directory   0 B              Counting",
+            ".vol                                                                                                           directory   0 B              Counting",
+            "↑/↓ select  Enter/→ open  Esc/Backspace/← back  p full path  d/Delete move to Trash  q/Ctrl-C quit | Scanning current directory…      /back available"
+          ]
+        },
+        {
+          "name": "reenter retained child 2",
+          "seconds_since_start": 7.986,
+          "terminal": [
+            "SweepX | Scanning in background | 23584 entries | 6.4s | 3661/s",
+            "Scan roots > / > /usr | Scanned size: 1665842660 B",
+            "Scanning: /System/iOSSupport/System/Library/AccessibilityBundles/MobileSafariFramework.axbundle/Contents",
+            "Name                                                                                                           Type        Size             status",
+            "X11                                                                                                            symlink     25 B             Complete",
+            "X11R6                                                                                                          symlink     25 B             Complete",
+            "bin                                                                                                            directory   0 B              Incomplete",
+            "lib                                                                                                            directory   0 B              Incomplete",
+            "libexec                                                                                                        directory   0 B              Incomplete",
+            "sbin                                                                                                           directory   0 B              Incomplete",
+            "share                                                                                                          directory   0 B              Incomplete",
+            "standalone                                                                                                     directory   0 B              Incomplete",
+            "↑/↓ select  Enter/→ open  Esc/Backspace/← back  p full path  d/Delete move to Trash  q/Ctrl-C quit | Background scan continues · enter/"
+          ]
+        },
+        {
+          "name": "back to running root 3",
+          "seconds_since_start": 7.99,
+          "terminal": [
+            "SweepX | Scanning | 23584 entries | 6.4s | 3661/s",
+            "Scan roots > / | Scanned size: 1699721465 B",
+            "Scanning: /System/iOSSupport/System/Library/AccessibilityBundles/MobileSafariFramework.axbundle/Contents",
+            "Name                                                                                                           Type        Size             status",
+            "usr                                                                                                            directory   1665842660 B     Counting",
+            "System                                                                                                         directory   12867589 B       Counting",
+            "bin                                                                                                            directory   11781168 B       Counting",
+            "sbin                                                                                                           directory   9230048 B        Counting",
+            ".VolumeIcon.icns                                                                                               symlink     36 B             Complete",
+            "home                                                                                                           symlink     25 B             Complete",
+            "etc                                                                                                            symlink     11 B             Complete",
+            "tmp                                                                                                            symlink     11 B             Complete",
+            "var                                                                                                            symlink     11 B             Complete",
+            ".nofollow                                                                                                      directory   0 B              Counting",
+            ".resolve                                                                                                       directory   0 B              Counting",
+            ".vol                                                                                                           directory   0 B              Counting",
+            "↑/↓ select  Enter/→ open  Esc/Backspace/← back  p full path  d/Delete move to Trash  q/Ctrl-C quit | Scanning current directory…      /back available"
+          ]
+        },
+        {
+          "name": "reenter retained child 3",
+          "seconds_since_start": 7.995,
+          "terminal": [
+            "SweepX | Scanning in background | 23842 entries | 6.6s | 3633/s",
+            "Scan roots > / > /usr | Scanned size: 1665842660 B",
+            "Scanning: /System/iOSSupport/System/Library/AccessibilityBundles/ContinuousExposeModule.axbundle/Contents/Resources/de.lproj",
+            "Name                                                                                                           Type        Size             status",
+            "X11                                                                                                            symlink     25 B             Complete",
+            "X11R6                                                                                                          symlink     25 B             Complete",
+            "bin                                                                                                            directory   0 B              Incomplete",
+            "lib                                                                                                            directory   0 B              Incomplete",
+            "libexec                                                                                                        directory   0 B              Incomplete",
+            "sbin                                                                                                           directory   0 B              Incomplete",
+            "share                                                                                                          directory   0 B              Incomplete",
+            "standalone                                                                                                     directory   0 B              Incomplete",
+            "unting",
+            "↑/↓ select  Enter/→ open  Esc/Backspace/← back  p full path  d/Delete move to Trash  q/Ctrl-C quit | Scanning current directory…"
+          ]
+        },
+        {
+          "name": "root completion preserves open child and publishes sizes",
+          "seconds_since_start": 73.062,
+          "terminal": [
+            "SweepX | Finished | 485975 entries | 71.4s | 6808/s",
+            "Scan roots > / > /usr | Counted size (partial): 1665842660 B",
+            "Scanned: /System/DriverKit/System/Library/Frameworks/PCIDriverKit.framework",
+            "Name                                                                                                           Type        Size             status",
+            "libexec                                                                                                        directory   571477571 B      Incomplete",
+            "share                                                                                                          directory   547740477 B      Incomplete",
+            "bin                                                                                                            directory   235389012 B      Complete",
+            "standalone                                                                                                     directory   158894624 B      Complete",
+            "sbin                                                                                                           directory   117543095 B      Incomplete",
+            "lib                                                                                                            directory   34797881 B       Complete",
+            "X11                                                                                                            symlink     25 B             Complete",
+            "X11R6                                                                                                          symlink     25 B             Complete",
+            "↑/↓ select  Enter/→ open  Esc/Backspace/← back  p full path  d/Delete move to Trash  q/Ctrl-C quit | Scan-time results · r rescan"
+          ]
+        },
+        {
+          "name": "root totals after concurrent navigation",
+          "seconds_since_start": 73.065,
+          "terminal": [
+            "SweepX | Finished",
+            "Scan roots > / | Counted size (partial): 20375437179 B",
+            "Name                                                                                                           Type        Size             status",
+            "System                                                                                                         directory   18688583303 B    Incomplete",
+            "usr                                                                                                            directory   1665842660 B     Incomplete",
+            "bin                                                                                                            directory   11781168 B       Complete",
+            "sbin                                                                                                           directory   9230048 B        Complete",
+            ".VolumeIcon.icns                                                                                               symlink     36 B             Complete",
+            "home                                                                                                           symlink     25 B             Complete",
+            "etc                                                                                                            symlink     11 B             Complete",
+            "tmp                                                                                                            symlink     11 B             Complete",
+            "var                                                                                                            symlink     11 B             Complete",
+            ".nofollow                                                                                                      directory   0 B              Complete",
+            ".resolve                                                                                                       di",
+            "↑/↓ select  Enter/→ open  Esc/Backspace/← back  p full path  d/Delete move to Trash  q/Ctrl-C quit | Scan-time results · r rescan"
+          ]
+        }
+      ],
+      "opened_child": "/usr",
+      "first_listing_terminal_seconds": 0.112,
+      "independent_direct_names": [
+        "X11",
+        "X11R6",
+        "bin",
+        "lib",
+        "libexec",
+        "local",
+        "sbin",
+        "share",
+        "standalone"
+      ],
+      "visible_child_names": [
+        "X11",
+        "X11R6",
+        "bin",
+        "lib",
+        "libexec",
+        "sbin",
+        "share",
+        "standalone"
+      ],
+      "root_entries_with_child_visible": [
+        2903,
+        23584
+      ],
+      "root_entries_at_child_completion": 485975,
+      "exit": 0
+    },
+    {
+      "date": "2026-10-11",
+      "root": "/",
+      "locale": "zh-CN",
+      "build": "debug Rust 1.98.0",
+      "os_cache": "not cleared",
+      "sweepx_cache": "new session, no state",
+      "repetitions": 1,
+      "phases": [
+        {
+          "name": "root actively scanning",
+          "seconds_since_start": 0.675,
+          "terminal": [
+            "SweepX | 扫描中 | 已扫描 27 项 | 0.2 秒 | 136 项/秒",
+            "扫描根目录 > / | 已扫描大小: 3066999 B",
+            "正在扫描: /usr/bin/rview",
+            "名称                                                                                                           类型        大小             状态",
+            "usr                                                                                                            directory   3066999 B        统计中",
+            ".VolumeIcon.icns                                                                                               symlink     36 B             已完成",
+            "home                                                                                                           symlink     25 B             已完成",
+            "etc                                                                                                            symlink     11 B             已完成",
+            "tmp                                                                                                            symlink     11 B             已完成",
+            "var                                                                                                            symlink     11 B             已完成",
+            ".nofollow                                                                                                      directory   0 B              统计中",
+            ".resolve                                                                                                       directory   0 B              统计中",
+            ".vol                                                                                                           directory   0 B              统计中",
+            "System                                                                                                         directory   0 B              统计中",
+            "bin                                                                                                            directory   0 B              统计中",
+            "sbin                                                                                                           directory   0 B              统计中",
+            "↑/↓ 选择  Enter/→ 进入目录  Esc/Backspace/← 返回  p 完整路径  d/Delete 移到回收站  q/Ctrl-C 退出 | 正在扫描当前目录…"
+          ]
+        },
+        {
+          "name": "child list visible while root continues",
+          "seconds_since_start": 0.94,
+          "terminal": [
+            "SweepX | 后台扫描中 | 已扫描 940 项 | 0.5 秒 | 2022 项/秒",
+            "扫描根目录 > / > /usr | 已扫描大小: 0 B",
+            "正在扫描: /usr/standalone/firmware/t302/000000059000A15D.pak",
+            "名称                                                                                                           类型        大小             状态",
+            "X11                                                                                                            symlink     25 B             已完成",
+            "X11R6                                                                                                          symlink     25 B             已完成",
+            "bin                                                                                                            directory   0 B              未完整扫描",
+            "lib                                                                                                            directory   0 B              未完整扫描",
+            "libexec                                                                                                        directory   0 B              未完整扫描",
+            "sbin",
+            "↑/↓ 选择  Enter/→ 进入目录  Esc/Backspace/← 返回  p 完整路径  d/Delete 移到回收站  q/Ctrl-C 退出 | 读取当前层目录列表"
+          ]
+        },
+        {
+          "name": "root progress advanced while child stayed open",
+          "seconds_since_start": 6.965,
+          "terminal": [
+            "SweepX | 后台扫描中 | 已扫描 15740 项 | 6.5 秒 | 2423 项/秒",
+            "扫描根目录 > / > /usr | 已扫描大小: 1296255648 B",
+            "正在扫描: /usr/share/locale/da_DK/LC_CTYPE",
+            "名称                                                                                                           类型        大小             状态",
+            "X11                                                                                                            symlink     25 B             已完成",
+            "X11R6                                                                                                          symlink     25 B             已完成",
+            "bin                                                                                                            directory   0 B              未完整扫描",
+            "lib                                                                                                            directory   0 B              未完整扫描",
+            "libexec                                                                                                        directory   0 B              未完整扫描",
+            "sbin                                                                                                           directory   0 B              未完整扫描",
+            "share                                                                                                          directory   0 B              未完整扫描",
+            "standalone                                                                                                     directory   0 B              未完整扫描",
+            "↑/↓ 选择  Enter/→ 进入目录  Esc/Backspace/← 返回  p 完整路径  d/Delete 移到回收站  q/Ctrl-C 退出 | 后台扫描继续 · 可进入或返回"
+          ]
+        },
+        {
+          "name": "back to running root 1",
+          "seconds_since_start": 6.968,
+          "terminal": [
+            "SweepX | 扫描中 | 已扫描 15740 项 | 6.5 秒 | 2423 项/秒",
+            "扫描根目录 > / | 已扫描大小: 1296255648 B",
+            "正在扫描: /usr/share/locale/da_DK/LC_CTYPE",
+            "名称                                                                                                           类型        大小             状态",
+            "usr                                                                                                            directory   1296255648 B     统计中",
+            ".VolumeIcon.icns                                                                                               symlink     36 B             已完成",
+            "home                                                                                                           symlink     25 B             已完成",
+            "etc                                                                                                            symlink     11 B             已完成",
+            "tmp                                                                                                            symlink     11 B             已完成",
+            "var                                                                                                            symlink     11 B             已完成",
+            ".nofollow                                                                                                      directory   0 B              统计中",
+            ".resolve                                                                                                       directory   0 B              统计中",
+            ".vol                                                                                                           directory   0 B              统计中",
+            "System                                                                                                         directory   0 B              统计中",
+            "bin                                                                                                            directory",
+            "↑/↓ 选择  Enter/→ 进入目录  Esc/Backspace/← 返回  p 完整路径  d/Delete 移到回收站  q/Ctrl-C 退出 | 后台扫描继续 · 可进入或返回"
+          ]
+        },
+        {
+          "name": "reenter retained child 1",
+          "seconds_since_start": 6.972,
+          "terminal": [
+            "SweepX | 后台扫描中 | 已扫描 15740 项 | 6.5 秒 | 2423 项/秒",
+            "扫描根目录 > / > /usr | 已扫描大小: 1296255648 B",
+            "正在扫描: /usr/share/locale/da_DK/LC_CTYPE",
+            "名称                                                                                                           类型        大小             状态",
+            "X11                                                                                                            symlink     25 B             已完成",
+            "X11R6                                                                                                          symlink     25 B             已完成",
+            "bin                                                                                                            directory   0 B              未完整扫描",
+            "lib                                                                                                            directory   0 B              未完整扫描",
+            "libexec                                                                                                        directory   0 B              未完整扫描",
+            "sbin                                                                                                           directory   0 B              未完整扫描",
+            "share                                                                                                          directory   0 B              未完整扫描",
+            "standalone                                                                                                     directory   0 B              未完整扫描",
+            "bin                                                                                                            directory   0 B              统计中",
+            "sbin                                                                                                           directory   0 B              统计中",
+            "↑/↓ 选择  Enter/→ 进入目录  Esc/Backspace/← 返回  p 完整路径  d/Delete 移到回收站  q/Ctrl-C 退出 | 正在扫描当前目录…"
+          ]
+        },
+        {
+          "name": "back to running root 2",
+          "seconds_since_start": 6.975,
+          "terminal": [
+            "SweepX | 扫描中 | 已扫描 15740 项 | 6.5 秒 | 2423 项/秒",
+            "扫描根目录 > / | 已扫描大小: 1296255648 B",
+            "正在扫描: /usr/share/locale/da_DK/LC_CTYPE",
+            "名称                                                                                                           类型        大小             状态",
+            "usr                                                                                                            directory   1296255648 B     统计中",
+            ".VolumeIcon.icns                                                                                               symlink     36 B             已完成",
+            "home                                                                                                           symlink     25 B             已完成",
+            "etc                                                                                                            symlink     11 B             已完成",
+            "tmp                                                                                                            symlink     11 B             已完成",
+            "var                                                                                                            symlink     11 B             已完成",
+            ".nofollow                                                                                                      directory   0 B              统计中",
+            ".resolve                                                                                                       directory   0 B              统计中",
+            ".vol                                                                                                           directory   0 B              统计中",
+            "System                                                                                                         directory   0 B              统计中",
+            "bin                                                                                                            directory",
+            "↑/↓ 选择  Enter/→ 进入目录  Esc/Backspace/← 返回  p 完整路径  d/Delete 移到回收站  q/Ctrl-C 退出 | 后台扫描继续 · 可进入或返回"
+          ]
+        },
+        {
+          "name": "reenter retained child 2",
+          "seconds_since_start": 6.979,
+          "terminal": [
+            "SweepX | 后台扫描中 | 已扫描 15740 项 | 6.5 秒 | 2423 项/秒",
+            "扫描根目录 > / > /usr | 已扫描大小: 1296255648 B",
+            "正在扫描: /usr/share/locale/da_DK/LC_CTYPE",
+            "名称                                                                                                           类型        大小             状态",
+            "X11                                                                                                            symlink     25 B             已完成",
+            "X11R6                                                                                                          symlink     25 B             已完成",
+            "bin                                                                                                            directory   0 B              未完整扫描",
+            "lib                                                                                                            directory   0 B              未完整扫描",
+            "libexec                                                                                                        directory   0 B              未完整扫描",
+            "sbin                                                                                                           directory   0 B              未完整扫描",
+            "share                                                                                                          directory   0 B              未完整扫描",
+            "standalone                                                                                                     directory   0 B              未完整扫描",
+            "bin                                                                                                            directory   0 B              统计中",
+            "sbin                                                                                                           directory   0 B              统计中",
+            "↑/↓ 选择  Enter/→ 进入目录  Esc/Backspace/← 返回  p 完整路径  d/Delete 移到回收站  q/Ctrl-C 退出 | 正在扫描当前目录…"
+          ]
+        },
+        {
+          "name": "back to running root 3",
+          "seconds_since_start": 6.981,
+          "terminal": [
+            "SweepX | 扫描中 | 已扫描 15740 项 | 6.5 秒 | 2423 项/秒",
+            "扫描根目录 > / | 已扫描大小: 1296255648 B",
+            "正在扫描: /usr/share/locale/da_DK/LC_CTYPE",
+            "名称                                                                                                           类型        大小             状态",
+            "usr                                                                                                            directory   1296255648 B     统计中",
+            ".VolumeIcon.icns                                                                                               symlink     36 B             已完成",
+            "home                                                                                                           symlink     25 B             已完成",
+            "etc                                                                                                            symlink     11 B             已完成",
+            "tmp                                                                                                            symlink     11 B             已完成",
+            "var                                                                                                            symlink     11 B             已完成",
+            ".nofollow                                                                                                      directory   0 B              统计中",
+            ".resolve                                                                                                       directory   0 B              统计中",
+            ".vol                                                                                                           directory   0 B              统计中",
+            "System                                                                                                         directory   0 B              统计中",
+            "bin                                                                                                            directory",
+            "↑/↓ 选择  Enter/→ 进入目录  Esc/Backspace/← 返回  p 完整路径  d/Delete 移到回收站  q/Ctrl-C 退出 | 后台扫描继续 · 可进入或返回"
+          ]
+        },
+        {
+          "name": "reenter retained child 3",
+          "seconds_since_start": 6.985,
+          "terminal": [
+            "SweepX | 后台扫描中 | 已扫描 15740 项 | 6.5 秒 | 2423 项/秒",
+            "扫描根目录 > / > /usr | 已扫描大小: 1296255648 B",
+            "正在扫描: /usr/share/locale/da_DK/LC_CTYPE",
+            "名称                                                                                                           类型        大小             状态",
+            "X11                                                                                                            symlink     25 B             已完成",
+            "X11R6                                                                                                          symlink     25 B             已完成",
+            "bin                                                                                                            directory   0 B              未完整扫描",
+            "lib                                                                                                            directory   0 B              未完整扫描",
+            "libexec                                                                                                        directory   0 B              未完整扫描",
+            "sbin                                                                                                           directory   0 B              未完整扫描",
+            "share                                                                                                          directory   0 B              未完整扫描",
+            "standalone                                                                                                     directory   0 B              未完整扫描",
+            "bin                                                                                                            directory   0 B              统计中",
+            "sbin                                                                                                           directory   0 B              统计中",
+            "↑/↓ 选择  Enter/→ 进入目录  Esc/Backspace/← 返回  p 完整路径  d/Delete 移到回收站  q/Ctrl-C 退出 | 正在扫描当前目录…"
+          ]
+        }
+      ],
+      "opened_child": "/usr",
+      "first_listing_terminal_seconds": 0.109,
+      "independent_direct_names": [
+        "X11",
+        "X11R6",
+        "bin",
+        "lib",
+        "libexec",
+        "local",
+        "sbin",
+        "share",
+        "standalone"
+      ],
+      "visible_child_names": [
+        "X11",
+        "X11R6",
+        "bin",
+        "lib",
+        "libexec"
+      ],
+      "root_entries_with_child_visible": [
+        940,
+        15740
+      ],
+      "exit": 0
+    }
+  ]
+}

@@ -1,5 +1,9 @@
 # Scan TUI navigation during active work — 2026-10-11
 
+The single-worker child-list waiting behavior below is superseded by
+[concurrent navigation](scan-tui-concurrent-navigation-2026-10-11.md). The measurements remain
+a historical record of this earlier implementation.
+
 This fixes active navigation separately from [finished-result reuse](scan-tui-navigation-2026-10-11.md).
 Previously, the reducer ignored every Enter while a worker was pending. Returning to the roots
 page cleared activity, offscreen completion was discarded, and listing-to-aggregation continuation

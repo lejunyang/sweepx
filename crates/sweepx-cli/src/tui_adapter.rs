@@ -38,6 +38,7 @@ struct LiveTuiDetailRescanProvider {
     sizes: Mutex<size_snapshots::SizeSnapshots>,
     ids: Mutex<DetailEntryIdAllocator>,
     cancel: Mutex<CancellationToken>,
+    listing_cancel: Mutex<CancellationToken>,
     progress: Mutex<Option<std::sync::mpsc::SyncSender<TuiDetailRescanProgress>>>,
 }
 
@@ -124,6 +125,7 @@ fn live_tui_detail_rescan_provider(
         sizes: Mutex::new(Default::default()),
         ids: Mutex::new(ids),
         cancel: Mutex::new(CancellationToken::new()),
+        listing_cancel: Mutex::new(CancellationToken::new()),
         progress: Mutex::new(None),
     })
 }
@@ -166,10 +168,62 @@ impl DetailRescanProvider for TuiDetailRescanProvider {
     }
 
     fn rescan_detail(&self, request: &TuiDetailRescanRequest) -> TuiDetailRescanResult {
+        self.rescan_for_lane(request, false)
+    }
+
+    fn prepare_directory_listing(&self) {
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+        if let Some(live) = &self.live
+            && let Ok(mut cancel) = live.listing_cancel.lock()
+        {
+            *cancel = CancellationToken::new();
+        }
+    }
+
+    fn rescan_directory_listing(&self, request: &TuiDetailRescanRequest) -> TuiDetailRescanResult {
+        if !matches!(request.reason, DetailRescanReason::ProgressiveListing) {
+            return TuiDetailRescanResult::Failed {
+                binding: Box::new(request.binding.clone()),
+                failure: TuiDetailRescanFailure::InvalidResult,
+            };
+        }
+        self.rescan_for_lane(request, true)
+    }
+
+    fn cancel_directory_listing(&self) {
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+        if let Some(live) = &self.live
+            && let Ok(cancel) = live.listing_cancel.lock()
+        {
+            cancel.cancel();
+        }
+    }
+
+    fn cancel_detail_rescan(&self) {
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+        if let Some(live) = &self.live
+            && let Ok(cancel) = live.cancel.lock()
+        {
+            cancel.cancel();
+        }
+    }
+}
+
+impl TuiDetailRescanProvider {
+    fn rescan_for_lane(
+        &self,
+        request: &TuiDetailRescanRequest,
+        listing_lane: bool,
+    ) -> TuiDetailRescanResult {
         #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
         if let Some(live) = &self.live {
             let binding = request.binding.clone();
-            let Ok(cancel_slot) = live.cancel.lock() else {
+            let cancel_state = if listing_lane {
+                &live.listing_cancel
+            } else {
+                &live.cancel
+            };
+            let Ok(cancel_slot) = cancel_state.lock() else {
                 return TuiDetailRescanResult::Failed {
                     binding: Box::new(binding),
                     failure: TuiDetailRescanFailure::Unavailable,
@@ -177,12 +231,21 @@ impl DetailRescanProvider for TuiDetailRescanProvider {
             };
             let cancel = cancel_slot.clone();
             drop(cancel_slot);
-            let Ok(mut ids) = live.ids.lock() else {
+            let Ok(mut pool) = live.ids.lock() else {
                 return TuiDetailRescanResult::Failed {
                     binding: Box::new(binding),
                     failure: TuiDetailRescanFailure::Unavailable,
                 };
             };
+            // Reserve once, then release the shared cursor before native I/O. Each query can
+            // visit at most usize::MAX entries, and its private range cannot overlap another job.
+            let Ok(mut ids) = pool.reserve_query_range(usize::MAX) else {
+                return TuiDetailRescanResult::Failed {
+                    binding: Box::new(binding),
+                    failure: TuiDetailRescanFailure::ResourceLimit,
+                };
+            };
+            drop(pool);
             let scanner_request = DetailRescanRequest {
                 source_scan_id: &request.binding.source_scan_id,
                 source_root_identity: &request.binding.source_root_identity,
@@ -283,15 +346,6 @@ impl DetailRescanProvider for TuiDetailRescanProvider {
         TuiDetailRescanResult::Failed {
             binding: Box::new(request.binding.clone()),
             failure: TuiDetailRescanFailure::Unavailable,
-        }
-    }
-
-    fn cancel_detail_rescan(&self) {
-        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-        if let Some(live) = &self.live
-            && let Ok(cancel) = live.cancel.lock()
-        {
-            cancel.cancel();
         }
     }
 }
@@ -494,6 +548,7 @@ mod tui_detail_rescan_provider_tests {
                 sizes: Mutex::new(Default::default()),
                 ids: Mutex::new(ids),
                 cancel: Mutex::new(CancellationToken::new()),
+                listing_cancel: Mutex::new(CancellationToken::new()),
                 progress: Mutex::new(None),
             }),
         };
@@ -640,6 +695,37 @@ mod tui_detail_rescan_provider_tests {
         assert!(matches!(
             provider.rescan_detail(&request),
             TuiDetailRescanResult::Refreshed(_)
+        ));
+        let listing = TuiDetailRescanRequest {
+            reason: DetailRescanReason::ProgressiveListing,
+            ..request.clone()
+        };
+        provider.prepare_directory_listing();
+        provider.cancel_directory_listing();
+        provider.prepare_detail_rescan();
+        assert!(matches!(
+            provider.rescan_detail(&request),
+            TuiDetailRescanResult::Refreshed(_)
+        ));
+        assert!(matches!(
+            provider.rescan_directory_listing(&listing),
+            TuiDetailRescanResult::Failed {
+                failure: TuiDetailRescanFailure::Cancelled,
+                ..
+            }
+        ));
+        provider.prepare_directory_listing();
+        provider.cancel_detail_rescan();
+        assert!(matches!(
+            provider.rescan_directory_listing(&listing),
+            TuiDetailRescanResult::Refreshed(_)
+        ));
+        assert!(matches!(
+            provider.rescan_detail(&request),
+            TuiDetailRescanResult::Failed {
+                failure: TuiDetailRescanFailure::Cancelled,
+                ..
+            }
         ));
     }
 
