@@ -485,7 +485,7 @@ sweepx browser-extension status
 更新时保持目录不变，用新版 SweepX 执行 `browser-extension bundle --output /absolute/SweepX-Browser-Extension --update`，然后在浏览器重新加载扩展并重新打开工作台；原通信注册路径不变，无需重复注册。此前若加载了版本目录，先切换到固定 `extension` 目录一次，并用 `register --replace` 调整原 SweepX 注册。更新逐个原子替换文件，整个 bundle 不是原子事务；中断后重新执行更新，成功后再重新加载。Windows 更新前需断开使用本地组件的浏览器连接。目前无商店发布、静默安装或商店自动更新；企业策略拒绝时不绕过。用户已在 Edge 展示实际域名明细，实际删除仍待本机验收。详见[扩展指南](https://github.com/lejunyang/sweepx/blob/main/integrations/chromium-cleanup/README.md)。
 
 
-## `pnpm-store` / `osdk-cache`
+## `pnpm-store` / `osdk-cache` {#pnpm-store--osdk-cache}
 
 按包名与版本、模型别名、下载缓存目录逐项查看和选择；`junk --trash` 和通用垃圾 TUI 不再允许整库清理 pnpm/osdk。
 

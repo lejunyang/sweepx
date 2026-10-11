@@ -496,7 +496,7 @@ First load the exported `extension` directory unpacked from the matching browser
 Keep the same directory for updates: run `browser-extension bundle --output /absolute/SweepX-Browser-Extension --update` with the new build, then reload the extension and close/reopen its workbench tab. The registered host path stays valid. If previously loading a versioned directory, switch to the fixed `extension` directory once and use `register --replace` to adjust the existing SweepX registration. Files are replaced atomically one at a time; the whole bundle is not a transaction. Repeat an interrupted update before reloading. On Windows disconnect browser connections to the native host before updating. No store publication, silent installation or automatic store update is implemented; organizational refusal is never bypassed. User screenshots confirm actual domain/detail display in Edge; browser-managed removal still awaits native acceptance. See the [adapter guide](https://github.com/lejunyang/sweepx/blob/main/integrations/chromium-cleanup/README.md).
 
 
-## `pnpm-store` / `osdk-cache`
+## `pnpm-store` / `osdk-cache` {#pnpm-store--osdk-cache}
 
 Inspect and select individual package versions, model aliases and download-cache units. Generic `junk --trash` and the junk TUI block whole pnpm/osdk roots.
 
