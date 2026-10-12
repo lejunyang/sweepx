@@ -344,7 +344,7 @@ impl Default for JunkSessionLimits {
             max_event_bytes: 8 * 1024 * 1024,
             max_candidates: 16_384,
             max_candidate_bytes: 64 * 1024 * 1024,
-            scan: ScanResourceLimits::default(),
+            scan: super::scan_limits(),
             git: GitEvidenceLimits::default(),
             formats: super::format::ProjectFormatLimits::default(),
             #[cfg(target_os = "linux")]
@@ -906,6 +906,7 @@ impl Worker {
             ScannerOptions {
                 scan_id: ScanId::new(format!("{}:{}", self.session_id, job.revision.0)),
                 resource_limits: self.request.limits.scan,
+                retain_directory_index: false,
                 retain_file_index:
                     !sweepx_platform::PlatformScanner::supports_file_length_observation(
                         &HostPlatformScanner::new(),

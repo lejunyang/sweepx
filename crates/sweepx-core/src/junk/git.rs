@@ -183,16 +183,36 @@ impl GitEvidenceSession {
                 }
             }
         }
-        // Classified scans retain sparse gitfile rows, even though other ordinary files are pruned.
+        // Compact classified scans retain only repository marker rows. Their validated native
+        // locators carry the complete observed ancestor chain, including repositories inside
+        // unrelated non-candidate directories; missing lineage cannot prove repository absence.
         for row in &summary.entries {
-            if row.object_type == ObjectType::File
+            if matches!(row.object_type, ObjectType::File | ObjectType::Directory)
                 && is_git_name(&row.native_basename)
-                && let Some(parent) = row.identity.as_ref().and_then(|id| id.parent_id.as_ref())
             {
-                if !self.charge(32) {
+                let Ok(Some(locator)) = row.validated_native_locator() else {
                     return;
+                };
+                for component in locator
+                    .parent_reopen_recipe
+                    .iter()
+                    .chain(std::iter::once(&locator.entry))
+                {
+                    if let Some(parent) = component.parent_id.as_ref()
+                        && !parents.contains_key(&component.entry_id)
+                    {
+                        if parents.len() >= self.limits.max_lineage_records || !self.charge(96) {
+                            return;
+                        }
+                        parents.insert(&component.entry_id, parent);
+                    }
                 }
-                repositories.push(parent);
+                if let Some(parent) = locator.entry.parent_id.as_ref() {
+                    if !self.charge(32) {
+                        return;
+                    }
+                    repositories.push(parent);
+                }
             }
         }
         for candidate in retained_candidates {
@@ -1088,6 +1108,32 @@ mod tests {
                     Some("project_ownership_not_verified")
                 );
             }
+        }
+    }
+
+    #[test]
+    fn compact_directory_lineage_keeps_deep_directory_and_gitfile_repositories() {
+        for directory in [false, true] {
+            let (_owner, _base, project) = fixture();
+            let nested = project.join("target/ordinary/deeper/repository");
+            std::fs::create_dir_all(&nested).unwrap();
+            if directory {
+                std::fs::create_dir(nested.join(".git")).unwrap();
+            } else {
+                std::fs::write(nested.join(".git"), b"gitdir: elsewhere\n").unwrap();
+            }
+            let candidates = scan(&project);
+            let target = candidates
+                .iter()
+                .find(|row| row.path.ends_with("/target") || row.path.ends_with("\\target"))
+                .unwrap();
+            assert_eq!(
+                target.git_scan_facts,
+                Some(GitScanFacts {
+                    complete: true,
+                    contains_repository: true
+                })
+            );
         }
     }
 

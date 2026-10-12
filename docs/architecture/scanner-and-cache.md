@@ -543,3 +543,12 @@ oracle manifest 保存每个预期 identity class、边界、错误、logical/al
 
     missing evidence -> lower confidence -> report or skip
     missing evidence != zero bytes != unused != permission to delete
+
+
+## 垃圾扫描的紧凑目录证据
+
+局部分类入口关闭完整目录索引：每个候选保留自己的覆盖和原生身份链；普通目录完成后不再累计覆盖或目录 marker 图。`.git` 目录与 gitfile 作为稀疏原生行保留，Git 检查从已验证 locator 的全部祖先重建关系，仍能发现候选内部的深层嵌套仓库。缺失/无效身份链、资源或覆盖损失不能证明没有仓库。自定义全局 evaluator 保留完整索引，不能使用这项优化。
+
+完整子树按后序结束后释放自身文件 marker 和浅层枚举标记；这些信息此前已供全部子项分类使用。取消、拒绝或不完整子树可能在根结束时按父项优先交付，因此保留它们的 marker，仍以原预算失败关闭。可选缓存覆盖与索引可被逐出，不构成遍历或删除授权。默认 junk 遍历工作上限为 4,194,304 个目录；资源保留预算没有扩大，普通扫描和垃圾详情的独立限制不变。macOS 垃圾扫描保持原始 mount 范围，不沿普通大小浏览器的跨卷展示路径授权操作。
+
+本机复现、原生终端范围与验证矩阵见 [2026-10-12 根目录垃圾扫描验证](junk-root-budget-2026-10-12.md)。

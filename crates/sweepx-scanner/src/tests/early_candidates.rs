@@ -335,6 +335,7 @@ fn completed_branch_arrives_before_other_payloads_and_survives_cancellation() {
         platform,
         ScannerOptions {
             max_workers: 1,
+            retain_directory_index: false,
             ..Default::default()
         },
     )
@@ -484,7 +485,9 @@ impl JunkClassifier for ParentMarker {
 
 #[test]
 fn late_parent_marker_prevents_premature_negative_decisions_and_preserves_positive_match() {
-    for negative in [false, true] {
+    for (negative, retain_directory_index) in
+        [(false, false), (false, true), (true, false), (true, true)]
+    {
         let (platform, root, target) = marker_fixture(true);
         let mut log = EarlyLog {
             preference: Some(target),
@@ -494,6 +497,7 @@ fn late_parent_marker_prevents_premature_negative_decisions_and_preserves_positi
             platform,
             ScannerOptions {
                 max_workers: 1,
+                retain_directory_index,
                 ..Default::default()
             },
         )
@@ -535,6 +539,7 @@ fn true_parent_marker_absence_is_decided_only_after_parent_enumeration() {
         platform,
         ScannerOptions {
             max_workers: 1,
+            retain_directory_index: false,
             ..Default::default()
         },
     )
@@ -571,6 +576,7 @@ fn custom_evaluator_defaults_to_full_root_markers() {
         platform,
         ScannerOptions {
             max_workers: 1,
+            retain_directory_index: false,
             ..Default::default()
         },
     )
@@ -872,4 +878,106 @@ fn scoped_omission_cannot_hide_malformed_backend_paths() {
             )
             .is_err()
     );
+}
+
+#[cfg(any(
+    all(target_os = "macos", feature = "platform-macos"),
+    all(target_os = "linux", feature = "platform-linux"),
+    all(windows, feature = "platform-windows")
+))]
+#[test]
+fn compact_local_scan_releases_unrelated_directory_evidence_under_a_small_budget() {
+    struct OneBranch;
+    impl JunkClassifier for OneBranch {
+        fn uses_only_local_markers(&self) -> bool {
+            true
+        }
+        fn classify(
+            &self,
+            entry: &ScannedEntry,
+            _: &BTreeMap<ScanEntryId, BTreeSet<String>>,
+        ) -> Option<String> {
+            (native_basename_marker(&entry.native_basename).as_deref() == Some("dir-000"))
+                .then(|| "one-branch".into())
+        }
+    }
+    let owner = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    let root = owner.path().canonicalize().unwrap();
+    #[cfg(windows)]
+    let root = owner.path().to_path_buf();
+    fn populate(path: &Path, depth: usize) {
+        std::fs::create_dir_all(path).unwrap();
+        if depth == 0 {
+            std::fs::write(path.join("payload"), [7u8; 1024]).unwrap();
+        } else {
+            populate(&path.join("left"), depth - 1);
+            populate(&path.join("right"), depth - 1);
+        }
+    }
+    populate(&root.join("dir-000"), 9);
+    populate(&root.join("dir-001"), 9);
+    // The ordinary no-follow file walk is independent of scanner aggregation and includes
+    // any host-created files instead of manufacturing expectations from scanner constants.
+    fn logical_total(path: &Path) -> u128 {
+        std::fs::read_dir(path)
+            .unwrap()
+            .map(|entry| {
+                let path = entry.unwrap().path();
+                let meta = std::fs::symlink_metadata(&path).unwrap();
+                if meta.is_dir() {
+                    logical_total(&path)
+                } else if meta.is_file() {
+                    u128::from(meta.len())
+                } else {
+                    0
+                }
+            })
+            .sum()
+    }
+    let expected = logical_total(&root.join("dir-000"));
+    let run = |retain_directory_index| {
+        Scanner::new(
+            HostPlatformScanner::new(),
+            ScannerOptions {
+                max_workers: 1,
+                retain_directory_index,
+                retain_file_index: false,
+                resource_limits: ScanResourceLimits {
+                    max_directory_batch_entries: 4,
+                    max_classified_metadata_bytes: 2 * 1024 * 1024,
+                    max_classified_root_metadata_bytes: 2 * 1024 * 1024,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .scan_classified(
+            &[ScanRoot::new(root.clone()).unwrap()],
+            &CancellationToken::new(),
+            &OneBranch,
+            None,
+        )
+        .map(|scan| (scan, root.clone()))
+        .unwrap()
+    };
+    let (full, _) = run(true);
+    assert!(full.summary.progress_retention.resource_limited);
+    let (compact, root) = run(false);
+    assert!(
+        !compact.summary.progress_retention.resource_limited,
+        "{:?}",
+        compact.summary.boundaries
+    );
+    assert!(
+        compact.summary.boundaries.is_empty(),
+        "{:?}",
+        compact.summary.boundaries
+    );
+    assert_eq!(compact.decisions.len(), 1);
+    assert_eq!(compact.coverages.len(), 1);
+    assert!(compact.directory_markers.is_empty());
+    let aggregate = aggregate_for_path(&compact.summary, &root.join("dir-000"));
+    assert_eq!(aggregate.apparent_logical_bytes, known_u128(expected));
+    assert!(aggregate.coverage.complete);
 }

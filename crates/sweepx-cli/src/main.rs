@@ -246,6 +246,8 @@ enum Commands {
         /// current, complete directory candidates to Trash after native identity revalidation.
         /// Linux/macOS/Windows show historical caches first, then keep native change listeners alive.
         /// Changes refresh affected directories; listener gaps trigger a full fresh scan.
+        /// Junk traversal allows up to 4,194,304 directories while retaining bounded candidate
+        /// evidence. Mount/permission gaps remain partial; macOS / keeps its initial mount scope.
         /// Enter opens a read-only directory breakdown. Space there records up to 32 review paths;
         /// q returns to candidates, and the latest review list is printed on exit without deleting.
         /// Only freshly verified rows can be moved; c pauses automatic refresh until manual refresh.

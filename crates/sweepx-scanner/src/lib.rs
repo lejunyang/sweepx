@@ -72,6 +72,11 @@ pub struct ScannerOptions {
     /// available when disabled. Callers with current native length observations can avoid building
     /// an unused per-file index; the default preserves cache publication for existing consumers.
     pub retain_file_index: bool,
+    /// Retain coverage and child lineage for every directory in a classified scan. When false,
+    /// retain candidate coverage and native `.git` rows instead; Git consumers can recover
+    /// repository ancestry from those rows' validated locators. Local rule markers still remain
+    /// until their subtree closes. Global custom evaluators always retain the full index.
+    pub retain_directory_index: bool,
 }
 
 impl Default for ScannerOptions {
@@ -81,6 +86,7 @@ impl Default for ScannerOptions {
             resource_limits: ScanResourceLimits::default(),
             max_workers: 4,
             retain_file_index: true,
+            retain_directory_index: true,
         }
     }
 }
@@ -473,20 +479,19 @@ pub struct ClassifiedScan {
     /// Charged to the shared metadata budget and evictable; absent evidence forbids publication.
     /// These rows do not enter the candidate summary or machine output.
     pub observed_roots: Vec<ScannedEntry>,
-    /// Summary whose directory rows contain only classified candidates, with sparse `.git` file
-    /// rows retained as worktree/submodule boundary facts.
+    /// Candidate summary with sparse `.git` file rows; compact mode also retains `.git`
+    /// directory rows, whose native locators preserve repository ancestry.
     pub summary: ScanSummary,
     /// Entry id to the rule id returned by the classifier, keyed for candidate assembly.
     pub decisions: BTreeMap<ScanEntryId, String>,
-    /// Native names of directory children observed under each parent mapped to the child
+    /// Full-index mode only: native directory children under each parent mapped to the child
     /// entry id, even when the child directory itself was not classified and its row dropped.
     pub directory_markers: BTreeMap<ScanEntryId, BTreeMap<String, ScanEntryId>>,
-    /// Coverage of *every* directory the walk completed, not just classified candidates.
+    /// Coverage of every completed directory when `retain_directory_index` is enabled;
+    /// compact scans retain candidate coverage only.
     ///
-    /// The retained aggregates only cover candidate directories now, but post-scan checks (the
-    /// Git repository evidence) still must know whether a non-candidate parent was scanned
-    /// completely. Keeping just the small Coverage, rather than the whole aggregate, preserves
-    /// that distinction without re-retaining the aggregate.
+    /// Git checks consume candidate coverage in either mode. Full-index callers may also
+    /// inspect non-candidate coverage without retaining those directories' aggregates.
     pub coverages: BTreeMap<ScanEntryId, Coverage>,
     /// Canonical path → whether the directory was fully covered, for every directory scanned.
     pub covered_paths: BTreeMap<String, bool>,
@@ -546,6 +551,7 @@ struct CollectingScanSink<'a> {
     dir_listings: BTreeMap<String, DirListing>,
     /// Optional file-index retention is independent of required marker and directory evidence.
     retain_file_index: bool,
+    retain_directory_index: bool,
     /// Rule id chosen per classified directory, returned with the finished scan.
     decisions: BTreeMap<ScanEntryId, String>,
     // One budget spans required facts and optional reuse indexes. Per-root counters reset only
@@ -592,6 +598,7 @@ impl<'a> CollectingScanSink<'a> {
             covered_paths: BTreeMap::new(),
             dir_listings: BTreeMap::new(),
             retain_file_index: true,
+            retain_directory_index: true,
             decisions: BTreeMap::new(),
             metadata_bytes: 0,
             root_metadata_bytes: 0,
@@ -774,8 +781,16 @@ impl<'a> CollectingScanSink<'a> {
         let Some(rule_id) = decision
             .filter(|rule| self.admit_metadata(128usize.saturating_add(rule.capacity()), true))
         else {
-            self.metadata_bytes -= cost;
-            self.root_metadata_bytes -= cost;
+            if !self.retain_directory_index
+                && native_basename_marker(&entry.native_basename).as_deref() == Some(".git")
+            {
+                // Native directory and gitfile rows are sparse repository evidence. Their
+                // locator carries every observed ancestor, so no whole-tree parent map is needed.
+                self.summary.entries.push(entry);
+            } else {
+                self.metadata_bytes -= cost;
+                self.root_metadata_bytes -= cost;
+            }
             return None;
         };
         self.decisions.insert(id.clone(), rule_id);
@@ -904,7 +919,8 @@ impl ScanSink for CollectingScanSink<'_> {
                     let Some(identity) = entry.identity.as_ref() else {
                         return Ok(());
                     };
-                    if let Some(parent_id) = identity.parent_id.as_ref()
+                    if self.retain_directory_index
+                        && let Some(parent_id) = identity.parent_id.as_ref()
                         && let Some(name) = native_basename_marker(&entry.native_basename)
                         && self.admit_metadata(
                             384usize
@@ -1032,22 +1048,46 @@ impl ScanSink for CollectingScanSink<'_> {
             // The aggregate id names the now-complete directory: classify its pending row first,
             // and retain the aggregate only when this directory is itself a junk candidate.
             let id = ScanEntryId::from_loaded(aggregate.directory_identity.clone());
-            // Retain coverage for every completed directory, candidate or not, before the aggregate
-            // is dropped or kept; downstream evidence checks read this rather than the aggregate.
-            if self.admit_metadata(
-                256usize.saturating_add(id.as_str().len()).saturating_add(
-                    aggregate
-                        .coverage
-                        .incomplete_reasons
-                        .len()
-                        .saturating_mul(std::mem::size_of::<ReasonCode>()),
-                ),
-                true,
-            ) {
+            let mut classified_root = None;
+            if !self.retain_directory_index {
+                classified_root = self.classify_pending(&id);
+            }
+            // Candidate coverage is required for Git interpretation. The full index is optional
+            // for local evaluators: unrelated completed directories need no post-scan coverage.
+            if (self.retain_directory_index || self.decisions.contains_key(&id))
+                && self.admit_metadata(
+                    256usize.saturating_add(id.as_str().len()).saturating_add(
+                        aggregate
+                            .coverage
+                            .incomplete_reasons
+                            .len()
+                            .saturating_mul(std::mem::size_of::<ReasonCode>()),
+                    ),
+                    true,
+                )
+            {
                 self.coverages
                     .insert(id.clone(), aggregate.coverage.clone());
             }
-            let classified_root = self.classify_pending(&id);
+            if self.retain_directory_index {
+                classified_root = self.classify_pending(&id);
+            }
+            if !self.retain_directory_index && aggregate.coverage.complete {
+                // Complete postorder closure means every child has already consumed these own
+                // markers. Incomplete root-end aggregates may arrive parent-first; keep theirs.
+                if let Some(markers) = self.file_markers.remove(&id) {
+                    let bytes = markers.iter().fold(0usize, |sum, marker| {
+                        sum.saturating_add(256 + marker.capacity() + id.as_str().len())
+                    });
+                    self.metadata_bytes -= bytes;
+                    self.root_metadata_bytes -= bytes;
+                }
+                if self.enumerated_directories.remove(&id) {
+                    let bytes = 128 + id.as_str().len();
+                    self.metadata_bytes -= bytes;
+                    self.root_metadata_bytes -= bytes;
+                }
+            }
             if !self.decisions.contains_key(&id) {
                 // A non-candidate directory's bytes are not needed for any total: file entries are
                 // folded into every ancestor's state as they are visited (`propagate_file_entry`
@@ -1695,6 +1735,8 @@ where
     ) -> Result<ClassifiedScan, ScanError> {
         let mut sink = CollectingScanSink::new_classified(self.options.resource_limits, classifier);
         sink.retain_file_index = self.options.retain_file_index;
+        sink.retain_directory_index =
+            self.options.retain_directory_index || !classifier.uses_only_local_markers();
         self.scan_with_sink(roots, cancel, reuse, &mut sink)?;
         Ok(sink.finish_classified())
     }
@@ -1715,6 +1757,8 @@ where
     ) -> Result<ClassifiedScan, ScanError> {
         let mut sink = CollectingScanSink::new_classified(self.options.resource_limits, classifier);
         sink.retain_file_index = self.options.retain_file_index;
+        sink.retain_directory_index =
+            self.options.retain_directory_index || !classifier.uses_only_local_markers();
         sink.observer = Some(observer);
         self.scan_with_sink(roots, cancel, reuse, &mut sink)?;
         Ok(sink.finish_classified())
@@ -1752,6 +1796,8 @@ where
         }
         let mut sink = CollectingScanSink::new_classified(self.options.resource_limits, classifier);
         sink.retain_file_index = self.options.retain_file_index;
+        sink.retain_directory_index =
+            self.options.retain_directory_index || !classifier.uses_only_local_markers();
         sink.scoped = true;
         sink.selected_paths = Some(subtrees);
         sink.selected_seen = vec![false; subtrees.len()];

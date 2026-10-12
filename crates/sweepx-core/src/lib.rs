@@ -1093,6 +1093,8 @@ pub fn scan_junk_with_store<S: SnapshotStore>(
         request,
         store,
         ScannerOptions {
+            resource_limits: junk::scan_limits(),
+            retain_directory_index: false,
             retain_file_index: reuse.is_some()
                 || !sweepx_platform::PlatformScanner::supports_file_length_observation(
                     &HostPlatformScanner::new(),
@@ -1130,6 +1132,8 @@ pub fn scan_junk_with_observer<S: SnapshotStore>(
         request,
         store,
         ScannerOptions {
+            resource_limits: junk::scan_limits(),
+            retain_directory_index: false,
             retain_file_index: reuse.is_some()
                 || !sweepx_platform::PlatformScanner::supports_file_length_observation(
                     &HostPlatformScanner::new(),
@@ -1151,14 +1155,14 @@ pub struct JunkScanSuccess {
     /// Optional bounded native root observations, independent of junk candidacy. Missing facts
     /// disable cache publication for that root; these rows do not enter the output envelope.
     pub observed_roots: Vec<sweepx_model::ScannedEntry>,
-    /// Scan envelope, snapshot and pruned summary (junk directory rows and sparse gitfile facts).
+    /// Scan envelope, snapshot and pruned summary (candidate rows and sparse `.git` facts).
     pub scan: ScanSuccess,
     /// Rule id returned per entry, for candidate assembly.
     pub decisions: JunkDecisions,
-    /// Recorded directory children per parent, for post-scan checks on directories whose own
-    /// rows were dropped.
+    /// Recorded children per parent for global evaluators; compact local scans leave this empty
+    /// and retain native `.git` rows whose locators supply repository ancestry.
     pub directory_markers: DirectoryMarkers,
-    /// Coverage of every completed directory (not only candidates), for the Git evidence checks.
+    /// Candidate coverage for compact local scans; global evaluators retain all directory coverage.
     pub coverages: std::collections::BTreeMap<sweepx_model::ScanEntryId, Coverage>,
     /// Canonical path → fully covered for every directory scanned, for building the reuse index.
     pub covered_paths: std::collections::BTreeMap<String, bool>,

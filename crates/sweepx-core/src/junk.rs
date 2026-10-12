@@ -417,6 +417,16 @@ fn cargo_profile_artifact(entry: &ScannedEntry) -> bool {
             && parents.next().and_then(name).as_deref() == Some("target"))
 }
 
+/// Bounded junk traversal allowance, independent of retained candidates and native handles.
+/// Completed local subtrees release their transient classification state; a volume-wide walk
+/// must not share the small ordinary detail scan's cumulative directory allowance.
+pub fn scan_limits() -> sweepx_platform::ScanResourceLimits {
+    sweepx_platform::ScanResourceLimits {
+        max_visited_entries: 4_194_304,
+        ..Default::default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
