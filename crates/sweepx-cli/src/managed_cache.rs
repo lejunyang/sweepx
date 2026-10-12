@@ -22,6 +22,15 @@ pub(crate) struct Arguments {
     /// Defaults to the current directory. Build trees and node_modules are not project search roots.
     #[arg(long)]
     pub project_root: Vec<PathBuf>,
+    /// Select one pnpm project for a reviewable project/dependency cleanup plan.
+    #[arg(long, conflicts_with_all = ["entry", "package", "max_links", "unobserved", "tui", "remove_models"])]
+    pub project: Option<PathBuf>,
+    /// Keep source and retire dependencies, or retire the entire project. Requires --project.
+    #[arg(long, requires = "project", value_parser = ["dependencies", "project"])]
+    pub project_mode: Option<String>,
+    /// Execute only the matching current project preview digest; requires --project --trash.
+    #[arg(long, requires_all = ["project", "trash"])]
+    pub plan: Option<String>,
     /// Show one exact package/model name.
     #[arg(long)]
     pub package: Option<String>,
@@ -35,8 +44,9 @@ pub(crate) struct Arguments {
     /// Select exact current inventory IDs (repeatable); omitted means read-only inventory.
     #[arg(long, conflicts_with = "tui")]
     pub entry: Vec<String>,
-    /// Move selected exclusive pnpm content or osdk download directories to OS Trash.
-    /// Shared or multi-link pnpm files remain. Package indexes remain for tool repair/refetch.
+    /// Move selected pnpm content/project targets or osdk download directories to OS Trash.
+    /// Package selections keep shared/multi-link files; project mode accounts for its links.
+    /// Package indexes remain for tool repair/refetch.
     #[arg(long,conflicts_with_all=["remove_models","tui"])]
     pub trash: bool,
     /// Explicitly remove selected osdk local models through osdk; this is not recoverable Trash.
@@ -127,6 +137,10 @@ pub(crate) fn run(
         eprintln!("OSDK cache location unavailable; provide absolute --cache-root");
         return ExitCode::from(2);
     };
+    if args.project.is_some() && (tool != "pnpm" || args.project_root.is_empty()) {
+        eprintln!("Project cleanup requires pnpm-store and explicit --project-root search scopes");
+        return ExitCode::from(2);
+    }
     let projects = if args.project_root.is_empty() {
         match std::env::current_dir() {
             Ok(p) => vec![p],
@@ -158,6 +172,25 @@ pub(crate) fn run(
         max_links: args.max_links,
         unobserved: args.unobserved,
     };
+    if let Some(project) = args.project {
+        let mode = if args.project_mode.as_deref() == Some("project") {
+            sweepx_core::managed_cache::PnpmProjectMode::Project
+        } else {
+            sweepx_core::managed_cache::PnpmProjectMode::Dependencies
+        };
+        return crate::pnpm_project::run(
+            &config,
+            crate::pnpm_project::Request {
+                project: &project,
+                mode,
+                expected: args.plan.as_deref(),
+                trash: args.trash,
+            },
+            format,
+            unit,
+            locale,
+        );
+    }
     if args.tui {
         return crate::managed_cache_tui::run(config, locale, unit, sort);
     }
@@ -405,7 +438,28 @@ pub(crate) fn details(
                 size(&p.logical_bytes, unit),
                 p.size_complete,
                 p.store_dir.as_deref().unwrap_or("?")
-            ))
+            ));
+            if report.tool == "pnpm" && p.store_dir.as_deref() == Some(report.root.as_str()) {
+                text.push_str(if locale == Locale::ZhCn {
+                    "项目清理预览（保留源码 / 整个项目）：\n"
+                } else {
+                    "Project cleanup previews (keep source / whole project):\n"
+                });
+                let scopes: String = report
+                    .project_roots
+                    .iter()
+                    .map(|root| format!(" --project-root {}", quote_cli_arg(root)))
+                    .collect();
+                for mode in ["dependencies", "project"] {
+                    text.push_str(&format!(
+                        "sweepx pnpm-store --root {}{} --project {} --project-mode {}\n",
+                        quote_cli_arg(&report.root),
+                        scopes,
+                        quote_cli_arg(&p.directory),
+                        mode
+                    ));
+                }
+            }
         }
     }
     if item.action == Action::OsdkModelRemove {

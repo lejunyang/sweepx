@@ -512,6 +512,25 @@ osdk 从离线配置读取数据/缓存位置，可用 `--root` / `--cache-root`
 
 JSON 使用 `sweepx.managed_cache.result/v1`，保留 `rulesDigest`、`projectDiscoveryComplete`、`indexComplete`、逐项 `eligible` 与未知/下界大小。详见[原生库存与执行约定](https://github.com/lejunyang/sweepx/blob/main/docs/architecture/managed-cache-inventory.md)。
 
+### pnpm 项目专项清理
+
+`pnpm-store --project` 支持两种明确范围：默认 `--project-mode dependencies` 保留源码、配置和锁文件，将所选项目及已观察到工作区子项目的 `node_modules` 放入回收站；`--project-mode project` 将整个项目放入回收站。随后只回收该项目独占、且原生硬链接均已核实在目标依赖目录内的 store 内容。其他项目引用、其他包索引共享内容和来源不明的额外链接保持不变。引用只覆盖显式指定的 `--project-root`，不保证整机无引用；自定义/链接虚拟 store、索引不完整、限额和活动检查失败均拒绝执行。
+
+```bash
+# 先预览；--project-root 可重复，须包含应保护的其他项目
+sweepx --format json pnpm-store --root /absolute/store/v10 --project-root /absolute/projects --project /absolute/projects/app --project-mode dependencies
+# 核对 plan.id，再用相同范围、模式和摘要执行
+sweepx pnpm-store --root /absolute/store/v10 --project-root /absolute/projects --project /absolute/projects/app --project-mode dependencies --plan CURRENT_PLAN_ID --trash
+# 整项目模式同样先预览，之后加 --plan CURRENT_PLAN_ID --trash
+sweepx pnpm-store --root /absolute/store/v10 --project-root /absolute/projects --project /absolute/projects/app --project-mode project
+```
+
+预览绑定规则、所有包索引、引用项目、目标原生身份及依赖树内容；变化使旧摘要失效。包索引保留供 pnpm 后续重新下载。回收站中的硬链接仍存在，不通过假设链接数下降来授权 store 清理；当前原生计数发生变化则停止。目录先回收，文件逐项复核后回收；失败停止并保留已成功操作的结果，不回滚或永久删除。整个项目内含所选 store 时，整项目模式拒绝执行，避免连带清理共享 store；依赖模式可用于项目内独立 store。
+
+项目计划不扫描其他项目的完整源码/构建目录，仅核对引用并计量目标依赖树。最多 256 个依赖目录、65,536 个 store 文件、64 MiB 捕获的计划/目录前沿元数据和 2,000,000 个依赖条目；超限不生成可执行计划。文件身份去重集合也以该条目数为上限。TUI 的包详情显示两种项目预览命令，项目执行目前走 CLI；`junk` 不自动执行此联动清理。
+
+JSON 使用 `sweepx.pnpm_project.result/v1`，包含 `plan`、`directoryPaths`、`contentPaths`、`sharedPackages`、`retainedContentFiles`、`dependencyLogicalBytes` 和逐项 `results`。大小不是可释放空间；移入回收站不会立即释放容量。macOS/Linux 执行依赖当前用户进程/打开文件观察，Windows 保持只读预览并拒绝执行。
+
 ## `site-storage`
 
 按域名汇总 Chromium 网站数据，并保留浏览器、profile、完整存储键、分区和 bucket 明细。默认报告只读；网站应用状态与 `junk` 分开。

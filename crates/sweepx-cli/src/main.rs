@@ -30,6 +30,7 @@ mod junk_tui;
 mod managed_cache;
 mod managed_cache_tui;
 mod npx_command;
+mod pnpm_project;
 mod site_storage_command;
 mod trash_command;
 mod tui_adapter;

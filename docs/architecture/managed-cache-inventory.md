@@ -72,6 +72,35 @@ bytes of absent files are not unknown observations. Subsequent selections can st
 remaining exclusive content, while missing/refused enumeration produces partial evidence.
 A selected package may retain shared bytes; cleanup is not a claim that the index disappeared.
 
+## pnpm project retirement
+
+Project/dependency scope is an independent plan over the same pnpm index/reference inventory,
+not a second classifier. `pnpm_project_inventory` omits unrelated whole-project totals. Explicit
+search roots are required; project-side native dependency trees are walked without following links.
+A selected package version must have an installed declaration of this exact store and no observed
+outside-project reference. All unselected index content ownership is retained. A CAS path can enter
+the plan only when its exact native link count equals one store path plus the counted occurrences
+in selected dependency directories. Unexplained extra links stay. Copy/clone references outside the
+selected subtree block package selection even with a single CAS link.
+
+The digest binds rules, all index tokens, reference labels/store declarations, the selected marker,
+native target identities and an order-independent dependency-entry digest plus entry count. Execution
+reobserves the current plan and requires `--plan` to match; directory and file identities are checked
+again immediately before native Trash. Trash keeps project-side links alive, so the original counted
+links remain relevant. Added/removed links or changed CAS metadata refuse that file. Directory moves
+precede file moves; every successful outcome survives a later refusal. No rollback or permanent
+fallback is attempted. Activity probes are current-user, time-local evidence, not an exclusive lock.
+A shared store contained inside a whole-project target is refused. Custom/linked layouts remain
+unsupported; nested source projects without exact store declarations do not grant CAS authority.
+
+The admitted plan retains at most 65,536 CAS rows/64 MiB, 256 dependency roots, a 4,096-directory/
+64 MiB frontier and a 2,000,000-entry/identity-set bound. Index limits continue to apply. This does
+not waive a malformed/oversized index or claim an unbounded whole-machine reference search. The
+TUI exposes scoped preview commands; project execution is CLI-only. See both CLI language pages.
+
+Dated host and fixture evidence is recorded in
+[the project cleanup verification](../development/pnpm-project-cleanup-2026-10-13.md).
+
 ## osdk
 
 The supported local format contract was checked against OSDK 0.0.5 on 2026-10-07: offline

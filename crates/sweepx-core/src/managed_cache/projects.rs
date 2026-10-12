@@ -20,6 +20,13 @@ pub(super) fn discover(
     roots: &[PathBuf],
     native: &mut Native<'_>,
 ) -> (Vec<Project>, bool, Vec<String>) {
+    discover_with_sizes(roots, native, true)
+}
+pub(super) fn discover_with_sizes(
+    roots: &[PathBuf],
+    native: &mut Native<'_>,
+    measure_sizes: bool,
+) -> (Vec<Project>, bool, Vec<String>) {
     let mut out = Vec::new();
     let mut project_dirs = Vec::new();
     let mut issues = Vec::new();
@@ -234,7 +241,7 @@ pub(super) fn discover(
     // Find references first so one large project's size cannot hide sibling projects. Totals
     // have their own cancellation deadline and explicit lower-bound/unknown evidence; exhausting
     // the invocation's size budget leaves remaining totals unknown, never observed as zero.
-    for (project, dir) in out.iter_mut().zip(project_dirs) {
+    for (project, dir) in out.iter_mut().zip(project_dirs).filter(|_| measure_sizes) {
         if native.cancel.is_cancelled() {
             issues.push("project_totals_cancelled".into());
             break;

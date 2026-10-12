@@ -27,7 +27,12 @@ impl Default for Stats {
         }
     }
 }
-pub(super) fn inventory(path: &Path, roots: &[PathBuf], cancel: &CancellationToken) -> Inventory {
+pub(super) fn inventory(
+    path: &Path,
+    roots: &[PathBuf],
+    cancel: &CancellationToken,
+    measure_projects: bool,
+) -> Inventory {
     let mut report = Inventory::empty("pnpm", path, roots);
     if !admit_rules(&mut report) {
         return report;
@@ -293,7 +298,8 @@ pub(super) fn inventory(path: &Path, roots: &[PathBuf], cancel: &CancellationTok
     if let Err(e) = result {
         report.issues.push(e);
     }
-    let (projects, complete, issues) = projects::discover(roots, &mut native);
+    let (projects, complete, issues) =
+        projects::discover_with_sizes(roots, &mut native, measure_projects);
     report.projects = projects;
     report.project_discovery_complete = complete;
     report.issues.extend(issues);

@@ -546,3 +546,166 @@ fn v11_native_packr_fixture_and_sqlite_layout() {
     fs::write(store.join("index.db-wal"), b"pending").unwrap();
     assert!(pnpm_cleanup_plan(&report, &[report.entries[0].id.clone()], &cancel).is_err());
 }
+
+fn project_layout(project: &Path, store: &Path, name: &str) -> PathBuf {
+    let slot = project.join(format!("node_modules/.pnpm/{name}@1.0.0"));
+    fs::create_dir_all(&slot).unwrap();
+    fs::write(
+        project.join("node_modules/.modules.yaml"),
+        format!("storeDir: {}\nvirtualStoreDir: .pnpm\n", store.display()),
+    )
+    .unwrap();
+    fs::write(project.join("package.json"), b"{\"private\":true}").unwrap();
+    slot
+}
+#[test]
+fn project_plan_accounts_links_and_preserves_other_project_and_index_owners() {
+    let temp = fixture();
+    let base = root(&temp);
+    let store = base.join("store");
+    let project = base.join("projects/a");
+    let other = base.join("projects/b");
+    let a = content(&store, 1, b"one");
+    let b = content(&store, 2, b"two");
+    let common = content(&store, 3, b"shared");
+    index(&store, "a", &[a, common.clone()]);
+    index(&store, "b", &[b, common]);
+    let slot = project_layout(&project, &store, "a");
+    fs::hard_link(
+        store.join("files/01").join("01".repeat(63)),
+        slot.join("one"),
+    )
+    .unwrap();
+    project_layout(&other, &store, "b");
+    let cancel = CancellationToken::new();
+    let report = pnpm_project_inventory(&store, &[base.join("projects")], &cancel);
+    assert!(report.complete, "{:?}", report.issues);
+    assert!(
+        report.projects.iter().all(|p| !p.size_complete),
+        "unrelated project totals are not traversed"
+    );
+    let plan =
+        pnpm_project_plan(&report, &project, PnpmProjectMode::Dependencies, &cancel).unwrap();
+    assert_eq!(
+        plan.directory_paths,
+        vec![project.join("node_modules").display().to_string()]
+    );
+    assert_eq!(plan.content().len(), 1);
+    assert_eq!(
+        plan.content()[0].hard_link_count.as_ref().and_then(exact),
+        Some(2)
+    );
+    assert_eq!(
+        plan.retained_content_files, 1,
+        "another package index protects shared CAS content"
+    );
+    let again = pnpm_project_plan(
+        &pnpm_project_inventory(&store, &[base.join("projects")], &cancel),
+        &project,
+        PnpmProjectMode::Dependencies,
+        &cancel,
+    )
+    .unwrap();
+    assert_eq!(
+        plan.id, again.id,
+        "fresh invocation and enumeration ordering must not change a stable preview"
+    );
+    fs::rename(
+        project.join("node_modules"),
+        base.join("recoverable-dependencies"),
+    )
+    .unwrap();
+    assert!(
+        revalidate_project_content(&plan.content()[0], &cancel).is_ok(),
+        "moving dependency directory preserves accounted hard links"
+    );
+    assert!(project.join("package.json").exists());
+    fs::hard_link(
+        store.join("files/01").join("01".repeat(63)),
+        base.join("racing-link"),
+    )
+    .unwrap();
+    assert!(revalidate_project_content(&plan.content()[0], &cancel).is_err());
+}
+#[test]
+fn copied_project_reference_and_unknown_external_links_keep_store_content() {
+    let temp = fixture();
+    let base = root(&temp);
+    let store = base.join("store");
+    let project = base.join("projects/a");
+    let other = base.join("projects/b");
+    let a = content(&store, 1, b"one");
+    index(&store, "a", &[a]);
+    let slot = project_layout(&project, &store, "a");
+    fs::write(slot.join("copied"), b"one").unwrap();
+    project_layout(&other, &store, "a");
+    let cancel = CancellationToken::new();
+    let report = pnpm_project_inventory(&store, &[base.join("projects")], &cancel);
+    let plan =
+        pnpm_project_plan(&report, &project, PnpmProjectMode::Dependencies, &cancel).unwrap();
+    assert_eq!(plan.shared_packages, vec!["a@1.0.0"]);
+    assert!(plan.content().is_empty());
+    fs::remove_dir_all(other).unwrap();
+    fs::hard_link(
+        store.join("files/01").join("01".repeat(63)),
+        base.join("unknown-user"),
+    )
+    .unwrap();
+    let report = pnpm_project_inventory(&store, &[base.join("projects")], &cancel);
+    let plan = pnpm_project_plan(&report, &project, PnpmProjectMode::Project, &cancel).unwrap();
+    assert_eq!(plan.directory_paths, vec![project.display().to_string()]);
+    assert!(plan.content().is_empty());
+    assert_eq!(plan.retained_content_files, 1);
+}
+#[test]
+fn project_preview_changes_on_install_mutation_and_refuses_store_overlap() {
+    let temp = fixture();
+    let base = root(&temp);
+    let store = base.join("store");
+    let project = base.join("projects/a");
+    let a = content(&store, 1, b"one");
+    index(&store, "a", &[a]);
+    let slot = project_layout(&project, &store, "a");
+    let cancel = CancellationToken::new();
+    let report = pnpm_project_inventory(&store, &[base.join("projects")], &cancel);
+    let first =
+        pnpm_project_plan(&report, &project, PnpmProjectMode::Dependencies, &cancel).unwrap();
+    fs::write(slot.join("racing-install"), b"new").unwrap();
+    let second =
+        pnpm_project_plan(&report, &project, PnpmProjectMode::Dependencies, &cancel).unwrap();
+    assert_ne!(first.id, second.id);
+    let local = project.join(".pnpm-store/v10");
+    let a = content(&local, 2, b"two");
+    index(&local, "a", &[a]);
+    project_layout(&project, &local, "a");
+    let report = pnpm_project_inventory(&local, std::slice::from_ref(&project), &cancel);
+    assert!(
+        pnpm_project_plan(&report, &project, PnpmProjectMode::Project, &cancel)
+            .unwrap_err()
+            .contains("store_inside")
+    );
+    assert!(pnpm_project_plan(&report, &project, PnpmProjectMode::Dependencies, &cancel).is_ok());
+}
+#[test]
+fn project_dependencies_include_workspace_children_and_bind_marker_changes() {
+    let temp = fixture();
+    let base = root(&temp);
+    let store = base.join("store");
+    let project = base.join("projects/a");
+    let a = content(&store, 1, b"one");
+    index(&store, "a", &[a]);
+    project_layout(&project, &store, "a");
+    project_layout(&project.join("packages/app"), &store, "a");
+    let cancel = CancellationToken::new();
+    let report = pnpm_project_inventory(&store, &[base.join("projects")], &cancel);
+    let plan =
+        pnpm_project_plan(&report, &project, PnpmProjectMode::Dependencies, &cancel).unwrap();
+    assert_eq!(plan.directories().len(), 2);
+    assert_eq!(plan.content().len(), 1);
+    fs::write(
+        project.join("node_modules/.modules.yaml"),
+        b"storeDir: /changed\n",
+    )
+    .unwrap();
+    assert!(pnpm_project_plan(&report, &project, PnpmProjectMode::Dependencies, &cancel).is_err());
+}

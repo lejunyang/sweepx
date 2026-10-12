@@ -523,6 +523,25 @@ Execution requires the macOS/Linux current-user process/open-file guard. Windows
 
 JSON uses `sweepx.managed_cache.result/v1`, preserving `rulesDigest`, `projectDiscoveryComplete`, `indexComplete`, per-item `eligible` and unknown/lower-bound sizes. See [native inventory and execution contracts](https://github.com/lejunyang/sweepx/blob/main/docs/architecture/managed-cache-inventory.md).
 
+### pnpm project cleanup
+
+`pnpm-store --project` has two explicit scopes. The default `--project-mode dependencies` preserves source/configuration/lockfiles and Trashes observed `node_modules` directories within the selected project/workspace. `--project-mode project` Trashes the entire selected project. Both then retire only exclusive store content whose native hard links are accounted for in those dependency trees. Other observed project references, unselected index owners and unexplained external links retain their content. References cover explicit `--project-root` scopes, never global disuse. Unsupported linked/custom virtual stores, incomplete indexes, budgets or unavailable activity evidence refuse execution.
+
+```bash
+# Preview first; repeat --project-root to cover other projects that must be protected
+sweepx --format json pnpm-store --root /absolute/store/v10 --project-root /absolute/projects --project /absolute/projects/app --project-mode dependencies
+# Review plan.id, then execute the same scope/mode with its current digest
+sweepx pnpm-store --root /absolute/store/v10 --project-root /absolute/projects --project /absolute/projects/app --project-mode dependencies --plan CURRENT_PLAN_ID --trash
+# Whole-project mode also previews first; append --plan CURRENT_PLAN_ID --trash afterward
+sweepx pnpm-store --root /absolute/store/v10 --project-root /absolute/projects --project /absolute/projects/app --project-mode project
+```
+
+The preview binds rules, all package indexes, reference labels, native targets and the dependency tree. Changed evidence invalidates its digest. Package indexes remain for pnpm refetch. Moving directories to recoverable Trash preserves their hard links; no assumed link-count decrease grants store authority. A changed current link count stops execution. Directories move first, then individually revalidated files. Failure stops the sequence and preserves successful outcomes; there is no rollback or permanent fallback. Whole-project mode refuses a store inside that project to protect shared store contents; dependency mode can use a separate project-local store.
+
+Project plans skip unrelated whole-project source/build totals, observing references and the selected dependency trees instead. Bounds are 256 dependency directories, 65,536 store files, 64 MiB of captured plan/frontier metadata and 2,000,000 dependency entries (also bounding the unique identity set). Exceeding a bound refuses a plan. Package details in the TUI show both project preview commands; project execution currently uses CLI. `junk` never automatically invokes this joint cleanup.
+
+JSON uses `sweepx.pnpm_project.result/v1`, with `plan`, `directoryPaths`, `contentPaths`, `sharedPackages`, `retainedContentFiles`, `dependencyLogicalBytes` and individual `results`. Sizes are not reclaimable bytes; Trash does not immediately free capacity. macOS/Linux execution requires current-user process/open-file evidence; Windows previews remain read-only and refuse execution.
+
 ## `site-storage`
 
 Groups Chromium site data by domain while retaining browser, profile, full storage key, partition and bucket details. The default report is read-only and separate from `junk`; application state is not automatically disposable.

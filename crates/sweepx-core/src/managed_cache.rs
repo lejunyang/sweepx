@@ -4,7 +4,12 @@ mod msgpack;
 mod native;
 mod osdk;
 mod pnpm;
+mod project_cleanup;
 mod projects;
+pub use project_cleanup::{
+    PnpmProjectMode, PnpmProjectPlan, pnpm_project_plan, revalidate_project_content,
+    revalidate_project_directory,
+};
 #[cfg(test)]
 mod tests;
 use native::Native;
@@ -165,7 +170,23 @@ pub fn pnpm_inventory(
         report.issues.push("project_root_budget_exceeded".into());
         return report;
     }
-    pnpm::inventory(root, project_roots, cancel)
+    pnpm::inventory(root, project_roots, cancel, true)
+}
+/// Observe pnpm references without measuring unrelated whole-project source/build trees.
+/// Project cleanup independently observes the dependency trees that grant link-count authority.
+pub fn pnpm_project_inventory(
+    root: &Path,
+    project_roots: &[PathBuf],
+    cancel: &CancellationToken,
+) -> Inventory {
+    if project_roots.is_empty() || project_roots.len() > 32 {
+        let mut report = Inventory::empty("pnpm", root, &[]);
+        report
+            .issues
+            .push("explicit_project_search_roots_required".into());
+        return report;
+    }
+    pnpm::inventory(root, project_roots, cancel, false)
 }
 /// Inventory osdk model aliases/snapshots and independently selectable download cache units.
 pub fn osdk_inventory(
@@ -199,7 +220,7 @@ pub fn pnpm_cleanup_plan(
         .as_ref()
         .ok_or("missing_root_identity")?;
     let path = native::path(root)?;
-    let fresh = pnpm::inventory(&path, &inventory.project_inputs, cancel);
+    let fresh = pnpm::inventory(&path, &inventory.project_inputs, cancel, true);
     if !fresh
         .root_entry
         .as_ref()
