@@ -502,45 +502,45 @@ Keep the same directory for updates: run `browser-extension bundle --output /abs
 
 ## `pnpm-store` / `osdk-cache` {#pnpm-store--osdk-cache}
 
-Inspect and select individual package versions, model aliases and download-cache units. Generic `junk --trash` and the junk TUI block whole pnpm/osdk roots.
+pnpm discovers stores, selects admitted content without installed references in the reported scope and builds/revalidates its cleanup plan internally. Without an action it is read-only; ordinary cleanup needs neither `entry` nor `plan`. Generic `junk --trash` and the junk TUI still refuse whole pnpm/osdk roots.
 
 ```bash
-sweepx pnpm-store --root /absolute/pnpm/store/v11 --project-root /absolute/projects --tui
-sweepx --format json pnpm-store --root /absolute/pnpm/store/v10 --project-root /absolute/projects --max-links 1 --unobserved
-sweepx pnpm-store --root /absolute/pnpm/store/v11 --project-root /absolute/projects --entry CURRENT_ID --trash
-sweepx osdk-cache --project-root /absolute/projects --tui
-sweepx osdk-cache --project-root /absolute/projects --entry CURRENT_DOWNLOAD_ID --trash
-sweepx osdk-cache --project-root /absolute/projects --entry CURRENT_MODEL_ID --remove-models
+sweepx pnpm-store
+sweepx pnpm-store --trash
+sweepx pnpm-store --root /absolute/pnpm/store --trash
+sweepx pnpm-store --root /absolute/pnpm/store/v11 --tui
+sweepx --format json pnpm-store --project /absolute/projects/app
+sweepx pnpm-store --project /absolute/projects/app --trash
 ```
 
-`--root` is the exact versioned pnpm directory; v3/v10 JSON and v11 SQLite/msgpackr indexes are supported. Reports show native file link ranges, single-link counts, observed installed-project directories and whole-project size totals. Repeat `--project-root` to expand the search; the default is the current directory. `--unobserved` means no reference observed in this scope, not globally unused. Copy/APFS clone imports can leave a single-link store file in active use.
+`--root` accepts a version root or its container. Otherwise discovery uses installed declarations, `PNPM_STORE_DIR`, the manager's store path and platform defaults. Supported formats are v3/v10 JSON and v11 SQLite/msgpackr; `.modules.yaml` accepts both YAML and JSON. Missing declared stores remain explicit. Optional, repeatable `--project-root` supplies reference scopes. Global defaults search the current directory and existing home-relative `Desktop/Projects`, `Projects`, `projects`, `workspace`, `workspaces`, `dev`. Project cleanup defaults to the project's parent, protecting nearby projects. Reports declare actual scopes and excluded names; they never prove whole-machine or other-user disuse.
 
-`--entry` previews; `--trash` moves only selected exclusive single-link pnpm content. Content shared with unselected indexes and multi-link files stay, as do package indexes for pnpm refetch/repair. Incomplete indexes/scans, observed project references and failed revalidation block execution. File size is not freed space; nested project totals can overlap.
+`--package`, `--max-links`, `--unobserved` restrict rows/actions. `--trash` selects all admitted candidates in scope, retaining content owned by other indexes, installed references and unknown/multiple links. Incomplete indexes/searches block cleanup. Package indexes stay for pnpm refetch. Bulk selection accounts for shared ownership across the complete selection, then revalidates files in bounded batches for native recoverable Trash. SweepX does not call pnpm prune or permanently delete content. `cleanupLogicalBytes` is the unique admitted logical content size, never reclaimed space. An empty admitted selection completes normally.
 
-OSDK roots come from offline configuration, with `--root`/`--cache-root` for redirects. Download units are split by repository and use recoverable Trash. Model rows show aliases (including all snapshots) and observed `[models]` declarations. `--remove-models` separately invokes OSDK local removal, **not recoverable Trash**; declarations, locks and shared CAS stay, and sync may download again. TUI `d` handles cache units only; model rows show their scoped removal command. Enter opens scrollable project/size details.
+pnpm project `logicalBytes` measures installed `node_modules/.pnpm` files, includes workspace children and deduplicates native hard links within that project. Source, build output and global stores are excluded. Nested project rows overlap and must not be summed. Incomplete sizes remain lower bounds/unknown; allocation and APFS clone extent sharing remain unproven.
 
-Execution requires the macOS/Linux current-user process/open-file guard. Windows currently lacks this guard and refuses execution while retaining read-only inventories.
+OSDK stays independent: offline configuration discovers data/cache roots, overridden by `--root` / `--cache-root`. Downloads use `--entry CURRENT_DOWNLOAD_ID --trash`; models use `--entry CURRENT_MODEL_ID --remove-models` and **do not use Trash**. Declarations, locks and shared CAS stay; future sync may download again. TUI `d` handles caches, Enter opens details. OSDK project sizes remain whole-project logical totals.
 
-JSON uses `sweepx.managed_cache.result/v1`, preserving `rulesDigest`, `projectDiscoveryComplete`, `indexComplete`, per-item `eligible` and unknown/lower-bound sizes. See [native inventory and execution contracts](https://github.com/lejunyang/sweepx/blob/main/docs/architecture/managed-cache-inventory.md).
+Store JSON uses `sweepx.managed_cache.result/v1`. Multiple discovered stores appear in `stores`; a single store preserves top-level `inventory`, `selection`, `results`, `blocked`. Existing `rulesDigest`, `projectDiscoveryComplete`, `indexComplete`, `eligible` remain. Execution needs the macOS/Linux current-user process/open-file guard; Windows refuses execution and retains read-only reports. See [native contracts](https://github.com/lejunyang/sweepx/blob/main/docs/architecture/managed-cache-inventory.md).
 
 ### pnpm project cleanup
 
-`pnpm-store --project` has two explicit scopes. The default `--project-mode dependencies` preserves source/configuration/lockfiles and Trashes observed `node_modules` directories within the selected project/workspace. `--project-mode project` Trashes the entire selected project. Both then retire only exclusive store content whose native hard links are accounted for in those dependency trees. Other observed project references, unselected index owners and unexplained external links retain their content. References cover explicit `--project-root` scopes, never global disuse. Unsupported linked/custom virtual stores, incomplete indexes, budgets or unavailable activity evidence refuse execution.
-
 ```bash
-# Preview first; repeat --project-root to cover other projects that must be protected
-sweepx --format json pnpm-store --root /absolute/store/v10 --project-root /absolute/projects --project /absolute/projects/app --project-mode dependencies
-# Review plan.id, then execute the same scope/mode with its current digest
-sweepx pnpm-store --root /absolute/store/v10 --project-root /absolute/projects --project /absolute/projects/app --project-mode dependencies --plan CURRENT_PLAN_ID --trash
-# Whole-project mode also previews first; append --plan CURRENT_PLAN_ID --trash afterward
-sweepx pnpm-store --root /absolute/store/v10 --project-root /absolute/projects --project /absolute/projects/app --project-mode project
+# Installed package bytes, even when the declared store is absent
+sweepx pnpm-store --project /absolute/projects/app
+# Keep source; retire dependencies and admitted exclusive store content
+sweepx pnpm-store --project /absolute/projects/app --trash
+# Only this explicit scope retires the entire project
+sweepx pnpm-store --project /absolute/projects/app --project-mode project --trash
+# Optional detailed dependency/store preview
+sweepx --format json pnpm-store --project /absolute/projects/app --project-mode dependencies
 ```
 
-The preview binds rules, all package indexes, reference labels, native targets and the dependency tree. Changed evidence invalidates its digest. Package indexes remain for pnpm refetch. Moving directories to recoverable Trash preserves their hard links; no assumed link-count decrease grants store authority. A changed current link count stops execution. Directories move first, then individually revalidated files. Failure stops the sequence and preserves successful outcomes; there is no rollback or permanent fallback. Whole-project mode refuses a store inside that project to protect shared store contents; dependency mode can use a separate project-local store.
+Default dependency scope retires observed `node_modules` within the selected project/workspace, then admits CAS content only when its exact native hard-link count equals one store path plus occurrences in selected dependency trees. Other project references, other index owners and unexplained links retain content. The current invocation builds the plan internally, then revalidates native targets immediately before moving them. Trash preserves links; no assumed link-count decrease grants authority. Failures stop and preserve successful outcomes, without permanent fallback or rollback. Whole-project scope refuses a store inside that project; dependency scope supports a separate project-local store.
 
-Project plans skip unrelated whole-project source/build totals, observing references and the selected dependency trees instead. Bounds are 256 dependency directories, 65,536 store files, 64 MiB of captured plan/frontier metadata and 2,000,000 dependency entries (also bounding the unique identity set). Exceeding a bound refuses a plan. Package details in the TUI show both project preview commands; project execution currently uses CLI. `junk` never automatically invokes this joint cleanup.
+Unsupported linked/custom layouts, absent stores, incomplete indexes/references, budgets and unavailable activity guards refuse cleanup. Project bounds remain 256 dependency roots, 65,536 CAS files, 64 MiB plan/frontier metadata and 2,000,000 dependency entries. TUI offers preview commands; project execution uses CLI. Generic `junk` never triggers this joint cleanup.
 
-JSON uses `sweepx.pnpm_project.result/v1`, with `plan`, `directoryPaths`, `contentPaths`, `sharedPackages`, `retainedContentFiles`, `dependencyLogicalBytes` and individual `results`. Sizes are not reclaimable bytes; Trash does not immediately free capacity. macOS/Linux execution requires current-user process/open-file evidence; Windows previews remain read-only and refuse execution.
+Package-only queries use `sweepx.pnpm_projects.result/v1`; execution and detailed previews use `sweepx.pnpm_project.result/v1`, preserving `plan`, `directoryPaths`, `contentPaths`, `sharedPackages`, `retainedContentFiles`, `dependencyLogicalBytes`, `results`. `dependencyLogicalBytes` describes the target dependency trees, which can be larger than virtual-store package bytes. Neither is reclaimable space; Trash does not immediately free capacity.
 
 ## `site-storage`
 

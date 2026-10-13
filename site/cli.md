@@ -491,45 +491,45 @@ sweepx browser-extension status
 
 ## `pnpm-store` / `osdk-cache` {#pnpm-store--osdk-cache}
 
-按包名与版本、模型别名、下载缓存目录逐项查看和选择；`junk --trash` 和通用垃圾 TUI 不再允许整库清理 pnpm/osdk。
+pnpm 专项清理自动探查 store、选择已确认未引用的内容并在内部生成和复核清理计划。无动作参数时只读；无需指定 `entry` 或 `plan`。通用 `junk --trash` 和垃圾 TUI 仍不允许直接回收整座 pnpm/osdk 库。
 
 ```bash
-sweepx pnpm-store --root /absolute/pnpm/store/v11 --project-root /absolute/projects --tui
-sweepx --format json pnpm-store --root /absolute/pnpm/store/v10 --project-root /absolute/projects --max-links 1 --unobserved
-sweepx pnpm-store --root /absolute/pnpm/store/v11 --project-root /absolute/projects --entry CURRENT_ID --trash
-sweepx osdk-cache --project-root /absolute/projects --tui
-sweepx osdk-cache --project-root /absolute/projects --entry CURRENT_DOWNLOAD_ID --trash
-sweepx osdk-cache --project-root /absolute/projects --entry CURRENT_MODEL_ID --remove-models
+sweepx pnpm-store
+sweepx pnpm-store --trash
+sweepx pnpm-store --root /absolute/pnpm/store --trash
+sweepx pnpm-store --root /absolute/pnpm/store/v11 --tui
+sweepx --format json pnpm-store --project /absolute/projects/app
+sweepx pnpm-store --project /absolute/projects/app --trash
 ```
 
-`--root` 必须为 pnpm 的确切版本目录，支持 v3/v10 JSON 索引与 v11 SQLite/msgpackr 索引。报告展示原生文件链接数范围、单链接文件数、已观察到引用的项目目录及项目总大小。`--project-root` 可重复，默认只搜索当前目录；`--unobserved` 表示指定范围内未观察到引用，不表示全盘未使用。单链接也可能被项目通过复制/APFS 克隆使用。
+`--root` 可指定确切版本目录或包含版本目录的容器。省略时从安装声明、`PNPM_STORE_DIR`、管理器的 store path 和平台默认位置探查；支持 v3/v10 JSON 与 v11 SQLite/msgpackr 索引。YAML 和 JSON 格式的 `.modules.yaml` 都受支持，缺失的声明位置会明确报告。`--project-root` 可选且可重复；全库模式默认搜索当前目录及用户目录中存在的 `Desktop/Projects`、`Projects`、`projects`、`workspace`、`workspaces`、`dev`。项目清理默认搜索项目父目录以保护相邻项目。报告保留实际搜索范围与排除名称；这不证明全盘或其他用户未使用。
 
-`--entry` 本身只预览，`--trash` 才回收选中的独占、单链接 pnpm 内容，保留其他包索引共享的文件与多链接文件，也保留包索引供 pnpm 后续重新下载。索引/扫描不完整、已观察到项目引用或校验失败时拒绝执行。文件大小不等于释放空间，项目嵌套时总大小也会重叠。
+`--package`、`--max-links`、`--unobserved` 可缩小显示/清理范围。`--trash` 选择范围内所有已准入的候选，只回收不被其他索引共享且原生计数确切为一的内容；安装引用、未知链接、索引或搜索不完整均阻止相应清理。包索引保留供 pnpm 重新下载。大批选择统一核对共享归属，文件分批复核并进入系统回收站；不会调用 pnpm prune 或永久删除。`cleanupLogicalBytes` 是去重后的已准入内容逻辑体积，不是可释放空间。没有候选时正常完成，无需提供 ID。
 
-osdk 从离线配置读取数据/缓存位置，可用 `--root` / `--cache-root` 指定重定向位置。下载缓存按仓库目录细分并进入回收站；模型按别名列出（大小包含该别名的全部快照）及 `[models]` 项目声明。`--remove-models` 单独调用 osdk 移除本地模型，**不进入回收站**；声明、锁文件和共享 CAS 保留，后续同步可能再次下载。TUI 的 `d` 只处理可回收缓存，模型行显示绑定数据目录与逐项 ID 的移除命令；Enter 查看可滚动的项目/占用详情。
+项目 `logicalBytes` 是安装的 `node_modules/.pnpm` 包体积，包含工作区子项目并在同一项目内按原生文件身份去重硬链接；源码、构建输出和全局 store 不计入。嵌套项目行会重叠，不可直接相加。扫描不完整保持下界或未知，物理分配与 APFS 克隆共享仍未知。
 
-清理依赖 macOS/Linux 的当前用户进程和打开文件检查；Windows 当前缺少等价活动检查，保持只读并拒绝执行。
+OSDK 的行为独立：离线配置探查数据/缓存位置，`--root` / `--cache-root` 可重定向；下载缓存按 `--entry CURRENT_DOWNLOAD_ID --trash` 进入回收站，模型按 `--entry CURRENT_MODEL_ID --remove-models` 调用 OSDK 移除，**不进入回收站**。模型声明、锁文件和共享 CAS 保留，后续同步可能重新下载。TUI 的 `d` 只处理缓存，Enter 打开详情；OSDK 项目体积仍是整项目逻辑总量。
 
-JSON 使用 `sweepx.managed_cache.result/v1`，保留 `rulesDigest`、`projectDiscoveryComplete`、`indexComplete`、逐项 `eligible` 与未知/下界大小。详见[原生库存与执行约定](https://github.com/lejunyang/sweepx/blob/main/docs/architecture/managed-cache-inventory.md)。
+JSON 库报告为 `sweepx.managed_cache.result/v1`，自动多库探查的结果在 `stores` 中；单库兼容顶层 `inventory`、`selection`、`results`、`blocked`。保留 `rulesDigest`、`projectDiscoveryComplete`、`indexComplete` 和 `eligible`。执行依赖 macOS/Linux 当前用户进程/打开文件检查；Windows 保持只读并拒绝执行。详见[原生库存约定](https://github.com/lejunyang/sweepx/blob/main/docs/architecture/managed-cache-inventory.md)。
 
 ### pnpm 项目专项清理
 
-`pnpm-store --project` 支持两种明确范围：默认 `--project-mode dependencies` 保留源码、配置和锁文件，将所选项目及已观察到工作区子项目的 `node_modules` 放入回收站；`--project-mode project` 将整个项目放入回收站。随后只回收该项目独占、且原生硬链接均已核实在目标依赖目录内的 store 内容。其他项目引用、其他包索引共享内容和来源不明的额外链接保持不变。引用只覆盖显式指定的 `--project-root`，不保证整机无引用；自定义/链接虚拟 store、索引不完整、限额和活动检查失败均拒绝执行。
-
 ```bash
-# 先预览；--project-root 可重复，须包含应保护的其他项目
-sweepx --format json pnpm-store --root /absolute/store/v10 --project-root /absolute/projects --project /absolute/projects/app --project-mode dependencies
-# 核对 plan.id，再用相同范围、模式和摘要执行
-sweepx pnpm-store --root /absolute/store/v10 --project-root /absolute/projects --project /absolute/projects/app --project-mode dependencies --plan CURRENT_PLAN_ID --trash
-# 整项目模式同样先预览，之后加 --plan CURRENT_PLAN_ID --trash
-sweepx pnpm-store --root /absolute/store/v10 --project-root /absolute/projects --project /absolute/projects/app --project-mode project
+# 只看项目安装包体积；即使声明的 store 已不存在也可统计
+sweepx pnpm-store --project /absolute/projects/app
+# 保留源码，回收项目依赖和已确认独占的 store 内容
+sweepx pnpm-store --project /absolute/projects/app --trash
+# 只有此显式模式会回收整个项目
+sweepx pnpm-store --project /absolute/projects/app --project-mode project --trash
+# 可选查看依赖目录与独占 store 内容的具体预览
+sweepx --format json pnpm-store --project /absolute/projects/app --project-mode dependencies
 ```
 
-预览绑定规则、所有包索引、引用项目、目标原生身份及依赖树内容；变化使旧摘要失效。包索引保留供 pnpm 后续重新下载。回收站中的硬链接仍存在，不通过假设链接数下降来授权 store 清理；当前原生计数发生变化则停止。目录先回收，文件逐项复核后回收；失败停止并保留已成功操作的结果，不回滚或永久删除。整个项目内含所选 store 时，整项目模式拒绝执行，避免连带清理共享 store；依赖模式可用于项目内独立 store。
+默认依赖模式回收所选项目及已观察到工作区子项目的 `node_modules`，随后仅回收原生硬链接确切等于一份 store 路径加目标依赖树中出现次数的 CAS 内容。其他项目引用、其他索引共享内容和无法解释的链接保持不变。计划在本次调用内部生成，目录和文件在移动前再次核验；回收站中的链接仍存在，不假定链接数会下降。失败停止并保留已完成结果，不永久删除或回滚。整个项目内包含所选 store 时，整项目模式拒绝执行；依赖模式支持独立的项目本地 store。
 
-项目计划不扫描其他项目的完整源码/构建目录，仅核对引用并计量目标依赖树。最多 256 个依赖目录、65,536 个 store 文件、64 MiB 捕获的计划/目录前沿元数据和 2,000,000 个依赖条目；超限不生成可执行计划。文件身份去重集合也以该条目数为上限。TUI 的包详情显示两种项目预览命令，项目执行目前走 CLI；`junk` 不自动执行此联动清理。
+链接/自定义虚拟 store、缺失的 store、索引或引用不完整、限额及活动观察失败均拒绝清理。最多 256 个依赖目录、65,536 个 store 文件、64 MiB 计划/前沿元数据和 2,000,000 个依赖条目。TUI 提供预览命令，项目执行走 CLI；`junk` 不自动执行该联动清理。
 
-JSON 使用 `sweepx.pnpm_project.result/v1`，包含 `plan`、`directoryPaths`、`contentPaths`、`sharedPackages`、`retainedContentFiles`、`dependencyLogicalBytes` 和逐项 `results`。大小不是可释放空间；移入回收站不会立即释放容量。macOS/Linux 执行依赖当前用户进程/打开文件观察，Windows 保持只读预览并拒绝执行。
+单独体积查询使用 `sweepx.pnpm_projects.result/v1`。执行/具体计划预览使用 `sweepx.pnpm_project.result/v1`，包含 `plan`、`directoryPaths`、`contentPaths`、`sharedPackages`、`retainedContentFiles`、`dependencyLogicalBytes` 和 `results`。`dependencyLogicalBytes` 描述回收目标依赖树，范围可能大于虚拟 store 包体积；均不是可释放空间，移入回收站不会立即释放容量。
 
 ## `site-storage`
 

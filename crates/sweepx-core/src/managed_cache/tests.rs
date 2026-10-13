@@ -109,7 +109,7 @@ fn native_link_facts_shared_indexes_and_project_sizes() {
     assert_eq!(b.projects, vec![0]);
     assert_eq!(
         known(&report.projects[0].logical_bytes),
-        Some(ordinary_total(&base.join("project")))
+        Some(ordinary_total(&base.join("project/node_modules/.pnpm")))
     );
     assert!(report.projects[0].size_complete);
     let plan = pnpm_cleanup_plan(&report, std::slice::from_ref(&a.id), &cancel).unwrap();
@@ -708,4 +708,294 @@ fn project_dependencies_include_workspace_children_and_bind_marker_changes() {
     )
     .unwrap();
     assert!(pnpm_project_plan(&report, &project, PnpmProjectMode::Dependencies, &cancel).is_err());
+}
+
+#[test]
+fn project_package_totals_exclude_sources_and_deduplicate_workspace_hard_links() {
+    let temp = fixture();
+    let base = root(&temp);
+    let store = base.join("store");
+    let project = base.join("workspace");
+    let child = project.join("packages/child");
+    for p in [&project, &child] {
+        fs::create_dir_all(p.join("node_modules/.pnpm/pkg@1.0.0")).unwrap();
+        fs::write(
+            p.join("node_modules/.modules.yaml"),
+            serde_json::to_vec(&json!({"storeDir":store,"virtualStoreDir":".pnpm"})).unwrap(),
+        )
+        .unwrap();
+        fs::write(p.join("source"), vec![0; 100_000]).unwrap();
+    }
+    let file = project.join("node_modules/.pnpm/pkg@1.0.0/file");
+    fs::write(&file, b"1234567").unwrap();
+    fs::hard_link(&file, child.join("node_modules/.pnpm/pkg@1.0.0/link")).unwrap();
+    fs::write(child.join("node_modules/.pnpm/pkg@1.0.0/own"), b"abc").unwrap();
+    let (projects, complete, issues) =
+        pnpm_projects(std::slice::from_ref(&project), &CancellationToken::new());
+    assert!(complete, "{issues:?}");
+    assert_eq!(
+        known(
+            &projects
+                .iter()
+                .find(|p| p.directory == project.display().to_string())
+                .unwrap()
+                .logical_bytes
+        ),
+        Some(10)
+    );
+    assert_eq!(
+        known(
+            &projects
+                .iter()
+                .find(|p| p.directory == child.display().to_string())
+                .unwrap()
+                .logical_bytes
+        ),
+        Some(10)
+    );
+    assert!(
+        projects
+            .iter()
+            .all(|p| p.size_complete && p.store_dir.as_deref() == store.to_str())
+    );
+}
+#[test]
+fn reference_discovery_completes_after_twenty_thousand_source_directories() {
+    let temp = fixture();
+    let base = root(&temp);
+    let store = base.join("store");
+    let projects = base.join("projects");
+    fs::create_dir_all(&projects).unwrap();
+    for i in 0..20_050 {
+        fs::create_dir(projects.join(format!("source-{i}"))).unwrap();
+    }
+    let project = projects.join("installed");
+    fs::create_dir_all(project.join("node_modules/.pnpm/used@1.0.0")).unwrap();
+    let digest = content(&store, 1, b"used");
+    index(&store, "used", &[digest]);
+    let report = pnpm_inventory(&store, &[projects], &CancellationToken::new());
+    assert!(report.complete, "{:?}", report.issues);
+    assert_eq!(report.entries[0].projects.len(), 1);
+    assert!(!report.entries[0].eligible);
+}
+#[test]
+fn large_streamed_json_preserves_side_effect_ownership() {
+    use std::io::Write;
+    let temp = fixture();
+    let base = root(&temp);
+    let store = base.join("store");
+    let shared = content(&store, 1, b"shared");
+    let only = content(&store, 2, b"only");
+    index(&store, "selected", &[shared.clone(), only]);
+    let path = store.join("index/00/large.json");
+    let mut file = std::io::BufWriter::new(fs::File::create(&path).unwrap());
+    write!(
+        file,
+        "{{\"name\":\"large\",\"version\":\"1.0.0\",\"files\":{{}},\"metadata\":["
+    )
+    .unwrap();
+    for _ in 0..2_000_000 {
+        file.write_all(b"null,").unwrap();
+    }
+    write!(file,"null],\"sideEffects\":{{\"linux\":{{\"added\":{{\"addon\":{{\"integrity\":\"{shared}\"}}}},\"deleted\":[\"base\"]}}}}}}").unwrap();
+    file.flush().unwrap();
+    drop(file);
+    assert!(fs::metadata(path).unwrap().len() > 8 * 1024 * 1024);
+    let cancel = CancellationToken::new();
+    let report = pnpm_inventory(&store, &[], &cancel);
+    assert!(report.complete, "{:?}", report.issues);
+    let selected = report
+        .entries
+        .iter()
+        .find(|e| e.name == "selected")
+        .unwrap();
+    let plan = pnpm_cleanup_plan(&report, std::slice::from_ref(&selected.id), &cancel).unwrap();
+    assert_eq!(plan.len(), 1);
+    assert_eq!(known(&plan[0].logical_bytes), Some(4));
+}
+#[test]
+fn bulk_selection_accounts_shared_owners_across_the_old_selection_limit() {
+    let temp = fixture();
+    let base = root(&temp);
+    let store = base.join("store");
+    let digest = content(&store, 1, b"shared");
+    for i in 0..300 {
+        index(&store, &format!("pkg{i}"), std::slice::from_ref(&digest));
+    }
+    let cancel = CancellationToken::new();
+    let report = pnpm_inventory(&store, &[], &cancel);
+    assert!(report.complete, "{:?}", report.issues);
+    let selected = report
+        .entries
+        .iter()
+        .map(|e| e.id.clone())
+        .collect::<Vec<_>>();
+    let mut observed = Vec::new();
+    pnpm_cleanup_batches(&report, &selected, &cancel, &mut |batch| {
+        assert!(batch.len() <= 128);
+        observed.extend_from_slice(batch);
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(observed.len(), 1);
+    assert_eq!(known(&observed[0].logical_bytes), Some(6));
+}
+
+#[test]
+fn invocation_project_observations_never_authorize_cleanup_after_a_new_reference() {
+    let temp = fixture();
+    let base = root(&temp);
+    let store = base.join("store");
+    let projects = base.join("projects");
+    fs::create_dir(&projects).unwrap();
+    let digest = content(&store, 1, b"used");
+    index(&store, "pkg", &[digest]);
+    let cancel = CancellationToken::new();
+    let observations = pnpm_observe_projects(std::slice::from_ref(&projects), &cancel);
+    fs::create_dir_all(projects.join("new/node_modules/.pnpm/pkg@1.0.0")).unwrap();
+    let report = pnpm_inventory_observed(&store, &observations, &cancel);
+    assert!(report.entries[0].eligible, "{:?}", report.issues);
+    let mut called = false;
+    let result = pnpm_cleanup_batches(
+        &report,
+        std::slice::from_ref(&report.entries[0].id),
+        &cancel,
+        &mut |_| {
+            called = true;
+            Ok(())
+        },
+    );
+    assert!(result.is_err());
+    assert!(!called);
+}
+#[test]
+fn native_batches_cover_more_than_eight_thousand_exclusive_files() {
+    let temp = fixture();
+    let base = root(&temp);
+    let store = base.join("store");
+    fs::create_dir_all(store.join("index/00")).unwrap();
+    let mut records = serde_json::Map::new();
+    for i in 0..8_250u64 {
+        let mut hash = [0u8; 64];
+        hash[..8].copy_from_slice(&i.to_le_bytes());
+        let hex = hash.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        let path = store.join("files").join(&hex[..2]).join(&hex[2..]);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, b"x").unwrap();
+        records.insert(format!("file-{i}"),json!({"integrity":format!("sha512-{}",base64::engine::general_purpose::STANDARD.encode(hash))}));
+    }
+    fs::write(
+        store.join("index/00/pkg.json"),
+        serde_json::to_vec(&json!({"name":"pkg","version":"1.0.0","files":records})).unwrap(),
+    )
+    .unwrap();
+    let cancel = CancellationToken::new();
+    let report = pnpm_inventory(&store, &[], &cancel);
+    assert!(report.complete, "{:?}", report.issues);
+    assert_eq!(known(&report.cleanup_logical_bytes), Some(8_250));
+    let mut count = 0usize;
+    pnpm_cleanup_batches(
+        &report,
+        std::slice::from_ref(&report.entries[0].id),
+        &cancel,
+        &mut |batch| {
+            assert!(batch.len() <= 128);
+            count += batch.len();
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert_eq!(count, 8_250);
+}
+
+#[test]
+fn legacy_effect_filenames_and_delta_manifests_do_not_change_base_identity() {
+    let temp = fixture();
+    let base = root(&temp);
+    let store = base.join("store");
+    let digest = content(&store, 1, b"effect");
+    index(&store, "pkg", std::slice::from_ref(&digest));
+    let path = store.join("index/00/pkg.json");
+    fs::write(&path,serde_json::to_vec(&json!({"name":"pkg","version":"1.0.0","files":{},"sideEffects":{"darwin":{"added":{"integrity":digest,"mode":493},"deleted":{"integrity":digest}}}})).unwrap()).unwrap();
+    let cancel = CancellationToken::new();
+    let report = pnpm_inventory(&store, &[], &cancel);
+    assert!(report.complete, "{:?}", report.issues);
+    assert_eq!(report.entries[0].files, 2);
+    let manifest = content(&store, 2, br#"{"name":"effect-only","version":"2.0.0"}"#);
+    fs::write(&path,serde_json::to_vec(&json!({"files":{},"sideEffects":{"linux":{"added":{"package.json":{"integrity":manifest}},"deleted":[]}}})).unwrap()).unwrap();
+    let report = pnpm_inventory(&store, &[], &cancel);
+    assert!(report.complete, "{:?}", report.issues);
+    assert!(report.entries[0].version.is_none());
+    assert!(!report.entries[0].eligible);
+}
+
+#[test]
+fn automatic_discovery_finds_project_local_store_without_installed_dependencies() {
+    let temp = fixture();
+    let base = root(&temp);
+    let local = base.join("retired/.pnpm-store/v3");
+    fs::create_dir_all(local.join("files")).unwrap();
+    let cancel = CancellationToken::new();
+    let (_, complete, issues, hints) =
+        projects::discover_store_hints(std::slice::from_ref(&base), &mut Native::new(&cancel));
+    assert!(complete, "{issues:?}");
+    assert!(
+        hints.contains(&base.join("retired/.pnpm-store")),
+        "{hints:?}"
+    );
+    let container = pnpm_locations(
+        Some(&base.join("retired/.pnpm-store")),
+        &[],
+        &CancellationToken::new(),
+    );
+    assert_eq!(container.stores, vec![local]);
+    assert!(container.issues.is_empty());
+}
+
+#[test]
+fn project_display_labels_cannot_redirect_native_cleanup_targets() {
+    let temp = fixture();
+    let base = root(&temp);
+    let store = base.join("store");
+    let project = base.join("projects/selected");
+    let digest = content(&store, 1, b"dependency");
+    index(&store, "pkg", &[digest]);
+    project_layout(&project, &store, "pkg");
+    let cancel = CancellationToken::new();
+    let mut report = pnpm_project_inventory(&store, &[base.join("projects")], &cancel);
+    report.projects[0].directory = base.join("unrelated").display().to_string();
+    let plan =
+        pnpm_project_plan(&report, &project, PnpmProjectMode::Dependencies, &cancel).unwrap();
+    assert_eq!(
+        plan.directory_paths,
+        vec![project.join("node_modules").display().to_string()]
+    );
+    fs::rename(&project, base.join("replaced")).unwrap();
+    project_layout(&project, &store, "pkg");
+    assert_eq!(
+        pnpm_project_plan(&report, &project, PnpmProjectMode::Dependencies, &cancel).unwrap_err(),
+        "selected_project_identity_changed"
+    );
+}
+
+#[test]
+fn missing_virtual_store_is_unknown_rather_than_a_zero_package_total() {
+    let temp = fixture();
+    let base = root(&temp);
+    let project = base.join("project");
+    fs::create_dir_all(project.join("node_modules")).unwrap();
+    fs::write(
+        project.join("node_modules/.modules.yaml"),
+        b"storeDir: /missing/store\nvirtualStoreDir: custom\n",
+    )
+    .unwrap();
+    let (projects, complete, issues) = pnpm_projects(&[project], &CancellationToken::new());
+    assert!(!complete);
+    assert!(!issues.is_empty());
+    assert_eq!(projects.len(), 1);
+    assert!(matches!(
+        projects[0].logical_bytes,
+        EvidenceValue::Unknown { .. }
+    ));
+    assert!(!projects[0].size_complete);
 }

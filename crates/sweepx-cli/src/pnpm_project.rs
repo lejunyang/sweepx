@@ -35,7 +35,16 @@ pub(crate) fn run(
     let mut error = plan.as_ref().err().cloned();
     if trash && error.is_none() {
         match expected {
-            None => error = Some("project_preview_digest_required_use_plan".into()),
+            None => {
+                if let Err(e) = execute(
+                    config,
+                    plan.as_ref().expect("plan checked"),
+                    &cancel,
+                    &mut results,
+                ) {
+                    error = Some(e);
+                }
+            }
             Some(id) if plan.as_ref().is_ok_and(|p| p.id != id) => {
                 error = Some("project_plan_changed_refresh_preview".into())
             }
@@ -87,9 +96,9 @@ pub(crate) fn run(
                 println!(
                     "{}",
                     if locale == Locale::ZhCn {
-                        "核对预览后，使用相同参数加 --plan 上述摘要 --trash 执行。"
+                        "使用相同参数加 --trash 执行；内部生成当前清理计划并复核。"
                     } else {
-                        "After review, repeat these arguments with --plan DIGEST --trash."
+                        "Repeat these arguments with --trash; the current plan is built and revalidated internally."
                     }
                 );
             }

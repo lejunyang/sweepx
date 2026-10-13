@@ -1,11 +1,17 @@
 //! Managed caches are independent inventories, never blanket junk classification.
 //! pnpm links are time-local file facts; project/version matches are bounded usage hints.
+mod content;
+mod json_index;
 mod msgpack;
+use content::ContentKey;
+mod locations;
 mod native;
 mod osdk;
 mod pnpm;
 mod project_cleanup;
 mod projects;
+mod walk;
+pub use locations::{PnpmLocations, pnpm_locations};
 pub use project_cleanup::{
     PnpmProjectMode, PnpmProjectPlan, pnpm_project_plan, revalidate_project_content,
     revalidate_project_directory,
@@ -19,22 +25,29 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 use sweepx_model::{ByteValue, EvidenceValue, ReasonCode, ScannedEntry};
 use sweepx_platform::CancellationToken;
-/// One observed project. Logical totals include dependencies/build outputs; allocation is unknown.
+/// One observed project. pnpm totals cover installed virtual-store packages; allocation is unknown.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Project {
     /// Display-only project directory.
     pub directory: String,
-    /// Whole-project apparent logical total, with explicit incomplete evidence.
+    /// pnpm virtual-store logical bytes (hard links counted once); whole-project total for osdk.
     pub logical_bytes: ByteValue,
     /// Whether the total's native traversal completed.
     pub size_complete: bool,
     /// Store directory declared by the installed pnpm layout, when available.
     pub store_dir: Option<String>,
+    /// Advisory declared-store admission: observed, unavailable, or not_checked.
+    /// Unavailable includes missing, linked or denied roots and never grants cleanup authority.
+    pub store_status: &'static str,
     #[serde(skip)]
     packages: BTreeSet<(String, String)>,
     #[serde(skip)]
     models: BTreeSet<String>,
+    #[serde(skip)]
+    virtual_stores: Vec<PathBuf>,
+    #[serde(skip)]
+    source: ScannedEntry,
 }
 /// Explicit action for an inventory item; names and sizes never grant execution authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -87,7 +100,7 @@ pub struct Item {
     #[serde(skip)]
     pub(crate) source: Option<ScannedEntry>,
     #[serde(skip)]
-    content: Vec<String>,
+    content: Vec<ContentKey>,
     #[serde(skip)]
     snapshot_digest: Option<String>,
 }
@@ -117,6 +130,9 @@ pub struct Inventory {
     pub projects: Vec<Project>,
     /// Individually selectable units.
     pub entries: Vec<Item>,
+    /// Unique exclusive single-link CAS lengths admitted by the current complete pnpm inventory.
+    /// This is logical content size, never allocated or reclaimable space.
+    pub cleanup_logical_bytes: ByteValue,
     /// Non-fatal coverage or format limitations.
     pub issues: Vec<String>,
     #[serde(skip)]
@@ -124,7 +140,9 @@ pub struct Inventory {
     #[serde(skip)]
     project_inputs: Vec<PathBuf>,
     #[serde(skip)]
-    absent_cas: BTreeSet<String>,
+    absent_cas: BTreeSet<ContentKey>,
+    #[serde(skip)]
+    single_cas: std::collections::BTreeMap<ContentKey, u128>,
 }
 impl Inventory {
     fn empty(tool: &str, root: &Path, projects: &[PathBuf]) -> Self {
@@ -140,11 +158,41 @@ impl Inventory {
             project_discovery_complete: false,
             projects: Vec::new(),
             entries: Vec::new(),
+            cleanup_logical_bytes: bytes(None, false),
             issues: Vec::new(),
             root_entry: None,
             project_inputs: projects.to_vec(),
             absent_cas: BTreeSet::new(),
+            single_cas: std::collections::BTreeMap::new(),
         }
+    }
+    /// Logical lengths of current exclusive single-link content for a selection. Shared owners
+    /// outside this selection stay; incomplete inventories cannot supply an exact total.
+    pub fn selected_pnpm_bytes(&self, selected: &[String]) -> ByteValue {
+        if self.tool != "pnpm" || !self.complete {
+            return bytes(None, false);
+        }
+        let selected: BTreeSet<_> = selected.iter().collect();
+        let retained: BTreeSet<_> = self
+            .entries
+            .iter()
+            .filter(|e| !selected.contains(&e.id))
+            .flat_map(|e| e.content.iter())
+            .collect();
+        let admitted: BTreeSet<_> = self
+            .entries
+            .iter()
+            .filter(|e| selected.contains(&e.id) && e.eligible)
+            .flat_map(|e| e.content.iter())
+            .filter(|key| !retained.contains(key))
+            .collect();
+        bytes(
+            admitted
+                .into_iter()
+                .filter_map(|key| self.single_cas.get(key))
+                .try_fold(0u128, |a, b| a.checked_add(*b)),
+            true,
+        )
     }
     /// Current native root behind this inventory; display paths cannot supply it.
     pub fn source_root(&self) -> Option<&ScannedEntry> {
@@ -158,6 +206,44 @@ impl Inventory {
         crate::storage_inventory::revalidate_directory(root, cancel)?;
         native::path(root)
     }
+}
+/// Invocation-local installed-project observations, never execution authorization. Stores can
+/// share these read-only facts; cleanup always re-inventories their original native search scope.
+pub struct PnpmProjectObservation {
+    roots: Vec<PathBuf>,
+    projects: Vec<Project>,
+    complete: bool,
+    issues: Vec<String>,
+}
+/// Discover references and package footprints once for a read-only multi-store invocation.
+pub fn pnpm_observe_projects(
+    roots: &[PathBuf],
+    cancel: &CancellationToken,
+) -> PnpmProjectObservation {
+    let (projects, complete, issues) = if roots.len() > 32 {
+        (
+            Vec::new(),
+            false,
+            vec!["project_root_budget_exceeded".into()],
+        )
+    } else {
+        projects::discover_measured(roots, &mut Native::new(cancel), true, true)
+    };
+    PnpmProjectObservation {
+        roots: roots.iter().take(32).cloned().collect(),
+        projects,
+        complete,
+        issues,
+    }
+}
+/// Inventory one store with invocation-local project facts. An execution plan does not reuse
+/// these observations: it performs fresh native index/content/reference checks before admission.
+pub fn pnpm_inventory_observed(
+    root: &Path,
+    projects: &PnpmProjectObservation,
+    cancel: &CancellationToken,
+) -> Inventory {
+    pnpm::inventory_observed(root, &projects.roots, cancel, Some(projects))
 }
 /// Inventory pnpm v3/v10 JSON indexes or v11 SQLite/msgpackr indexes and bounded installed projects.
 pub fn pnpm_inventory(
@@ -187,6 +273,48 @@ pub fn pnpm_project_inventory(
         return report;
     }
     pnpm::inventory(root, project_roots, cancel, false)
+}
+/// Observe installed pnpm projects and their package footprints independently of store availability.
+pub fn pnpm_projects(
+    roots: &[PathBuf],
+    cancel: &CancellationToken,
+) -> (Vec<Project>, bool, Vec<String>) {
+    if roots.len() > 32 {
+        return (
+            Vec::new(),
+            false,
+            vec!["project_root_budget_exceeded".into()],
+        );
+    }
+    let (mut projects, complete, mut issues) =
+        projects::discover_measured(roots, &mut Native::new(cancel), false, true);
+    projects.retain(|p| p.store_dir.is_some() || !p.virtual_stores.is_empty());
+    // Workspace totals include child installations and count shared native hard links once.
+    for i in 0..projects.len() {
+        let Ok(root) = native::path(&projects[i].source) else {
+            projects[i].logical_bytes = bytes(None, false);
+            projects[i].size_complete = false;
+            continue;
+        };
+        let virtual_stores: Vec<_> = projects
+            .iter()
+            .filter(|p| native::path(&p.source).is_ok_and(|path| path.starts_with(&root)))
+            .flat_map(|p| p.virtual_stores.iter().cloned())
+            .collect();
+        let (size, measured) = walk::footprint(&virtual_stores, cancel);
+        projects[i].logical_bytes = size;
+        projects[i].size_complete = measured;
+    }
+    projects.sort_by(|a, b| {
+        known(&b.logical_bytes)
+            .cmp(&known(&a.logical_bytes))
+            .then(a.directory.cmp(&b.directory))
+    });
+    let complete = complete && projects.iter().all(|p| p.size_complete);
+    if projects.iter().any(|p| !p.size_complete) {
+        issues.push("project_package_sizes_incomplete".into());
+    }
+    (projects, complete, issues)
 }
 /// Inventory osdk model aliases/snapshots and independently selectable download cache units.
 pub fn osdk_inventory(
@@ -229,6 +357,38 @@ pub fn pnpm_cleanup_plan(
         return Err("store_root_replaced".into());
     }
     pnpm::plan(&fresh, selected, cancel)
+}
+/// Execute a current ownership plan through bounded batches of native file observations.
+/// The callback supplies the independent operation (e.g. recoverable Trash). Shared owners are
+/// accounted across the complete selection, not independently per batch. Successful earlier
+/// callbacks can precede a later failure; callers must retain a bounded partial-result summary.
+pub fn pnpm_cleanup_batches(
+    inventory: &Inventory,
+    selected: &[String],
+    cancel: &CancellationToken,
+    consume: &mut dyn FnMut(&[ScannedEntry]) -> Result<(), String>,
+) -> Result<(), String> {
+    if !inventory.complete || selected.len() > 65_536 {
+        return Err("complete_bounded_inventory_required".into());
+    }
+    let root = inventory
+        .root_entry
+        .as_ref()
+        .ok_or("missing_root_identity")?;
+    let fresh = pnpm::inventory(
+        &native::path(root)?,
+        &inventory.project_inputs,
+        cancel,
+        false,
+    );
+    if !fresh
+        .root_entry
+        .as_ref()
+        .is_some_and(|r| native::same_object(root, r))
+    {
+        return Err("store_root_replaced".into());
+    }
+    pnpm::visit_plan(&fresh, selected, cancel, consume)
 }
 /// Reobserve one selected CAS file through its captured parent immediately before native Trash.
 /// Changed identity, links, no-follow/mount boundaries and cancellation refuse the operation.

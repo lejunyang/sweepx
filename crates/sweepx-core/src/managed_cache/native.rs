@@ -14,6 +14,7 @@ pub(super) struct Native<'a> {
     pub cancel: &'a CancellationToken,
     until: Instant,
     calls: usize,
+    max_calls: usize,
     pub bytes: usize,
     ids: BTreeMap<String, DetailEntryIdAllocator>,
 }
@@ -25,15 +26,27 @@ impl<'a> Native<'a> {
             // Keep a finite worker budget without cutting the reference graph after five minutes.
             until: Instant::now() + Duration::from_secs(900),
             calls: 0,
+            max_calls: 200_000,
             bytes: 0,
             ids: BTreeMap::new(),
         }
+    }
+    // Complete ownership already bounds this graph. Account for one fixed native binding per
+    // selected digest plus the 256 CAS shards/setup, while retaining cancellation and deadline.
+    // Allocators store constant-size cursors; captured file metadata is emitted in small batches.
+    pub fn content_plan(cancel: &'a CancellationToken, files: usize) -> Result<Self, String> {
+        if files > 2_000_000 {
+            return Err("package_content_reference_budget".into());
+        }
+        let mut native = Self::new(cancel);
+        native.max_calls = files + 512;
+        Ok(native)
     }
     pub fn check(&mut self) -> Result<(), String> {
         self.calls += 1;
         if self.cancel.is_cancelled() {
             Err("cancelled".into())
-        } else if self.calls > 200_000 || Instant::now() >= self.until {
+        } else if self.calls > self.max_calls || Instant::now() >= self.until {
             Err("inventory_budget_exceeded".into())
         } else {
             Ok(())
@@ -135,6 +148,55 @@ impl<'a> Native<'a> {
         }
         self.bytes += bytes.len();
         Ok(bytes)
+    }
+    /// Large JSON indexes stream to a private, automatically removed bounded spool. Provisional
+    /// bytes are discarded unless the native reader validates unchanged identity/metadata.
+    pub fn spool(
+        &mut self,
+        parent: &ScannedEntry,
+        name: &str,
+    ) -> Result<(std::fs::File, String), String> {
+        use sha2::{Digest, Sha256};
+        use std::io::{Seek, Write};
+        let file = self.child(parent, name)?;
+        let length = super::exact(&file.logical_bytes)
+            .and_then(|n| usize::try_from(n).ok())
+            .filter(|n| *n <= 768 * 1024 * 1024)
+            .ok_or("file_byte_budget_exceeded")?;
+        if self.bytes.saturating_add(length) > 1024 * 1024 * 1024 {
+            return Err("index_byte_budget_exceeded".into());
+        }
+        let mut spool = tempfile::tempfile().map_err(|e| e.to_string())?;
+        let mut digest = Sha256::new();
+        let mut count = 0usize;
+        let observed = DetailRescanner::new(HostPlatformScanner::new(), limits())
+            .stream_file(
+                FileContentRequest {
+                    entry: &file,
+                    offset: 0,
+                    max_bytes: length as u64,
+                    previous: None,
+                },
+                self.cancel,
+                &mut |chunk| {
+                    spool.write_all(chunk).map_err(|e| {
+                        sweepx_platform::BoundedRegularFileReadError::Io {
+                            detail: e.to_string(),
+                            io_kind: Some(e.kind()),
+                        }
+                    })?;
+                    digest.update(chunk);
+                    count += chunk.len();
+                    Ok(())
+                },
+            )
+            .map_err(|e| e.to_string())?;
+        if count != length || observed.observed_after.logical_bytes.0 != length as u128 {
+            return Err("file_length_changed".into());
+        }
+        self.bytes += count;
+        spool.rewind().map_err(|e| e.to_string())?;
+        Ok((spool, format!("{:x}", digest.finalize())))
     }
 }
 fn limits() -> ScanResourceLimits {

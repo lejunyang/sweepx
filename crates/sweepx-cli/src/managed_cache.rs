@@ -59,6 +59,312 @@ pub(crate) struct Arguments {
     #[arg(long)]
     pub tui: bool,
 }
+/// pnpm-specific commands discover stores and select safe candidates automatically.
+#[derive(Debug, Args)]
+pub(crate) struct PnpmArguments {
+    /// Versioned store or store container; omitted discovers installed/configured/default stores.
+    #[arg(long)]
+    root: Option<PathBuf>,
+    /// Project directory: show installed package bytes, or retire dependencies with --trash.
+    #[arg(long, conflicts_with_all = ["entry", "package", "max_links", "unobserved", "tui"])]
+    project: Option<PathBuf>,
+    /// Extra installed-project reference search scopes (repeatable); defaults are discovered.
+    #[arg(long)]
+    project_root: Vec<PathBuf>,
+    /// Keep source (default dependencies), or explicitly retire the whole project.
+    #[arg(long, requires = "project", value_parser = ["dependencies", "project"])]
+    project_mode: Option<String>,
+    /// Restrict packages by exact name.
+    #[arg(long)]
+    package: Option<String>,
+    /// Restrict observed native links; this alone never proves disuse.
+    #[arg(long)]
+    max_links: Option<u128>,
+    /// Restrict rows to packages unobserved in reference search scopes.
+    #[arg(long)]
+    unobserved: bool,
+    /// Optional advanced selection; ordinary cleanup selects all admitted unused content.
+    #[arg(long, conflicts_with = "tui", hide = true)]
+    entry: Vec<String>,
+    /// Optional legacy preview guard; ordinary cleanup creates its plan internally.
+    #[arg(long, requires_all = ["project", "trash"], hide = true)]
+    plan: Option<String>,
+    /// Move admitted unused store files or project dependencies to recoverable OS Trash.
+    #[arg(long, conflicts_with = "tui")]
+    trash: bool,
+    /// Browse a store and its project package footprints.
+    #[arg(long)]
+    tui: bool,
+}
+/// Defaults protect nearby/common project locations; output always declares the observed scope.
+fn pnpm_scopes(args: &PnpmArguments) -> Result<Vec<PathBuf>, String> {
+    let mut scopes = args.project_root.clone();
+    if scopes.is_empty() {
+        if let Some(project) = &args.project {
+            scopes.push(project.parent().unwrap_or(project).to_path_buf());
+        } else {
+            scopes.push(std::env::current_dir().map_err(|e| e.to_string())?);
+            if let Some(home) = sweepx_core::junk::platform::user_home_dir() {
+                for name in [
+                    "Desktop/Projects",
+                    "Projects",
+                    "projects",
+                    "workspace",
+                    "workspaces",
+                    "dev",
+                ] {
+                    let path = home.join(name);
+                    if path.is_dir() {
+                        scopes.push(path);
+                    }
+                }
+            }
+        }
+    }
+    if let Some(project) = &args.project {
+        scopes.push(project.clone());
+    }
+    scopes.sort();
+    scopes.dedup();
+    let all = scopes.clone();
+    scopes.retain(|p| !all.iter().any(|other| other != p && p.starts_with(other)));
+    if scopes.len() > 32 || scopes.iter().any(|p| !p.is_absolute()) {
+        return Err("absolute_bounded_project_scopes_required".into());
+    }
+    Ok(scopes)
+}
+pub(crate) fn run_pnpm(
+    args: PnpmArguments,
+    format: OutputFormat,
+    unit: HumanSizeUnit,
+    locale: Locale,
+    sort: ScanSort,
+) -> ExitCode {
+    let cancel = CancellationToken::new();
+    let scopes = match pnpm_scopes(&args) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::from(2);
+        }
+    };
+    if args.root.as_ref().is_some_and(|p| !p.is_absolute())
+        || args.max_links == Some(0)
+        || args.entry.len() > 256
+    {
+        eprintln!("Invalid store root or link limit");
+        return ExitCode::from(2);
+    }
+    if let Some(project) = &args.project {
+        if !project.is_absolute() {
+            eprintln!("absolute_project_required");
+            return ExitCode::from(2);
+        }
+        if !args.trash && args.project_mode.is_none() {
+            let (mut projects, complete, issues) =
+                sweepx_core::managed_cache::pnpm_projects(std::slice::from_ref(project), &cancel);
+            projects.retain(|p| std::path::Path::new(&p.directory).starts_with(project));
+            if format == OutputFormat::Human {
+                for p in &projects {
+                    println!(
+                        "{}  {}  complete={} store={} status={}",
+                        size(&p.logical_bytes, unit),
+                        p.directory,
+                        p.size_complete,
+                        p.store_dir.as_deref().unwrap_or("?"),
+                        p.store_status
+                    );
+                }
+                for e in &issues {
+                    eprintln!("{e}");
+                }
+            } else {
+                println!(
+                    "{}",
+                    json!({"schema":"sweepx.pnpm_projects.result/v1","readOnly":true,"projects":projects,"complete":complete,"issues":issues,"sizeScope":"installed_pnpm_virtual_stores","reclaimableBytes":null})
+                );
+            }
+            return ExitCode::from(if complete { 0 } else { 4 });
+        }
+    }
+    let locations =
+        sweepx_core::managed_cache::pnpm_locations(args.root.as_deref(), &scopes, &cancel);
+    if locations.stores.is_empty() {
+        eprintln!("No pnpm stores discovered: {:?}", locations.issues);
+        return ExitCode::from(4);
+    }
+    let config_for = |root: PathBuf| Config {
+        tool: "pnpm",
+        cache: root.clone(),
+        root,
+        projects: scopes.clone(),
+        package: args.package.clone(),
+        max_links: args.max_links,
+        unobserved: args.unobserved,
+    };
+    if let Some(project) = &args.project {
+        let (projects, _, _) =
+            sweepx_core::managed_cache::pnpm_projects(std::slice::from_ref(project), &cancel);
+        let root = projects
+            .iter()
+            .find(|p| std::path::Path::new(&p.directory) == project)
+            .and_then(|p| p.store_dir.as_ref())
+            .map(PathBuf::from);
+        let Some(root) = root.filter(|p| locations.stores.contains(p)) else {
+            eprintln!("Project store unavailable or does not match --root");
+            return ExitCode::from(4);
+        };
+        return crate::pnpm_project::run(
+            &config_for(root),
+            crate::pnpm_project::Request {
+                project,
+                mode: if args.project_mode.as_deref() == Some("project") {
+                    sweepx_core::managed_cache::PnpmProjectMode::Project
+                } else {
+                    sweepx_core::managed_cache::PnpmProjectMode::Dependencies
+                },
+                expected: args.plan.as_deref(),
+                trash: args.trash,
+            },
+            format,
+            unit,
+            locale,
+        );
+    }
+    if args.tui {
+        if format != OutputFormat::Human
+            || !std::io::stdin().is_terminal()
+            || !std::io::stdout().is_terminal()
+            || locations.stores.len() != 1
+        {
+            eprintln!("--tui requires an interactive terminal and one store; select --root");
+            return ExitCode::from(2);
+        }
+        return crate::managed_cache_tui::run(
+            config_for(locations.stores[0].clone()),
+            locale,
+            unit,
+            sort,
+        );
+    }
+    let observation = sweepx_core::managed_cache::pnpm_observe_projects(&scopes, &cancel);
+    let mut stores = Vec::new();
+    let mut failed = false;
+    let mut partial = !locations.issues.is_empty();
+    if format == OutputFormat::Human {
+        for issue in &locations.issues {
+            eprintln!("{issue}");
+        }
+    }
+    for root in &locations.stores {
+        let config = config_for(root.clone());
+        let report = sweepx_core::managed_cache::pnpm_inventory_observed(
+            &config.root,
+            &observation,
+            &cancel,
+        );
+        let selected: Vec<_> = report
+            .entries
+            .iter()
+            .filter(|e| config.visible(e))
+            .filter(|e| {
+                if args.entry.is_empty() {
+                    e.eligible
+                } else {
+                    args.entry.contains(&e.id)
+                }
+            })
+            .map(|e| e.id.clone())
+            .collect();
+        let missing = args.entry.iter().any(|id| !selected.contains(id));
+        let results = if missing {
+            Err("selected_item_missing_or_ineligible".into())
+        } else if args.trash && !report.complete {
+            Err("complete_inventory_required".into())
+        } else if args.trash && !selected.is_empty() {
+            execute(&config, &report, &selected, false, &cancel)
+        } else {
+            Ok(Vec::new())
+        };
+        failed |= results.is_err()
+            || results
+                .as_ref()
+                .is_ok_and(|r| r.iter().any(|r| r["completed"] != true));
+        partial |= !report.complete;
+        if format == OutputFormat::Human {
+            println!("Store: {}", report.root);
+            println!(
+                "Admitted unused packages: {}; unique cleanup content: {} (logical)",
+                selected.len(),
+                size(&report.selected_pnpm_bytes(&selected), unit)
+            );
+            for e in report.entries.iter().filter(|e| config.visible(e)) {
+                println!(
+                    "{}  {}@{}  projects={} eligible={}",
+                    size(&e.logical_bytes, unit),
+                    e.name,
+                    e.version.as_deref().unwrap_or("?"),
+                    e.projects.len(),
+                    e.eligible
+                );
+            }
+            let mut projects: Vec<_> = report.projects.iter().collect();
+            projects.sort_by_key(|a| std::cmp::Reverse(value_bytes(&a.logical_bytes)));
+            for p in projects {
+                println!(
+                    "pnpm packages: {}  {}  complete={}",
+                    size(&p.logical_bytes, unit),
+                    p.directory,
+                    p.size_complete
+                );
+            }
+            for issue in &report.issues {
+                eprintln!("{issue}");
+            }
+            match &results {
+                Ok(rows) => println!(
+                    "Trash moves: {}",
+                    rows.iter()
+                        .find(|r| r["kind"] == "summary")
+                        .and_then(|r| r["completedMoves"].as_u64())
+                        .unwrap_or_else(
+                            || rows.iter().filter(|r| r["completed"] == true).count() as u64
+                        )
+                ),
+                Err(e) => eprintln!("{e}"),
+            }
+        }
+        stores.push(json!({"inventory":report,"cleanupLogicalBytes":report.selected_pnpm_bytes(&selected),"selection":selected,"results":results.as_ref().ok(),"blocked":results.as_ref().err()}));
+    }
+    if format != OutputFormat::Human {
+        let mut output = json!({"schema":"sweepx.managed_cache.result/v1","readOnly":!args.trash,"stores":stores,"discoveryIssues":locations.issues,"recoverable":true,"reclaimableBytes":null,"status":if failed {"blocked_or_partial"} else if partial {"partial"} else {"ok"}});
+        if stores.len() == 1 {
+            for key in [
+                "inventory",
+                "selection",
+                "results",
+                "blocked",
+                "cleanupLogicalBytes",
+            ] {
+                output[key] = stores[0][key].clone();
+            }
+        }
+        println!("{output}");
+    }
+    ExitCode::from(if failed {
+        8
+    } else if partial {
+        4
+    } else {
+        0
+    })
+}
+fn value_bytes(value: &sweepx_model::ByteValue) -> Option<u128> {
+    match value {
+        EvidenceValue::Known { value } | EvidenceValue::LowerBound { value, .. } => Some(value.0),
+        _ => None,
+    }
+}
 #[derive(Clone)]
 pub(crate) struct Config {
     pub tool: &'static str,
@@ -288,7 +594,7 @@ pub(crate) fn execute(
     models: bool,
     cancel: &CancellationToken,
 ) -> Result<Vec<serde_json::Value>, String> {
-    if ids.is_empty() || ids.len() > 256 {
+    if ids.is_empty() || (config.tool != "pnpm" && ids.len() > 256) {
         return Err("explicit_bounded_selection_required".into());
     }
     let activity = if config.tool == "pnpm" {
@@ -303,30 +609,48 @@ pub(crate) fn execute(
         if models {
             return Err("not_osdk_models".into());
         }
-        let plan = sweepx_core::managed_cache::pnpm_cleanup_plan(previous, ids, cancel)?;
         let mut results = Vec::new();
+        let mut completed = 0u64;
+        let mut ordinal = 0usize;
         let mut last_check = std::time::Instant::now();
-        for (ordinal, file) in plan.into_iter().enumerate() {
-            // Preserve prior successful moves if a later activity check or cancellation refuses
-            // this file. Returning only an error after moving files would lose the partial result.
-            let result = (|| -> Result<(), String> {
-                if cancel.is_cancelled() {
-                    return Err("cancelled".into());
+        let outcome = sweepx_core::managed_cache::pnpm_cleanup_batches(
+            previous,
+            ids,
+            cancel,
+            &mut |batch| {
+                for file in batch {
+                    let result = (|| -> Result<(), String> {
+                        if cancel.is_cancelled() {
+                            return Err("cancelled".into());
+                        }
+                        if ordinal.is_multiple_of(64)
+                            || last_check.elapsed() >= Duration::from_secs(1)
+                        {
+                            sweepx_core::tools::scoped_activity::check_scopes(&[activity], cancel)?;
+                            last_check = std::time::Instant::now();
+                        }
+                        let current =
+                            sweepx_core::managed_cache::revalidate_pnpm_file(file, cancel)?;
+                        crate::trash_command::trash_observed_file(&current, None, None, cancel)
+                    })();
+                    ordinal += 1;
+                    if result.is_ok() {
+                        completed += 1;
+                    }
+                    if results.len() < 256 || result.is_err() {
+                        results.push(json!({"path":file.display_path,"completed":result.is_ok(),"error":result.as_ref().err()}));
+                    }
+                    result?;
                 }
-                if ordinal % 64 == 0 || last_check.elapsed() >= Duration::from_secs(1) {
-                    sweepx_core::tools::scoped_activity::check_scopes(&[activity], cancel)?;
-                    last_check = std::time::Instant::now();
-                }
-                let current = sweepx_core::managed_cache::revalidate_pnpm_file(&file, cancel)?;
-                crate::trash_command::trash_observed_file(&current, None, None, cancel)
-            })();
-            let failed = result.is_err();
-            results
-                .push(json!({"path":file.display_path,"completed":!failed,"error":result.err()}));
-            if failed {
-                break;
-            }
+                Ok(())
+            },
+        );
+        // Keep successful work visible even if a later plan batch fails. Large runs retain a
+        // sample plus exact operation counts, avoiding an unbounded per-file machine report.
+        if let Err(e) = &outcome {
+            results.push(json!({"completed":false,"error":e}));
         }
+        results.push(json!({"kind":"summary","completed":outcome.is_ok(),"completedMoves":completed,"attemptedMoves":ordinal,"pathsTruncated":ordinal > 256}));
         return Ok(results);
     }
     let current = config.inventory(cancel);
@@ -433,8 +757,13 @@ pub(crate) fn details(
     for &i in &item.projects {
         if let Some(p) = report.projects.get(i) {
             text.push_str(&format!(
-                "{}  total={} complete={} store={}\n",
+                "{}  {}={} complete={} store={}\n",
                 p.directory,
+                if report.tool == "pnpm" {
+                    "pnpm packages"
+                } else {
+                    "total"
+                },
                 size(&p.logical_bytes, unit),
                 p.size_complete,
                 p.store_dir.as_deref().unwrap_or("?")
@@ -445,16 +774,9 @@ pub(crate) fn details(
                 } else {
                     "Project cleanup previews (keep source / whole project):\n"
                 });
-                let scopes: String = report
-                    .project_roots
-                    .iter()
-                    .map(|root| format!(" --project-root {}", quote_cli_arg(root)))
-                    .collect();
                 for mode in ["dependencies", "project"] {
                     text.push_str(&format!(
-                        "sweepx pnpm-store --root {}{} --project {} --project-mode {}\n",
-                        quote_cli_arg(&report.root),
-                        scopes,
+                        "sweepx pnpm-store --project {} --project-mode {}\n",
                         quote_cli_arg(&p.directory),
                         mode
                     ));

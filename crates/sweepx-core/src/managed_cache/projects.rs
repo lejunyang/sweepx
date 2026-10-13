@@ -1,6 +1,6 @@
 use super::*;
 use native::{basename, path};
-use std::collections::VecDeque;
+
 use sweepx_model::ObjectType;
 pub(super) const EXCLUSIONS: &[&str] = &[
     "node_modules",
@@ -27,51 +27,82 @@ pub(super) fn discover_with_sizes(
     native: &mut Native<'_>,
     measure_sizes: bool,
 ) -> (Vec<Project>, bool, Vec<String>) {
+    discover_measured(roots, native, measure_sizes, false)
+}
+pub(super) fn discover_measured(
+    roots: &[PathBuf],
+    native: &mut Native<'_>,
+    measure_sizes: bool,
+    pnpm: bool,
+) -> (Vec<Project>, bool, Vec<String>) {
+    discover_impl(roots, native, measure_sizes, pnpm, &mut Vec::new())
+}
+pub(super) fn discover_store_hints(
+    roots: &[PathBuf],
+    native: &mut Native<'_>,
+) -> (Vec<Project>, bool, Vec<String>, Vec<PathBuf>) {
+    let mut hints = Vec::new();
+    let (projects, complete, issues) = discover_impl(roots, native, false, true, &mut hints);
+    (projects, complete, issues, hints)
+}
+fn discover_impl(
+    roots: &[PathBuf],
+    native: &mut Native<'_>,
+    measure_sizes: bool,
+    pnpm: bool,
+    store_hints: &mut Vec<PathBuf>,
+) -> (Vec<Project>, bool, Vec<String>) {
     let mut out = Vec::new();
     let mut project_dirs = Vec::new();
     let mut issues = Vec::new();
-    let mut visited = 0;
-    // Prioritize shallow sibling projects, then walk deep trees depth first so broad generated
-    // source trees cannot exhaust the frontier. Any lost coverage still prohibits cleanup.
-    let mut queue = VecDeque::new();
-    let mut seen = BTreeSet::new();
-    let mut retained = 0usize;
     let mut installed_packages = 0usize;
-    let mut seen_bytes = 0usize;
-    for p in roots {
-        match native.root(p) {
-            Ok(e) => {
-                if seen.insert(p.clone()) {
-                    retained += e.estimated_retained_bytes();
-                    queue.push_back((e, 0));
+    let mut project_metadata_bytes = 0usize;
+    let mut store_statuses = std::collections::BTreeMap::new();
+    let mut candidates = BTreeSet::new();
+    for root in roots {
+        if let Err(e) = super::walk::walk(root, native.cancel, EXCLUSIONS, |entry| {
+            let name = entry.path.file_name().and_then(|n| n.to_str());
+            if pnpm
+                && name == Some(".pnpm-store")
+                && entry.kind == sweepx_platform::EntryKind::Directory
+            {
+                if store_hints.len() >= 128 {
+                    return Err("project_store_hint_budget".into());
+                }
+                store_hints.push(entry.path.clone());
+            }
+            if matches!(name, Some("node_modules" | "osdk.toml" | ".osdk.toml")) {
+                if name == Some("node_modules")
+                    && entry.kind != sweepx_platform::EntryKind::Directory
+                {
+                    return Err(format!(
+                        "linked_node_modules_unresolved {}",
+                        entry.path.display()
+                    ));
+                }
+                if candidates.len() >= 1024 {
+                    return Err("project_count_budget".into());
+                }
+                if let Some(parent) = entry.path.parent() {
+                    candidates.insert(parent.to_path_buf());
                 }
             }
-            Err(e) => issues.push(format!("project_root {}: {e}", p.display())),
+            Ok(())
+        }) {
+            issues.push(e);
         }
     }
-    while let Some((dir, depth)) = queue.pop_front() {
-        retained = retained.saturating_sub(dir.estimated_retained_bytes());
-        visited += 1;
-        if issues.len() > 256 {
-            issues.truncate(256);
-            issues.push("project_issue_budget_exceeded".into());
-            break;
-        }
-        if visited > 20_000 || out.len() >= 1024 {
-            issues.push(format!(
-                "project_discovery_budget_exceeded: visited={visited}, projects={}, pending={}",
-                out.len(),
-                queue.len()
-            ));
-            break;
-        }
-        if let Err(reason) = native.check() {
-            issues.push(format!(
-                "project_discovery_stopped: {reason}; visited={visited}, projects={}",
-                out.len()
-            ));
-            break;
-        }
+    for candidate in candidates {
+        let dir = match native.root(&candidate) {
+            Ok(dir) => dir,
+            Err(e) => {
+                issues.push(format!(
+                    "project_reobservation {}: {e}",
+                    candidate.display()
+                ));
+                continue;
+            }
+        };
         let children = match native.children(&dir) {
             Ok(r) => r,
             Err(e) => {
@@ -96,13 +127,23 @@ pub(super) fn discover_with_sizes(
             e.object_type == ObjectType::Directory && basename(e).as_deref() == Some("node_modules")
         });
         if modules.is_some() || has_config {
+            // Reserve both retained root observations before cloning their native locators.
+            project_metadata_bytes = project_metadata_bytes
+                .saturating_add(dir.estimated_retained_bytes().saturating_mul(2));
+            if project_metadata_bytes > 64 * 1024 * 1024 {
+                issues.push("project_native_metadata_budget".into());
+                break;
+            }
             let mut project = Project {
                 directory: dir.display_path.clone(),
                 logical_bytes: bytes(None, false),
                 size_complete: false,
                 store_dir: None,
+                store_status: "not_checked",
                 packages: BTreeSet::new(),
                 models: BTreeSet::new(),
+                virtual_stores: Vec::new(),
+                source: dir.clone(),
             };
             if let Some(m) = modules {
                 match native.children(m) {
@@ -113,14 +154,23 @@ pub(super) fn discover_with_sizes(
                             .any(|e| basename(e).as_deref() == Some(".modules.yaml"));
                         if yaml {
                             match native.read(m, ".modules.yaml", 1024 * 1024) {
-                                Ok(bytes) => {
-                                    project.store_dir =
-                                        String::from_utf8_lossy(&bytes).lines().find_map(|l| {
-                                            l.strip_prefix("storeDir:").map(|v| {
-                                                v.trim().trim_matches(['\'', '"']).to_owned()
-                                            })
-                                        })
-                                }
+                                Ok(bytes) => match super::locations::modules_metadata(&bytes) {
+                                    Ok(meta) => {
+                                        if meta
+                                            .virtual_store
+                                            .as_deref()
+                                            .is_some_and(|v| v != ".pnpm")
+                                        {
+                                            issues.push(format!(
+                                                "custom_virtual_store_unresolved {}",
+                                                project.directory
+                                            ));
+                                        }
+                                        project.store_dir = meta.store;
+                                    }
+                                    Err(e) => issues
+                                        .push(format!("pnpm_marker {}: {e}", project.directory)),
+                                },
                                 Err(e) => {
                                     issues.push(format!("pnpm_marker {}: {e}", project.directory))
                                 }
@@ -136,6 +186,12 @@ pub(super) fn discover_with_sizes(
                                     project.directory
                                 ));
                             } else {
+                                match path(pnpm) {
+                                    Ok(path) => project.virtual_stores.push(path),
+                                    Err(e) => {
+                                        issues.push(format!("virtual_store_native_path: {e}"))
+                                    }
+                                }
                                 match native.children(pnpm) {
                                     Ok(slots) => {
                                         for slot in slots {
@@ -189,6 +245,18 @@ pub(super) fn discover_with_sizes(
                     }
                 }
             }
+            if pnpm && project.store_dir.is_none() && project.virtual_stores.is_empty() {
+                continue;
+            }
+            if let Some(store) = &project.store_dir {
+                project.store_status = *store_statuses.entry(store.clone()).or_insert_with(|| {
+                    if native.root(Path::new(store)).is_ok() {
+                        "observed"
+                    } else {
+                        "unavailable"
+                    }
+                });
+            }
             installed_packages += project.packages.len();
             project_dirs.push(dir.clone());
             if installed_packages > 500_000 || project.models.len() > 4096 {
@@ -198,49 +266,18 @@ pub(super) fn discover_with_sizes(
             }
             out.push(project);
         }
-        for child in children {
-            if child.object_type != ObjectType::Directory {
-                continue;
-            }
-            let Some(name) = basename(&child) else {
-                issues.push("non_unicode_project_component".into());
-                continue;
-            };
-            if EXCLUSIONS.contains(&name.as_str()) {
-                continue;
-            }
-            if depth >= 32
-                || queue.len() >= 4096
-                || retained.saturating_add(child.estimated_retained_bytes()) > 32 * 1024 * 1024
-            {
-                issues.push(format!("project_frontier_budget_exceeded: depth={depth}, pending={}, bytes={}, path={}",queue.len(),retained,child.display_path));
-                continue;
-            }
-            if seen_bytes.saturating_add(child.display_path.len()) > 32 * 1024 * 1024 {
-                issues.push("project_path_budget_exceeded".into());
-                break;
-            }
-            let child_path = match path(&child) {
-                Ok(p) => p,
-                Err(e) => {
-                    issues.push(format!("project_native_path_unavailable: {e}"));
-                    continue;
-                }
-            };
-            if seen.insert(child_path) {
-                seen_bytes += child.display_path.len();
-                retained += child.estimated_retained_bytes();
-                if depth < 3 {
-                    queue.push_back((child, depth + 1));
-                } else {
-                    queue.push_front((child, depth + 1));
-                }
-            }
-        }
     }
     // Find references first so one large project's size cannot hide sibling projects. Totals
     // have their own cancellation deadline and explicit lower-bound/unknown evidence; exhausting
     // the invocation's size budget leaves remaining totals unknown, never observed as zero.
+    let virtual_stores: Vec<_> = out
+        .iter()
+        .filter_map(|p| {
+            path(&p.source)
+                .ok()
+                .map(|root| (root, p.virtual_stores.clone()))
+        })
+        .collect();
     for (project, dir) in out.iter_mut().zip(project_dirs).filter(|_| measure_sizes) {
         if native.cancel.is_cancelled() {
             issues.push("project_totals_cancelled".into());
@@ -248,6 +285,19 @@ pub(super) fn discover_with_sizes(
         }
         if native.check().is_err() {
             break;
+        }
+        if pnpm {
+            let (size, complete) = super::walk::footprint(
+                &virtual_stores
+                    .iter()
+                    .filter(|(p, _)| path(&project.source).is_ok_and(|root| p.starts_with(root)))
+                    .flat_map(|(_, stores)| stores.iter().cloned())
+                    .collect::<Vec<_>>(),
+                native.cancel,
+            );
+            project.logical_bytes = size;
+            project.size_complete = complete;
+            continue;
         }
         if let Ok(p) = path(&dir)
             && let Ok(scan) = crate::storage_inventory::observe_directories_isolated_deadline(

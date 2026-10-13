@@ -33,6 +33,23 @@ pub(super) fn inventory(
     cancel: &CancellationToken,
     measure_projects: bool,
 ) -> Inventory {
+    inventory_impl(path, roots, cancel, measure_projects, None)
+}
+pub(super) fn inventory_observed(
+    path: &Path,
+    roots: &[PathBuf],
+    cancel: &CancellationToken,
+    observation: Option<&PnpmProjectObservation>,
+) -> Inventory {
+    inventory_impl(path, roots, cancel, false, observation)
+}
+fn inventory_impl(
+    path: &Path,
+    roots: &[PathBuf],
+    cancel: &CancellationToken,
+    measure_projects: bool,
+    observation: Option<&PnpmProjectObservation>,
+) -> Inventory {
     let mut report = Inventory::empty("pnpm", path, roots);
     if !admit_rules(&mut report) {
         return report;
@@ -140,7 +157,7 @@ pub(super) fn inventory(
                 let value = msgpack::decode(&data)?;
                 retain_package(
                     &mut report,
-                    package(&root, &key, &value, &data, true)?,
+                    package(&root, &key, &value, &snapshot(&data), true)?,
                     &mut retained_package_bytes,
                 )?;
             }
@@ -178,16 +195,28 @@ pub(super) fn inventory(
                         return Err("package_index_row_budget".into());
                     }
                     let item = (|| -> Result<Item, String> {
-                        let data = native.read(&shard, &name, 8 * 1024 * 1024)?;
-                        let mut value = serde_json::from_slice(&data).map_err(|e| e.to_string())?;
-                        fill_json_identity(&mut value, &files, &mut native);
-                        package(
+                        let (mut parsed, digest) =
+                            if exact(&entry.logical_bytes).is_some_and(|n| n <= 8 * 1024 * 1024) {
+                                let data = native.read(&shard, &name, 8 * 1024 * 1024)?;
+                                (
+                                    super::json_index::parse(data.as_slice(), cancel)?,
+                                    snapshot(&data),
+                                )
+                            } else {
+                                let (spool, digest) = native.spool(&shard, &name)?;
+                                (super::json_index::parse(spool, cancel)?, digest)
+                            };
+                        fill_json_identity(&mut parsed.identity, &files, &mut native);
+                        let mut item = package(
                             &root,
                             &format!("{}/{}", basename(&shard).unwrap_or_default(), name),
-                            &value,
-                            &data,
+                            &parsed.identity,
+                            &digest,
                             false,
-                        )
+                        )?;
+                        item.content = parsed.content.into_iter().collect();
+                        item.files = item.content.len();
+                        Ok(item)
                     })();
                     match item {
                         Ok(item) => retain_package(&mut report, item, &mut retained_package_bytes)?,
@@ -219,10 +248,10 @@ pub(super) fn inventory(
         if references > 2_000_000 {
             return Err("package_content_reference_budget".into());
         }
-        let mut owners: BTreeMap<&str, (Vec<usize>, bool)> = BTreeMap::new();
+        let mut owners: BTreeMap<ContentKey, (Vec<usize>, bool)> = BTreeMap::new();
         for (i, item) in report.entries.iter().enumerate() {
             for digest in &item.content {
-                owners.entry(digest.as_str()).or_default().0.push(i);
+                owners.entry(*digest).or_default().0.push(i);
             }
         }
         let mut stats: Vec<Stats> = (0..report.entries.len())
@@ -245,13 +274,21 @@ pub(super) fn inventory(
                     continue;
                 };
                 let key = format!("{prefix}/{name}");
-                let Some((indices, seen)) = owners.get_mut(key.as_str()) else {
+                let Ok(key) = ContentKey::parse(&key) else {
+                    continue;
+                };
+                let Some((indices, seen)) = owners.get_mut(&key) else {
                     continue;
                 };
                 if entry.object_type != ObjectType::File {
                     return Err("linked_or_special_cas_file".into());
                 }
                 *seen = true;
+                if entry.hard_link_count.as_ref().and_then(exact) == Some(1)
+                    && let Some(size) = exact(&entry.logical_bytes)
+                {
+                    report.single_cas.insert(key, size);
+                }
                 for &i in indices.iter() {
                     let stat = &mut stats[i];
                     stat.observed += 1;
@@ -278,7 +315,7 @@ pub(super) fn inventory(
         report.absent_cas = owners
             .iter()
             .filter(|(_, (_, seen))| !*seen)
-            .map(|(key, _)| (*key).to_owned())
+            .map(|(key, _)| *key)
             .collect();
         drop(owners);
         for (item, stat) in report.entries.iter_mut().zip(stats) {
@@ -298,8 +335,12 @@ pub(super) fn inventory(
     if let Err(e) = result {
         report.issues.push(e);
     }
-    let (projects, complete, issues) =
-        projects::discover_with_sizes(roots, &mut native, measure_projects);
+    let (projects, complete, issues) = match observation {
+        Some(o) => (o.projects.clone(), o.complete, o.issues.clone()),
+        None => {
+            projects::discover_measured(roots, &mut Native::new(cancel), measure_projects, true)
+        }
+    };
     report.projects = projects;
     report.project_discovery_complete = complete;
     report.issues.extend(issues);
@@ -327,6 +368,13 @@ pub(super) fn inventory(
     }
     report.complete =
         report.index_complete && report.project_discovery_complete && report.issues.is_empty();
+    let eligible = report
+        .entries
+        .iter()
+        .filter(|e| e.eligible)
+        .map(|e| e.id.clone())
+        .collect::<Vec<_>>();
+    report.cleanup_logical_bytes = report.selected_pnpm_bytes(&eligible);
     report.entries.sort_by(|a, b| {
         known(&b.logical_bytes)
             .cmp(&known(&a.logical_bytes))
@@ -346,10 +394,9 @@ fn package(
     root: &ScannedEntry,
     key: &str,
     value: &Value,
-    data: &[u8],
+    digest: &str,
     v11: bool,
 ) -> Result<Item, String> {
-    use sha2::{Digest, Sha256};
     let manifest = if v11 {
         value.get("manifest").ok_or("pnpm_manifest_missing")?
     } else {
@@ -415,7 +462,6 @@ fn package(
             }
         }
     }
-    let digest = format!("{:x}", Sha256::digest(data));
     // Legacy identity can come from a separate CAS package.json rather than these index bytes.
     // Bind the interpreted label as well, so a changed identity refuses a previously selected ID.
     let selection =
@@ -443,10 +489,10 @@ fn package(
         },
         source: None,
         content: content.into_iter().collect(),
-        snapshot_digest: Some(digest),
+        snapshot_digest: Some(digest.to_owned()),
     })
 }
-fn content_key(file: &Value, value: &Value, v11: bool) -> Result<String, String> {
+pub(super) fn content_key(file: &Value, value: &Value, v11: bool) -> Result<ContentKey, String> {
     let hash = if v11 {
         let algo = value
             .get("algo")
@@ -487,7 +533,7 @@ fn content_key(file: &Value, value: &Value, v11: bool) -> Result<String, String>
     } else {
         ""
     };
-    Ok(format!("{}/{}{}", &hash[..2], &hash[2..], suffix))
+    ContentKey::parse(&format!("{}/{}{}", &hash[..2], &hash[2..], suffix))
 }
 // Old v3 indexes can omit package identity. Resolve it from the indexed native package.json;
 // an unresolved row still protects its content references and can never be selected for cleanup.
@@ -499,6 +545,7 @@ fn fill_json_identity(value: &mut Value, files: &ScannedEntry, native: &mut Nati
     }
     let metadata = (|| -> Result<Value, String> {
         let key = content_key(&value["files"]["package.json"], value, false)?;
+        let key = key.path();
         let (prefix, name) = key.split_once('/').ok_or("invalid_content_key")?;
         let shard = native.child(files, prefix)?;
         let data = native.read(&shard, name, 1024 * 1024)?;
@@ -521,6 +568,25 @@ pub(super) fn plan(
     selected: &[String],
     cancel: &CancellationToken,
 ) -> Result<Vec<ScannedEntry>, String> {
+    let mut out = Vec::new();
+    visit_plan(report, selected, cancel, &mut |batch| {
+        if out.len().saturating_add(batch.len()) > 8192 {
+            return Err("selected_file_batch_budget_exceeded".into());
+        }
+        out.extend_from_slice(batch);
+        Ok(())
+    })?;
+    if out.is_empty() {
+        return Err("no_exclusive_single_link_content".into());
+    }
+    Ok(out)
+}
+pub(super) fn visit_plan(
+    report: &Inventory,
+    selected: &[String],
+    cancel: &CancellationToken,
+    consume: &mut dyn FnMut(&[ScannedEntry]) -> Result<(), String>,
+) -> Result<(), String> {
     if !report.complete {
         return Err("complete_inventory_required".into());
     }
@@ -547,15 +613,13 @@ pub(super) fn plan(
         .flat_map(|e| e.content.iter())
         .filter(|d| !retained.contains(d) && !report.absent_cas.contains(*d))
         .collect();
-    if digests.len() > 8192 {
-        return Err("selected_file_batch_budget_exceeded".into());
-    }
     let root = report.root_entry.as_ref().ok_or("missing_root_identity")?;
-    let mut native = Native::new(cancel);
+    let mut native = Native::content_plan(cancel, digests.len())?;
     let files = native.child(root, "files")?;
     let mut shards = BTreeMap::new();
     let mut out = Vec::new();
     for digest in digests {
+        let digest = digest.path();
         let (prefix, name) = digest.split_once('/').ok_or("invalid_content_key")?;
         if !shards.contains_key(prefix) {
             shards.insert(prefix.to_owned(), native.child(&files, prefix)?);
@@ -563,27 +627,33 @@ pub(super) fn plan(
         let file = native.child(&shards[prefix], name)?;
         if file.hard_link_count.as_ref().and_then(exact) == Some(1) {
             out.push(file);
+            if out.len() >= 128 {
+                consume(&out)?;
+                out.clear();
+            }
         }
     }
-    if out.is_empty() {
-        return Err("no_exclusive_single_link_content".into());
+    if !out.is_empty() {
+        consume(&out)?;
     }
-    Ok(out)
+    Ok(())
 }
 
 fn retain_package(report: &mut Inventory, item: Item, retained: &mut usize) -> Result<(), String> {
-    let bytes = item.content.iter().fold(
-        std::mem::size_of::<Item>()
-            + item.name.capacity()
-            + item.id.capacity()
-            + item.path.capacity()
-            + item.content.capacity() * std::mem::size_of::<String>(),
-        |sum, d| sum.saturating_add(d.capacity()),
-    );
+    let bytes = std::mem::size_of::<Item>()
+        + item.name.capacity()
+        + item.id.capacity()
+        + item.path.capacity()
+        + item.content.capacity() * std::mem::size_of::<ContentKey>();
     *retained = retained.saturating_add(bytes);
     if *retained > 256 * 1024 * 1024 {
         return Err("package_index_retention_budget".into());
     }
     report.entries.push(item);
     Ok(())
+}
+
+fn snapshot(data: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(data))
 }

@@ -342,7 +342,7 @@ enum Commands {
         trash: bool,
     },
     /// Inspect individual pnpm packages, link counts, project references and project sizes.
-    PnpmStore(managed_cache::Arguments),
+    PnpmStore(managed_cache::PnpmArguments),
     /// Inspect and select osdk model aliases and model/download cache units.
     OsdkCache(managed_cache::Arguments),
     /// Report Chromium site data by domain, preserving each full storage key and bucket.
@@ -898,7 +898,7 @@ fn main() -> ProcessExitCode {
             );
         }
         Commands::PnpmStore(args) => {
-            return managed_cache::run("pnpm", args, format, size_unit, context.locale(), sort);
+            return managed_cache::run_pnpm(args, format, size_unit, context.locale(), sort);
         }
         Commands::OsdkCache(args) => {
             return managed_cache::run("osdk", args, format, size_unit, context.locale(), sort);

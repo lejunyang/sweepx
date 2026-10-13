@@ -1,5 +1,8 @@
 # pnpm project cleanup verification, 2026-10-13
 
+This is the earlier preview-bound slice. Its required CLI parameters are superseded by
+[automatic pnpm cleanup](pnpm-automatic-cleanup-2026-10-13.md); the evidence below remains historical.
+
 This slice adds two explicit, preview-bound modes to `pnpm-store`: `dependencies`
 preserves project sources and configuration while retiring observed dependency directories;
 `project` retires the selected project. Both subsequently retire only admitted exclusive

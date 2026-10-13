@@ -101,20 +101,23 @@ pub fn pnpm_project_plan(
     {
         return Err("store_inside_selected_project_refused".into());
     }
-    let selected: BTreeSet<usize> = inventory
+    // Project labels are editable reporting data. Selection and reopening use the lossless
+    // captured native roots, including workspace children whose display labels may collide.
+    let project_paths = inventory
         .projects
+        .iter()
+        .map(|p| native::path(&p.source))
+        .collect::<Result<Vec<_>, _>>()?;
+    let selected: BTreeSet<usize> = project_paths
         .iter()
         .enumerate()
-        .filter(|(_, p)| Path::new(&p.directory).starts_with(project))
+        .filter(|(_, path)| path.starts_with(project))
         .map(|(i, _)| i)
         .collect();
-    if !inventory
-        .projects
+    let selected_root = project_paths
         .iter()
-        .any(|p| Path::new(&p.directory) == project)
-    {
-        return Err("selected_project_not_observed".into());
-    }
+        .position(|path| path == project)
+        .ok_or("selected_project_not_observed")?;
     let mut native = Native::new(cancel);
     let parent = native.root(project.parent().ok_or("project_parent_required")?)?;
     let name = project
@@ -122,33 +125,35 @@ pub fn pnpm_project_plan(
         .and_then(|n| n.to_str())
         .ok_or("unicode_project_component_required")?;
     let project_entry = native.child(&parent, name)?;
+    if !native::same_object(&project_entry, &inventory.projects[selected_root].source) {
+        return Err("selected_project_identity_changed".into());
+    }
     let modules = native.child(&project_entry, "node_modules")?;
     if modules.object_type != ObjectType::Directory {
         return Err("ordinary_node_modules_required".into());
     }
     let marker = native.read(&modules, ".modules.yaml", 1024 * 1024)?;
-    let marker_text = std::str::from_utf8(&marker).map_err(|_| "pnpm_marker_utf8")?;
-    let declared = marker_text
-        .lines()
-        .find_map(|l| {
-            l.strip_prefix("storeDir:")
-                .map(|v| v.trim().trim_matches(['\'', '"']))
-        })
+    let metadata = super::locations::modules_metadata(&marker)?;
+    let declared = metadata
+        .store
+        .as_deref()
         .ok_or("pnpm_store_declaration_required")?;
     if Path::new(declared) != store_path {
         return Err("selected_project_uses_another_store".into());
     }
-    if let Some(virtual_store) = marker_text
-        .lines()
-        .find_map(|l| l.strip_prefix("virtualStoreDir:"))
-        && virtual_store.trim().trim_matches(['\'', '"']) != ".pnpm"
+    if metadata
+        .virtual_store
+        .as_deref()
+        .is_some_and(|v| v != ".pnpm")
     {
         return Err("custom_virtual_store_refused".into());
     }
     let mut dependency_roots = Vec::new();
     for &i in &selected {
-        let p = Path::new(&inventory.projects[i].directory);
-        let parent = native.root(p)?;
+        let parent = native.root(&project_paths[i])?;
+        if !native::same_object(&parent, &inventory.projects[i].source) {
+            return Err("workspace_project_identity_changed".into());
+        }
         let children = native.children(&parent)?;
         if let Some(m) = children
             .into_iter()
@@ -223,6 +228,7 @@ pub fn pnpm_project_plan(
     let mut wanted = BTreeSet::new();
     let mut charged = 0usize;
     for digest in digests {
+        let digest = digest.path();
         let (prefix, name) = digest.split_once('/').ok_or("invalid_content_key")?;
         if !shards.contains_key(prefix) {
             shards.insert(prefix.to_owned(), native.child(&files, prefix)?);
