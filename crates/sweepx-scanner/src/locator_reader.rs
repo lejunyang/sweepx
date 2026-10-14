@@ -16,9 +16,12 @@ use sweepx_platform::{
     FilesystemIdentity, MountIdentity, PlatformError, PlatformScanner, PresentRegularFileRead,
     RegularFileReadExpectation, RegularFileStreamRequest, RootAdmission, ScanRoot, WalkEntry,
     inspect_bound_child, inspect_bound_child_with_directory_admission,
-    inspect_bound_child_with_mount_identity, read_bound_regular_file, stream_bound_regular_file,
+    inspect_bound_child_with_expected_directory, inspect_bound_child_with_mount_identity,
+    read_bound_regular_file, stream_bound_regular_file,
 };
 use thiserror::Error;
+
+use crate::volume_scope::{VolumeScope, VolumeScopeError};
 
 #[cfg(all(
     test,
@@ -2428,6 +2431,12 @@ impl<P: PlatformScanner> LocatorReader<P> {
             return Err(ReadAttempt::Failed(LocatorReadFailure::IdentityMismatch));
         }
         validate_component(&locator.scan_root, &metadata)?;
+        // Reopening retains the original mount of each captured component, and also applies
+        // the same freshly admitted System/Data scope as discovery. Optional new descendants
+        // below this captured chain still use their stricter local parent scope.
+        let scope = VolumeScope::prepare(&self.platform, &metadata, cancel)
+            .map_err(|error| ReadAttempt::Failed(map_volume_failure(error)))?;
+        let root_metadata = metadata.clone();
         if locator.entry.entry_id == locator.scan_root.entry_id {
             validate_component(&locator.entry, &metadata)?;
             return Ok(OpenedDirectory {
@@ -2456,18 +2465,33 @@ impl<P: PlatformScanner> LocatorReader<P> {
             let child = self
                 .find_child(&mut current, &expected.native_basename, cancel, budget)?
                 .ok_or(ReadAttempt::Failed(LocatorReadFailure::IdentityMismatch))?;
-            let walked = inspect_bound_child(
-                &self.platform,
-                &current.handle,
-                &current.path,
-                &child,
-                cancel,
-            )
+            let walked = if let Some(entrance) = scope.entrance_expectation(&child) {
+                inspect_bound_child_with_expected_directory(
+                    &self.platform,
+                    &current.handle,
+                    &current.path,
+                    &child,
+                    cancel,
+                    &entrance,
+                    DirectoryHandleAdmission::Allow,
+                )
+            } else {
+                inspect_bound_child(
+                    &self.platform,
+                    &current.handle,
+                    &current.path,
+                    &child,
+                    cancel,
+                )
+            }
             .map_err(|error| ReadAttempt::Failed(map_platform_failure(error)))?;
             let WalkEntry::Directory(opened) = walked else {
                 return Err(ReadAttempt::Failed(LocatorReadFailure::IdentityMismatch));
             };
             validate_component(expected, &opened.metadata)?;
+            scope
+                .require_admitted_mount(&self.platform, &root_metadata, &opened.metadata)
+                .map_err(|error| ReadAttempt::Failed(map_volume_failure(error)))?;
             let next = OpenedDirectory {
                 path: opened.metadata.path.clone(),
                 metadata: opened.metadata,
@@ -3012,6 +3036,20 @@ fn validate_same_scope(
         return Err(ReadAttempt::Failed(LocatorReadFailure::IdentityMismatch));
     }
     Ok(())
+}
+
+fn map_volume_failure(error: VolumeScopeError) -> LocatorReadFailure {
+    match error {
+        VolumeScopeError::Cancelled => LocatorReadFailure::Cancelled,
+        VolumeScopeError::InvalidRequest => LocatorReadFailure::InvalidBinding,
+        VolumeScopeError::IdentityMismatch => LocatorReadFailure::IdentityMismatch,
+        VolumeScopeError::MountChanged => LocatorReadFailure::MountChanged,
+        VolumeScopeError::ResourceLimit => LocatorReadFailure::ResourceLimit,
+        VolumeScopeError::AccessDenied => LocatorReadFailure::ReadFailed,
+        VolumeScopeError::IdentityUnavailable | VolumeScopeError::Unavailable => {
+            LocatorReadFailure::Unavailable
+        }
+    }
 }
 
 fn component_identity(

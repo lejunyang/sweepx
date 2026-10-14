@@ -105,7 +105,7 @@ impl<P: PlatformScanner> DetailRescanner<P> {
         };
         let ids = DetailEntryIdAllocator::new(entry.scan_id.clone())?;
         self.validate_request(&directory_request, &ids)?;
-        let reopened = self.reopen_target(&directory_request, cancel, false)?;
+        let reopened = self.reopen_target(&directory_request, cancel)?;
         let child = DirectoryEntryRecord::from_parent_and_name(
             &reopened.target_metadata.path,
             entry.native_basename.clone(),
@@ -126,7 +126,10 @@ impl<P: PlatformScanner> DetailRescanner<P> {
             WalkEntry::Error(error) => return Err(map_walk_error(error.kind).into()),
             _ => return Err(DetailRescanError::IdentityMismatch.into()),
         };
-        require_same_mount(&self.platform, &reopened.root_metadata, &metadata)?;
+        reopened
+            .scope
+            .require_admitted_mount(&self.platform, &reopened.root_metadata, &metadata)
+            .map_err(DetailRescanError::from)?;
         let observed = scan_object_identity(
             identity.entry_id.clone(),
             identity.scan_root_id.clone(),

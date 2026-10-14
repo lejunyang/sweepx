@@ -17,13 +17,13 @@ use sweepx_platform::{
     BoundaryKind, BoundaryRecord, CancellationToken, DirectoryEntryRecord,
     DirectoryHandleAdmission, DirectoryReadLimits, EntryKind, EntryMetadata, ErrorKind,
     ErrorRecord, HardLinkKey, PlatformError, PlatformScanner, RootAdmission, ScanResourceLimits,
-    ScanRoot, WalkEntry, inspect_bound_child_with_mount_identity_and_directory_admission,
-    known_count,
+    ScanRoot, WalkEntry, inspect_bound_child_with_expected_directory,
+    inspect_bound_child_with_mount_identity_and_directory_admission, known_count,
 };
 use thiserror::Error;
 
 mod file_content;
-mod volume_scope;
+use crate::volume_scope::{self, VolumeScopeError};
 pub use file_content::{FileContentError, FileContentRequest};
 #[cfg(all(
     test,
@@ -210,6 +210,21 @@ pub enum DetailRescanError {
     Unavailable,
 }
 
+impl From<VolumeScopeError> for DetailRescanError {
+    fn from(error: VolumeScopeError) -> Self {
+        match error {
+            VolumeScopeError::Cancelled => Self::Cancelled,
+            VolumeScopeError::InvalidRequest => Self::InvalidRequest,
+            VolumeScopeError::IdentityMismatch => Self::IdentityMismatch,
+            VolumeScopeError::IdentityUnavailable => Self::IdentityUnavailable,
+            VolumeScopeError::MountChanged => Self::MountChanged,
+            VolumeScopeError::ResourceLimit => Self::ResourceLimit,
+            VolumeScopeError::Unavailable => Self::Unavailable,
+            VolumeScopeError::AccessDenied => Self::AccessDenied,
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TargetTraversal {
     Recursive,
@@ -220,8 +235,8 @@ enum TargetTraversal {
 
 /// Scanner-owned, read-only targeted rescans.
 ///
-/// Strict operations admit only the lossless root in `NativeLocatorEvidence`. Read-only size
-/// browsing can independently admit macOS Data and verify its native aliases. Every
+/// All operations admit the lossless root in `NativeLocatorEvidence` and use the shared volume
+/// policy: macOS `/` independently admits Data and verifies its native aliases. Every
 /// descendant component is then reopened relative to the retained parent handle with
 /// `inspect_bound_child_with_mount_identity`; no display path is accepted as input or used to
 /// regain authority.
@@ -247,16 +262,15 @@ where
         }
     }
 
-    /// Enables read-only size browsing with visible exclusions. On macOS, a captured `/` root
-    /// additionally admits its Data volume and verifies firmlink aliases before deduplication.
-    /// Other mounts remain excluded. This does not change cleanup or strict inventory policy.
+    /// Enables read-only size browsing with visible exclusions. Volume admission is shared by
+    /// every mode; this option changes only how excluded entries are presented and counted.
     pub fn with_size_browser(mut self) -> Self {
         self.size_browser = true;
         self
     }
 
     /// Observes one fixed native child without enumerating siblings or following links.
-    /// Revalidates the captured root and entire parent lineage, and requires the original mount.
+    /// Revalidates the captured root and entire parent lineage within the shared volume scope.
     /// Returned metadata is time-local evidence; callers must revalidate again before mutation.
     pub fn observe_child(
         &self,
@@ -266,19 +280,20 @@ where
         cancel: &CancellationToken,
     ) -> Result<ScannedEntry, DetailRescanError> {
         self.validate_request(&request, ids)?;
-        let reopened = self.reopen_target(&request, cancel, false)?;
+        let reopened = self.reopen_target(&request, cancel)?;
         let child = DirectoryEntryRecord::from_parent_and_name(
             &reopened.target_metadata.path,
             name.clone(),
         )
         .map_err(|_| DetailRescanError::InvalidRequest)?;
-        let walked = inspect_bound_child_with_mount_identity_and_directory_admission(
+        let walked = inspect_detail_child(
             &self.platform,
             &reopened.target_handle,
             &reopened.target_metadata.path,
             &child,
             cancel,
             detail_directory_admission(self.limits.max_frontier_entries, 1),
+            &reopened.scope,
         )
         .map_err(map_platform_error)?;
         let metadata = match walked {
@@ -292,7 +307,11 @@ where
         if cancel.is_cancelled() {
             return Err(DetailRescanError::Cancelled);
         }
-        require_same_mount(&self.platform, &reopened.root_metadata, &metadata)?;
+        reopened.scope.require_admitted_mount(
+            &self.platform,
+            &reopened.root_metadata,
+            &metadata,
+        )?;
         let identity = scan_object_identity(
             ids.allocate()?,
             request.source_root_identity.entry_id.clone(),
@@ -333,7 +352,7 @@ where
             return Err(DetailRescanError::Cancelled);
         }
 
-        let reopened = self.reopen_target(&request, cancel, false)?;
+        let reopened = self.reopen_target(&request, cancel)?;
         let observed_root = reopened.observed_root.clone();
         let observed_directory = reopened.observed_directory.clone();
         let (rows, aggregate) = self.scan_target_directory(
@@ -368,7 +387,7 @@ where
         if cancel.is_cancelled() {
             return Err(DetailRescanError::Cancelled);
         }
-        let reopened = self.reopen_target(&request, cancel, false)?;
+        let reopened = self.reopen_target(&request, cancel)?;
         Ok((reopened.observed_root, reopened.observed_directory))
     }
 
@@ -470,8 +489,7 @@ where
             return Err(DetailRescanError::Cancelled);
         }
 
-        let reopened =
-            self.reopen_target(&request, cancel, mode == TargetTraversal::RecursiveLogical)?;
+        let reopened = self.reopen_target(&request, cancel)?;
         let observed_root = reopened.observed_root.clone();
         let observed_directory = reopened.observed_directory.clone();
         let (rows, aggregate) =
@@ -498,7 +516,7 @@ where
         if cancel.is_cancelled() {
             return Err(DetailRescanError::Cancelled);
         }
-        let reopened = self.reopen_target(&request, cancel, true)?;
+        let reopened = self.reopen_target(&request, cancel)?;
         let observed_root = reopened.observed_root.clone();
         let observed_directory = reopened.observed_directory.clone();
         let (rows, aggregate) = self.scan_target_directory(
@@ -531,7 +549,7 @@ where
         if cancel.is_cancelled() {
             return Err(DetailRescanError::Cancelled);
         }
-        let reopened = self.reopen_target(&request, cancel, false)?;
+        let reopened = self.reopen_target(&request, cancel)?;
         self.scan_target_directory(
             &request,
             reopened,
@@ -584,7 +602,6 @@ where
         &self,
         request: &DetailRescanRequest<'_>,
         cancel: &CancellationToken,
-        size_scope: bool,
     ) -> Result<ReopenedTarget<P::DirectoryHandle>, DetailRescanError> {
         if self.limits.max_frontier_entries == 0 {
             return Err(DetailRescanError::ResourceLimit);
@@ -618,11 +635,7 @@ where
             &root_metadata,
             request.source_root_identity,
         )?;
-        let scope = if size_scope {
-            self.volume_scope(&root_metadata, cancel)?
-        } else {
-            volume_scope::VolumeScope::default()
-        };
+        let scope = self.volume_scope(&root_metadata, cancel)?;
         let observed_root_component =
             native_path_component(request.source_root_identity, &root_metadata);
         let observed_root_locator = NativeLocatorEvidence {
@@ -675,13 +688,14 @@ where
                 expected.native_basename.clone(),
             )
             .map_err(|_| DetailRescanError::InvalidRequest)?;
-            let walked = inspect_bound_child_with_mount_identity_and_directory_admission(
+            let walked = inspect_detail_child(
                 &self.platform,
                 &current_handle,
                 &current_path,
                 &child,
                 cancel,
                 detail_directory_admission(self.limits.max_frontier_entries, 1),
+                &scope,
             )
             .map_err(map_platform_error)?;
             let opened = match walked {
@@ -748,13 +762,15 @@ where
             return Ok(scope.clone());
         }
         #[cfg(target_os = "macos")]
-        if self.size_browser && root.path == Path::new("/") && self.limits.max_frontier_entries < 3
+        if self.platform.platform_name() == "macos"
+            && root.path == Path::new("/")
+            && self.limits.max_frontier_entries < 3
         {
             // Root plus two temporary alias-admission capabilities. All scope handles are
             // released before DFS starts, so they never accumulate with retained ancestors.
             return Err(DetailRescanError::ResourceLimit);
         }
-        volume_scope::VolumeScope::prepare(&self.platform, root, self.size_browser, cancel)
+        volume_scope::VolumeScope::prepare(&self.platform, root, cancel).map_err(Into::into)
     }
 
     fn scan_target_directory(
@@ -801,6 +817,7 @@ where
         // without keeping every file in memory.
         let mut direct_directory_aggregates =
             std::collections::BTreeMap::<ScanEntryId, TargetAggregateState>::new();
+        let target_path = target_metadata.path.clone();
         let mut current = TargetDirectory {
             path: target_metadata.path,
             handle: target_handle,
@@ -864,20 +881,22 @@ where
                 for child in batch.entries {
                     let walked = detail_child_observation(
                         &child.path,
-                        inspect_bound_child_with_mount_identity_and_directory_admission(
+                        inspect_detail_child(
                             &self.platform,
                             &current.handle,
                             &current.path,
                             &child,
                             cancel,
                             detail_directory_admission(self.limits.max_frontier_entries, 1),
+                            &scope,
                         ),
                     )?;
                     let walked = scope.restrict_child(&self.platform, &root_metadata, walked)?;
 
                     match walked {
                         WalkEntry::Directory(opened) => {
-                            let alias = !strict && scope.is_counted_alias(&opened.metadata)?;
+                            let alias = scope
+                                .is_counted_alias_in_subtree(&opened.metadata, &target_path)?;
                             if direct_directory_aggregates.len().saturating_add(1)
                                 >= self.limits.max_retained_aggregates
                             {
@@ -919,7 +938,7 @@ where
                                 ),
                                 complete_coverage(),
                             ));
-                            if alias {
+                            if alias && !strict {
                                 rows.last_mut().expect("retained alias").logical_bytes =
                                     EvidenceValue::NotChecked {
                                         reason: ReasonCode::NotRevalidated,
@@ -945,7 +964,7 @@ where
                                     logical_only: mode == TargetTraversal::RecursiveLogical,
                                 };
                                 self.scan_nested_directories(
-                                    (&root_metadata, &scope),
+                                    (&root_metadata, &scope, &target_path),
                                     NestedDirectory {
                                         path: opened.metadata.path,
                                         handle: opened.handle,
@@ -1162,14 +1181,14 @@ where
 
     fn scan_nested_directories(
         &self,
-        scope_binding: (&EntryMetadata, &volume_scope::VolumeScope),
+        scope_binding: (&EntryMetadata, &volume_scope::VolumeScope, &Path),
         initial: NestedDirectory<P::DirectoryHandle>,
         ids: &mut DetailEntryIdAllocator,
         cancel: &CancellationToken,
         aggregates: &mut RecursiveAggregateContext<'_>,
         progress: &mut RecursiveProgressContext<'_, '_, '_>,
     ) -> Result<(), DetailRescanError> {
-        let (root_metadata, scope) = scope_binding;
+        let (root_metadata, scope, target_path) = scope_binding;
         // The outer target owns one capability. Each frame keeps one ancestor cursor and at
         // most one bounded batch of uninspected tokens; siblings never own retained handles.
         // This is iterative so arbitrary filesystem depth cannot exhaust the Rust call stack.
@@ -1258,6 +1277,7 @@ where
                     .map_err(|_| DetailRescanError::InvalidRequest)?;
                 progress.clock.current_path = child.path.clone();
                 let walked = if progress.logical_only
+                    && !scope.tracks_entrance(&child.path)
                     && let Some(file) = self.platform.observe_file_length(&current.handle, &child)
                     && file.path == child.path
                     && file.file_name == child.file_name
@@ -1267,13 +1287,14 @@ where
                 } else {
                     detail_child_observation(
                         &child.path,
-                        inspect_bound_child_with_mount_identity_and_directory_admission(
+                        inspect_detail_child(
                             &self.platform,
                             &current.handle,
                             &current.path,
                             &child,
                             cancel,
                             detail_directory_admission(self.limits.max_frontier_entries, retained),
+                            scope,
                         ),
                     )?
                 };
@@ -1313,7 +1334,7 @@ where
                 }
                 match walked {
                     WalkEntry::Directory(opened) => {
-                        if scope.is_counted_alias(&opened.metadata)? {
+                        if scope.is_counted_alias_in_subtree(&opened.metadata, target_path)? {
                             // The same native directory is traversed through its verified logical
                             // firmlink. Keep its direct-list row, but never accumulate it twice.
                             progress.clock.changed = Some(current.direct_child_id.clone());
@@ -1932,6 +1953,46 @@ fn identity_is_known(identity: &ScanObjectIdentity) -> bool {
 // A child denied by the OS or removed during enumeration is missing coverage. Its
 // pathname never becomes a row/locator or deletion authority. Malformed binding, cancellation,
 // resource failures and uncertain native mount evidence keep their existing fatal behavior.
+fn inspect_detail_child<P: PlatformScanner>(
+    platform: &P,
+    parent: &P::DirectoryHandle,
+    parent_path: &Path,
+    child: &DirectoryEntryRecord,
+    cancel: &CancellationToken,
+    admission: DirectoryHandleAdmission,
+    scope: &volume_scope::VolumeScope,
+) -> Result<WalkEntry<P::DirectoryHandle>, PlatformError> {
+    if let Some(expected) = scope.entrance_expectation(child) {
+        inspect_bound_child_with_expected_directory(
+            platform,
+            parent,
+            parent_path,
+            child,
+            cancel,
+            &expected,
+            admission,
+        )
+        .map_err(|error| match error {
+            // The token and expectation came from the validated native detail chain. A refused
+            // expected observation is a changed binding, preserving callers' identity-mismatch
+            // contract instead of reporting platform unavailability.
+            PlatformError::InvalidDirectoryEntry { .. } => {
+                PlatformError::RootRejected(error.to_string())
+            }
+            error => error,
+        })
+    } else {
+        inspect_bound_child_with_mount_identity_and_directory_admission(
+            platform,
+            parent,
+            parent_path,
+            child,
+            cancel,
+            admission,
+        )
+    }
+}
+
 fn detail_child_observation<H>(
     path: &Path,
     observation: Result<WalkEntry<H>, PlatformError>,
@@ -1964,50 +2025,6 @@ fn skippable_child_io(error: &PlatformError) -> Option<(ErrorKind, ReasonCode)> 
             ..
         } => Some((ErrorKind::NotFound, ReasonCode::UnknownIdentity)),
         _ => None,
-    }
-}
-
-// A newly encountered child on a different mount is an excluded boundary, not evidence
-// that the captured target changed. Normalize it before retaining a row or descending so
-// progressive browsing keeps safe siblings and incomplete totals. Strict inventories still
-// reject this boundary. Reopening captured roots/ancestors uses require_same_mount directly
-// and remains fatal; unknown mount evidence also remains fatal here.
-fn restrict_detail_child_to_mount<P: PlatformScanner>(
-    platform: &P,
-    root: &EntryMetadata,
-    walked: WalkEntry<P::DirectoryHandle>,
-) -> Result<WalkEntry<P::DirectoryHandle>, DetailRescanError> {
-    let metadata = match &walked {
-        WalkEntry::Directory(opened) => &opened.metadata,
-        WalkEntry::File(metadata) | WalkEntry::Link(metadata) => metadata,
-        // Lightweight file observations are already checked against their retained parent by
-        // the native backend; boundaries and errors carry their own exclusion evidence.
-        _ => return Ok(walked),
-    };
-    match require_same_mount(platform, root, metadata) {
-        Ok(()) => Ok(walked),
-        Err(DetailRescanError::MountChanged) => Ok(WalkEntry::Boundary(BoundaryRecord {
-            path: metadata.path.clone(),
-            kind: BoundaryKind::Mount,
-            reason: ReasonCode::UnsupportedFilesystem,
-            detail: "entry crosses the initial mount boundary".into(),
-        })),
-        Err(error) => Err(error),
-    }
-}
-
-fn require_same_mount<P: PlatformScanner>(
-    platform: &P,
-    root: &EntryMetadata,
-    entry: &EntryMetadata,
-) -> Result<(), DetailRescanError> {
-    if root.mount_identity.is_none() || entry.mount_identity.is_none() {
-        return Err(DetailRescanError::IdentityUnavailable);
-    }
-    match platform.is_same_mount(root, entry) {
-        Ok(true) => Ok(()),
-        Ok(false) => Err(DetailRescanError::MountChanged),
-        Err(_) => Err(DetailRescanError::IdentityUnavailable),
     }
 }
 

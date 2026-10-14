@@ -1,5 +1,10 @@
 # Junk root traversal budgets — 2026-10-12
 
+Historical validation record. The original-mount-only junk scope described below was superseded
+by the [shared System/Data scan policy on 2026-10-15](system-data-scan-policy-2026-10-15.md).
+The measurements and validation results here describe the October 12 build; they do not validate
+the later combined scope or establish a completed whole-root scan.
+
 `junk --tui /` exhausted its 128 MiB per-root classified metadata allowance and then the
 131,072-directory traversal allowance on the macOS validation host. Ordinary directories
 accumulated coverage and child-lineage indexes even though the report only needed candidates.

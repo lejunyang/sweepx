@@ -205,6 +205,7 @@ impl Shared {
     pub fn watch_job(
         &self,
         monitor: &sweepx_platform::change_monitor::ChangeMonitor,
+        scan_roots: &[PathBuf],
     ) -> Option<(Job, Option<String>)> {
         let mut state = self.lock();
         if state.closed
@@ -227,6 +228,11 @@ impl Shared {
         let full_scan = changes.full_scan
             || changes.directories.len() > 256
             || scope_cost > self.limits.max_event_bytes;
+        let paths = (!full_scan).then_some(changes.directories);
+        #[cfg(target_os = "macos")]
+        let paths = watch_paths_for_macos_aliases(scan_roots, paths);
+        #[cfg(not(target_os = "macos"))]
+        let _ = scan_roots;
         let revision = JunkSessionRevision(state.revision.0.checked_add(1)?);
         state.revision = revision;
         state.cancel = CancellationToken::new();
@@ -235,7 +241,7 @@ impl Shared {
             Job {
                 revision,
                 selected: None,
-                paths: (!full_scan).then_some(changes.directories),
+                paths,
                 cancel: state.cancel.clone(),
             },
             changes.unavailable,
@@ -270,6 +276,31 @@ impl Shared {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
         }
         Ok(true)
+    }
+}
+
+/// A root watch may report a physical Data spelling for a logical firmlink candidate. Coalesced
+/// ancestors also cover that Data subtree without covering its logical entrances. Without
+/// a freshly verified alias map, scoped replacement could leave that logical row current and
+/// publish a second physical row. Promote the entire revision before Started is emitted so all
+/// previous rows become historical. This costs a full scan only for macOS root watches; explicit
+/// Data and project roots keep ordinary scoped refresh. Notification paths never grant authority.
+#[cfg(any(target_os = "macos", test))]
+pub(super) fn watch_paths_for_macos_aliases(
+    scan_roots: &[PathBuf],
+    paths: Option<Vec<PathBuf>>,
+) -> Option<Vec<PathBuf>> {
+    if scan_roots.iter().any(|root| root == Path::new("/"))
+        && paths.as_ref().is_some_and(|paths| {
+            paths.iter().any(|path| {
+                let data = Path::new("/System/Volumes/Data");
+                path.starts_with(data) || data.starts_with(path)
+            })
+        })
+    {
+        None
+    } else {
+        paths
     }
 }
 

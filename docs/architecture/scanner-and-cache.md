@@ -4,11 +4,13 @@
 
 本文定义 Windows、macOS、Linux 上的只读扫描核心、实时聚合、增量缓存和可复现性能验证方法。本文不是实现，也不调用或执行删除。v1 始终以当前普通用户运行，只读取完成扫描所需的元数据；不提权，不取得 backup privilege/capability，不接管 ownership，不修改 ACL、TCC、文件属性或系统设置。
 
-本文沿用上游研究的证据标签：已证事实表示上游一手资料直接支持；推导表示由事实导出的限制；产品设计表示 SweepX 选择；待实测表示发布前必须在真实平台验证、失败时保守降级的假设。平台 adapter 可以增加能力，不能降低共同下限：ordinary-user、metadata-only、no-follow、same-mount/volume、errors-visible。
+本文沿用上游研究的证据标签：已证事实表示上游一手资料直接支持；推导表示由事实导出的限制；产品设计表示 SweepX 选择；待实测表示发布前必须在真实平台验证、失败时保守降级的假设。平台 adapter 可以增加能力，不能降低共同下限：ordinary-user、metadata-only、no-follow、原生身份约束的卷准入、errors-visible。默认只准入根所在卷；macOS `/` 的 System/Data 联合范围按下节独立建立。
 
-## 2026-10-11 补充：macOS 系统卷和数据卷
+## 2026-10-15 补充：统一 macOS 系统卷和数据卷准入
 
-普通 `scan --tui /` 只读准入系统卷与 `/System/Volumes/Data` 的原生挂载身份，跨卷 lineage 仍逐组件重验原对象/挂载身份。密封系统的 firmlink 映射以 no-follow 方式读取，最多 64 KiB、256 个互不重叠映射；每个逻辑入口独立准入，数据入口在去重时必须与其原生目录、文件系统和挂载身份相同，变化拒绝发布。Data 下的映射入口只保留可浏览的“已从其他路径统计”行，不重复递归或累加；Data 独有目录照常计入。无法确认逻辑入口时改从 Data 入口统计，逻辑入口保留身份原因，避免两个不确定入口都贡献。此范围仅启用普通大小浏览，严格 inventory、观察用于内容读取的 lineage 与清理不扩大跨卷权限。外部/虚拟/辅助卷仍为带原因的排除项，权限不足不能表示完整覆盖。所有列表、临时大小和排序沿用现有两个有界任务，原因随进度更新保留。详见[核验](scan-tui-volumes-2026-10-11.md)。
+macOS 显式 `/` 根统一准入 System 与 `/System/Volumes/Data` 的原生挂载身份：普通 scan、目录浏览、junk、big-files、duplicates 及它们的详情和原生绑定复验共用同一范围。密封系统的 firmlink 映射以 no-follow 方式读取，最多 64 KiB、256 个互不重叠映射；每个逻辑入口独立准入，数据入口在去重时必须与其原生目录、文件系统和挂载身份相同，变化拒绝发布。只有当前请求实际覆盖对应逻辑入口时，Data 下已验证的映射入口才不重复递归或累加；仅选择物理 Data 子树时仍扫描该入口，不能因根 `/` 可以看到逻辑别名而丢掉定向工作。大小浏览在确实去重时保留可浏览的“已从其他路径统计”行，Data 独有目录照常计入。无法确认逻辑入口时改从 Data 入口统计，逻辑入口保留身份原因，避免两个不确定入口都贡献。外部、虚拟与辅助卷仍为带原因的排除项，其他显式根继续只准入根所在卷；权限不足不能表示完整覆盖。
+
+捕获的跨 System/Data lineage 仍逐组件重验原对象、文件系统域和该组件自己的挂载身份。内容读取先重验完整根与父链，再在保留父句柄下检查文件；目录候选复验使用相同卷准入，后续 Trash 仍独立检查候选、覆盖、规则限制和目标身份。卷准入只解决“当前对象是否属于扫描范围”，不能使缓存行变成当前事实，也不能赋予任意跨卷、provider 水合或删除许可。新发现的局部配置目录与文件仍要求属于其已绑定父目录的文件系统和挂载范围。普通浏览独立的流式大小、可见排除与工作预算策略继续保留；这些策略不再决定可准入哪些卷。详见[统一策略与验证](system-data-scan-policy-2026-10-15.md)；[10 月 11 日记录](scan-tui-volumes-2026-10-11.md)保留当时仅大小浏览的实现与测量。
 
 ## 2026-10-11 补充：普通目录浏览的大小与进度
 
@@ -51,7 +53,9 @@ Windows 从当前 `NtQueryDirectoryFile(FileIdExtdDirectoryInformation)` 单条�
 
 ## 2026-10-07 补充：持续监听与变更目录刷新 {#live-directory-refresh}
 
-`junk --tui` 在 macOS、Linux、Windows 的会话存续期间默认持续监听文件系统变更，自动刷新受影响的目录及必要祖先，不进入无关兄弟子树。监听在遍历前安装；扫描期间的新事件留给下一轮，短时连续变更合并处理。新增或删除的候选也按目录范围发现/撤下，`.git` 内变更扩展到仓库范围。祖先旧总量保持历史，局部结果不宣称整根当前精确。通知丢失、溢出或根身份变化会完整重扫；监听失败提示 `watch_unavailable`，完成一次完整回退后停用自动刷新，手动刷新仍可用。`c` 取消并暂停自动刷新，`r/R` 重新观察后恢复；退出结束监听。回收与 Linux 隔离预览/执行原子持有扫描准入，监听继续积累变更，操作结束再刷新。只监听当前发现的目录根；独立 Linux 临时对象事实仍需全量刷新，新增范围之外的系统根需 `R` 重新发现。一次性 `junk`、普通 `scan`、大文件与重复内容视图不启动常驻监听；本轮没有跨进程后台服务或凭空的整树缓存命中。
+`junk --tui` 在 macOS、Linux、Windows 的会话存续期间默认持续监听文件系统变更，通常只刷新受影响的目录及必要祖先，不进入无关兄弟子树；macOS `/` 的 Data 物理别名事件按下段完整回退。监听在遍历前安装；扫描期间的新事件留给下一轮，短时连续变更合并处理。新增或删除的候选也按目录范围发现/撤下，`.git` 内变更扩展到仓库范围。祖先旧总量保持历史，局部结果不宣称整根当前精确。通知丢失、溢出或根身份变化会完整重扫；监听失败提示 `watch_unavailable`，完成一次完整回退后停用自动刷新，手动刷新仍可用。`c` 取消并暂停自动刷新，`r/R` 重新观察后恢复；退出结束监听。回收与 Linux 隔离预览/执行原子持有扫描准入，监听继续积累变更，操作结束再刷新。只监听当前发现的目录根；独立 Linux 临时对象事实仍需全量刷新，新增范围之外的系统根需 `R` 重新发现。一次性 `junk`、普通 `scan`、大文件与重复内容视图不启动常驻监听；本轮没有跨进程后台服务或凭空的整树缓存命中。
+
+2026-10-15 的根 namespace 补充：macOS 会话包含显式 `/` 根时，FSEvents 的 `/System/Volumes/Data/...` 变化路径可能指向已有逻辑候选（如 `/private/...` 或 `/Users/...`）的另一个入口。当前没有经过原生验证的 advisory 路径别名映射，不能直接用物理前缀局部替换逻辑候选，否则旧逻辑行和新物理行可能同时保留为 current。因此这些物理 Data dirty paths 提升为一次按原会话全范围重新观察的刷新，发布 `Started` 的 `All` 范围，并沿原完整替换合同处理旧候选；`All` 仅表示请求范围，不保证扫描完成或覆盖完整，权限和资源缺口仍产生 partial。该保守回退也可能进入无关兄弟，成本高于目录局部刷新；它不复用旧聚合或从通知建立当前事实。显式 Data 根、项目根与其他没有 `/` 根的会话继续使用原局部刷新合同。后文 10 月 7 日局部刷新性能记录不代表此根别名场景，详见[统一策略](system-data-scan-policy-2026-10-15.md)。
 
 platform 的 `ChangeMonitor` 仅产生有界的 advisory 目录失效队列。macOS 只保留一个 FSEvents stream/run-loop worker，启用 FileEvents、NoDefer 与 WatchRoot，观察前捕获 cursor；HistoryDone 不结束持续订阅，也不证明树未变化。Linux 的一个 nonblocking inotify fd 在目录枚举前通过 `/proc/self/fd/<retained-fd>` 绑定已准入对象，故不重开用户路径或递归安装 symlink/mount 外的目录 watch；新增目录由父通知触发扫描后登记。按 descriptor/object 双索引复用登记，删除选择仍存在的父目录；未知 wd、移动映射、unmount 或 overflow 退回全量并重建实例。Windows 用保留根句柄作 volume hint，通过 OpenFileById 按完整对象 ID 获取独立异步句柄，再核对类型/volume/file ID，再启动 `ReadDirectoryChangesW` subtree 订阅。先重新发起通知请求再解析已完成的另一块缓冲；零字节或 ENUM_DIR 请求全量，两个 rename 名称均保留。不根据通知打开文件或水合内容。Windows API 不报告被监听目录自身的变更，因此三平台每秒只重新准入根并比较原生对象/filesystem/mount，发现根替换就完整重扫；该检查不枚举后代。
 
@@ -289,7 +293,7 @@ hard-link 对象键：
 
 ### 5.4 mount/volume 策略
 
-root admission 固定 scan_root_identity、filesystem_object_domain_identity、volume_or_mount_identity、边界 policy 和 snapshot 时间。默认 same-mount/volume：nested mount、bind、mounted folder、network、FUSE、automount、pseudo/container、removable、provider 和 read-only/system volume只列 boundary，不递归。每个额外 root 必须单独 admission，不能因它位于某选中目录下而隐式进入；多个显式 root 聚合仍遵守上节 object-domain 可比较性规则。
+root admission 固定 scan_root_identity、filesystem_object_domain_identity、volume_or_mount_identity、边界 policy 和 snapshot 时间。默认只准入根所在 mount/volume；macOS 显式 `/` 按当前统一策略独立准入 Data，并在本次范围内核验 firmlink 别名。其他 nested mount、bind、mounted folder、network、FUSE、automount、pseudo/container、removable 和 provider 仍只列 boundary，不递归。每个额外 root 必须单独 admission，不能因它位于某选中目录下而隐式进入；System/Data 准入不能推导其他 APFS volume 属于范围。多个显式 root 聚合仍遵守上节 object-domain 可比较性规则。
 
 Linux 保存 /proc/self/mountinfo 和可用的 STATX_MNT_ID_UNIQUE；mount namespace 或映射改变使对应 root cache 全失效。Windows mounted-folder reparse target 不属于父树。macOS APFS 同 container 的不同 volume 仍是不同遍历边界，尽管共享容量池。
 
@@ -549,6 +553,6 @@ oracle manifest 保存每个预期 identity class、边界、错误、logical/al
 
 局部分类入口关闭完整目录索引：每个候选保留自己的覆盖和原生身份链；普通目录完成后不再累计覆盖或目录 marker 图。`.git` 目录与 gitfile 作为稀疏原生行保留，Git 检查从已验证 locator 的全部祖先重建关系，仍能发现候选内部的深层嵌套仓库。缺失/无效身份链、资源或覆盖损失不能证明没有仓库。自定义全局 evaluator 保留完整索引，不能使用这项优化。
 
-完整子树按后序结束后释放自身文件 marker 和浅层枚举标记；这些信息此前已供全部子项分类使用。取消、拒绝或不完整子树可能在根结束时按父项优先交付，因此保留它们的 marker，仍以原预算失败关闭。可选缓存覆盖与索引可被逐出，不构成遍历或删除授权。默认 junk 遍历工作上限为 4,194,304 个目录；资源保留预算没有扩大，普通扫描和垃圾详情的独立限制不变。macOS 垃圾扫描保持原始 mount 范围，不沿普通大小浏览器的跨卷展示路径授权操作。
+完整子树按后序结束后释放自身文件 marker 和浅层枚举标记；这些信息此前已供全部子项分类使用。取消、拒绝或不完整子树可能在根结束时按父项优先交付，因此保留它们的 marker，仍以原预算失败关闭。可选缓存覆盖与索引可被逐出，不构成遍历或删除授权。默认 junk 遍历工作上限为 4,194,304 个目录；资源保留预算没有扩大，普通扫描和垃圾详情的独立限制不变。macOS `/` 的 junk 现在使用上节 System/Data 联合准入，候选原生绑定复验仍独立于展示与缓存。
 
 本机复现、原生终端范围与验证矩阵见 [2026-10-12 根目录垃圾扫描验证](junk-root-budget-2026-10-12.md)。

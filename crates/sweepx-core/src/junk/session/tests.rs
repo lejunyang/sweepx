@@ -193,6 +193,67 @@ fn controlled_scope_revision(
 }
 
 #[test]
+fn physical_data_watch_fallback_refreshes_existing_logical_row_without_a_second_current_row() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture_root(&fixture);
+    let target = project(&root, "logical-project", b"old payload");
+    let mut worker = controlled_worker(&root);
+    let first = current(&controlled_revision(&mut worker, 1, None));
+    assert_eq!(first.len(), 1);
+    let key = *first.keys().next().unwrap();
+    assert_eq!(first[&key].observed_native_path(), Some(target.clone()));
+    fs::write(
+        target.join("payload"),
+        b"fresh changed payload after the physical notification",
+    )
+    .unwrap();
+
+    // The synthetic notification models a root watch's alternate Data spelling. Only its
+    // scheduling policy is injected; the existing logical row, traversal, interpretation and
+    // replacement are real native observations in this isolated fixture, never a full / scan.
+    let physical = PathBuf::from("/System/Volumes/Data/Users/person/logical-project/target");
+    let paths =
+        mailbox::watch_paths_for_macos_aliases(&[PathBuf::from("/")], Some(vec![physical.clone()]));
+    assert!(paths.is_none());
+    let events = controlled_scope_revision(&mut worker, 2, None, paths);
+    assert!(matches!(
+        events.first().unwrap().kind,
+        JunkSessionEventKind::Started {
+            scope: JunkSessionScope::All
+        }
+    ));
+    assert!(matches!(
+        events.last().unwrap().kind,
+        JunkSessionEventKind::Completed {
+            outcome: JunkSessionOutcome::Complete,
+            replaced: true,
+            ..
+        }
+    ));
+    let fresh = current(&events);
+    assert_eq!(fresh.keys().copied().collect::<Vec<_>>(), vec![key]);
+    assert_eq!(
+        worker.current.keys().copied().collect::<Vec<_>>(),
+        vec![key]
+    );
+    assert_eq!(fresh[&key].observed_native_path(), Some(target.clone()));
+    assert!(
+        fresh
+            .values()
+            .all(|row| row.observed_native_path() != Some(physical.clone()))
+    );
+    let expected = fs::read_dir(&target)
+        .unwrap()
+        .map(|entry| u128::from(fs::symlink_metadata(entry.unwrap().path()).unwrap().len()))
+        .sum::<u128>();
+    assert_eq!(
+        fresh[&key].logical_bytes(),
+        &sweepx_platform::known_u128(expected)
+    );
+    assert!(fresh[&key].complete());
+}
+
+#[test]
 fn cancelled_published_base_is_removed_by_a_complete_native_refresh() {
     use std::sync::mpsc::sync_channel;
     let fixture = tempfile::tempdir().unwrap();

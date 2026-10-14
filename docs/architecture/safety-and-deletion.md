@@ -626,6 +626,8 @@ ApprovalSurface 测试必须证明：native modal 是有图形会话时的首选
 9. batch 非原子且逐项审计；missing/unknown/denied/unsupported 不等于 success。
 10. Trash success 不等于容量释放或保证恢复；Permanent success 不等于 secure erase。
 
+macOS `/` 的[共享 System/Data 扫描准入](system-data-scan-policy-2026-10-15.md)允许候选定位链跨越已独立准入的两个卷；链中每个组件仍须重验自己记录的原生身份和挂载身份。该扫描合同不放宽上述执行器目标范围的 same-mount、hard protection、approval 或 intent 要求，也不能授权卷根或其他未准入卷。
+
 ## 16. 证据边界
 
 上游一手证据支持：Windows IFileOperation 的 undo 仅在可能时成立、操作可 aborted，Windows 8+ 的 `FOFX_RECYCLEONDELETE` 才提供明确 recycle-only 请求语义；macOS Trash API 与立即 removal API 语义不同；Linux Trash 是桌面规范而非统一 syscall，GIO 可返回 unsupported，跨 mount rename 为 EXDEV；三平台都有不同 identity/link/mount 语义；Unix open FD/mapping 可在 pathname unlink 后保留对象；Restart Manager、lsof、/proc 都是受权限和时序限制的观察。Windows UserConsentVerifier/Windows Hello 与 macOS LocalAuthentication 提供的是本机用户验证能力，不等于提升文件访问权限；它们的普通成功回调也没有接收并签名任意 SweepX plan digest 的合同。UAC、Authorization Services 和 polkit 属于权限/授权机制，不应被挪作单纯的删除确认 UI。

@@ -110,7 +110,7 @@ impl Worker {
                 }
             }
             if let Some(monitor) = &self.monitor
-                && let Some((job, failure)) = shared.watch_job(monitor)
+                && let Some((job, failure)) = shared.watch_job(monitor, &self.scan_roots)
             {
                 if let Some(detail) = failure {
                     // One complete fallback revision reports the failure. Do not loop on a
@@ -144,21 +144,21 @@ mod tests {
         );
         monitor.report_gap();
         writer.finish(JunkSessionOutcome::Complete, true, 0);
-        assert!(shared.watch_job(&monitor).is_none());
+        assert!(shared.watch_job(&monitor, &[]).is_none());
         shared.pop().unwrap();
         let pause = shared.suspend_auto_refresh().unwrap();
-        assert!(shared.watch_job(&monitor).is_none());
+        assert!(shared.watch_job(&monitor, &[]).is_none());
         drop(pause);
-        let (job, failure) = shared.watch_job(&monitor).unwrap();
+        let (job, failure) = shared.watch_job(&monitor, &[]).unwrap();
         assert_eq!(job.revision, JunkSessionRevision(2));
         assert!(job.paths.is_none() && failure.is_none());
         monitor.report_gap();
-        assert!(shared.watch_job(&monitor).is_none());
+        assert!(shared.watch_job(&monitor, &[]).is_none());
         let writer = Writer::new(Arc::clone(&shared), job.revision, job.cancel);
         writer.finish(JunkSessionOutcome::Complete, true, 0);
         shared.pop().unwrap();
         assert_eq!(
-            shared.watch_job(&monitor).unwrap().0.revision,
+            shared.watch_job(&monitor, &[]).unwrap().0.revision,
             JunkSessionRevision(3)
         );
         monitor.wait_for_exit();

@@ -58,7 +58,7 @@ Native probe helper -------------------------------> |
 
 - **展示与输入层（不可信）**：CLI 参数、TUI selection、JSON/NDJSON 客户端、Agent、导入文件只提交查询或候选 ID，不能提交原始删除路径、审批正文或 permit。
 - **Cleaner 层（受限）**：签名只证明来源和完整性，不证明规则正确。声明式规则在无副作用 VM 中运行；少量 native probe 在隔离 helper 中运行，只能发出 typed evidence/proposed root。
-- **Scanner/分析层（事实边界）**：Scanner 以当前普通用户 live、metadata-only、no-follow、same-mount 观察，Candidate Builder 再把当前记录与规则证据连接。缓存仅用于 `StalePreview` 和纯派生加速。
+- **Scanner/分析层（事实边界）**：Scanner 以当前普通用户 live、metadata-only、no-follow 观察原生身份约束的已准入卷范围，Candidate Builder 再把当前记录与规则证据连接。默认只准入根所在卷；macOS `/` 共用[System/Data 联合准入](system-data-scan-policy-2026-10-15.md)。缓存仅用于 `StalePreview` 和纯派生加速。
 - **计划/审批层（授权边界）**：Planner 生成 canonical immutable plan；Human Approval Broker 独占审批构造权。审批表达人的精确意图，但不证明对象仍未变化。
 - **执行/审计层（最高权限但仍为普通用户）**：Preflight 独占 permit 构造权，adapter 只收 sealed permit 和绑定的 native basename/官方动作描述，不收任意 path、argv 或 force bit。Audit store 不可 durable append+sync 时不得开始动作。
 
@@ -775,7 +775,7 @@ Chrome/Edge 基础模型不能靠固定 `OptGuideOnDeviceModel` 名称裸删。�
 
 ## 11. 完整生命周期
 
-1. **Detect**：解析兼容且已信任的 Cleaner；Scanner 对每个显式 root 做 ordinary-user live admission，metadata-only/no-follow/same-mount 流式枚举。规则/native probe 只补证据。
+1. **Detect**：解析兼容且已信任的 Cleaner；Scanner 对每个显式 root 做 ordinary-user live admission，在 metadata-only/no-follow 与[共享卷准入](system-data-scan-policy-2026-10-15.md)范围内流式枚举。规则/native probe 只补证据；Cleaner 自身配置、内容和执行合同仍独立验证。
 2. **Analyze**：按工具所有权、规范路径、对象类别、引用、活动、激活状态、官方状态、恢复条件、共享/并发九类证据分类。开发者对象严格区分 A 可重建项目产物、B 共享/内容寻址 store、C 已安装依赖/环境、D SDK/toolchain/global tool、E volume/archive/credential/source/user runtime state；目录名含 cache 不得改变类别。低风险必须有 manager-confirmed scope、无 observed blocker、非共享或 manager-defined GC 语义及明确 rebuild/recovery；文件 age/atime 只是弱信号，negative holder 只表示当时未观察到。没有跨生态查询能证明所有用户、项目、container、VM、CI、remote worker 或 offline media 都无引用。缺项显式 unknown，风险单调不降。
 3. **Plan**：只接收 local current live Candidate。Planner 应用硬保护，绑定 identity、封闭目录 manifest、cleaner/policy/adapter digest，生成 immutable Trash（默认）或独立 Permanent R4 plan。
 4. **Authorize**：常规 CLI/TUI 在 trusted local surface 展示 exact plan，由 Broker 生成 sealed、短期、single-use、逐 action risk-bound HumanApproval；Agent、插件必须在此暂停，不能代替人输入。独立的 `--dangerously-delete` 分支只适用于已有 Permanent R4 plan，跳过 prompt 并生成 ExplicitDangerousDelete，Agent 不得调用。
@@ -804,7 +804,7 @@ Scanner cache、Cleaner evidence cache 和 UI cache从不跨越第 3/5 步的 li
 - 对同一 fixture，CLI human/JSON、TUI 和 Cleaner API 产生完全相同的 Candidate/Explanation/Plan digest、risk、coverage 和 action outcome；任何前端不得重算安全结论。
 - `sweepx.output/v1` JSON Schema、`sweepx.event/v1` replay/golden、unknown-field/unknown-enum、u128 string、native-name round-trip、cursor duplicate/gap/reset、终态恰好一次全部通过。
 - 状态机 property test 拒绝所有未列转移，尤其 Candidate->Execute、Plan->Execute、authorization 改 mode、permit 复用、Trash->Permanent fallback 和 stale->retry。
-- 所有公开 Core API、CLI flag、config/env、TUI shortcut、插件/probe 和 direct adapter fuzz 均不能绕过 ordinary-user、hard protection、no-follow、same-mount、approval、intent 或 permit。
+- 所有公开 Core API、CLI flag、config/env、TUI shortcut、插件/probe 和 direct adapter fuzz 均不能绕过 ordinary-user、hard protection、no-follow、原生身份约束的卷准入、approval、intent 或 permit。macOS System/Data 扫描范围不能放宽具体执行器自身的 same-mount 合同。
 
 ### 13.2 Scanner/TUI 性能与内存
 

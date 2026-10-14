@@ -1252,6 +1252,33 @@ pub trait PlatformScanner: Send + Sync {
         }
     }
 
+    /// Reopens one previously observed directory entrance relative to the retained parent.
+    ///
+    /// `expected` must name this exact bound child and contain complete native object,
+    /// filesystem and mount identities. A backend may admit a different-device directory only
+    /// after a fresh no-follow preview matches that expectation, and must check all identities
+    /// again on the opened capability. Ordinary files, links, unknown devices and denied
+    /// directory handles keep their existing refusal policy. Use
+    /// [`inspect_bound_child_with_expected_directory`] for non-overridable contract checks.
+    fn inspect_child_with_expected_directory(
+        &self,
+        parent: &Self::DirectoryHandle,
+        child: &DirectoryEntryRecord,
+        cancel: &CancellationToken,
+        expected: &EntryMetadata,
+        directory_admission: DirectoryHandleAdmission,
+    ) -> Result<WalkEntry<Self::DirectoryHandle>, PlatformError> {
+        validate_expected_directory_request(child, expected)?;
+        let entry = self.inspect_child_with_mount_identity_and_directory_admission(
+            parent,
+            child,
+            cancel,
+            directory_admission,
+        )?;
+        validate_expected_directory_result(&entry, expected)?;
+        Ok(entry)
+    }
+
     /// Performs the same bound inspection while optionally denying creation of
     /// a retained child-directory handle. Implementations must classify a
     /// denied directory without first constructing its retained handle; this
@@ -1402,6 +1429,88 @@ pub fn inspect_bound_child_with_mount_identity_and_directory_admission<
         }
         Ok(entry)
     })
+}
+
+/// Reopens one identity-bound directory entrance with a bounded handle-admission decision.
+///
+/// The expected reporting path must equal the child's parent-derived path; resolution still uses
+/// only the retained parent handle and native basename. Missing identities, a changed object or
+/// type, substituted results, and directory opens despite denial fail closed. Exclusions/errors
+/// remain observations with no descendant authority, rather than guessed successful admissions.
+pub fn inspect_bound_child_with_expected_directory<P: PlatformScanner + ?Sized>(
+    platform: &P,
+    parent: &P::DirectoryHandle,
+    parent_path: &Path,
+    child: &DirectoryEntryRecord,
+    cancel: &CancellationToken,
+    expected: &EntryMetadata,
+    directory_admission: DirectoryHandleAdmission,
+) -> Result<WalkEntry<P::DirectoryHandle>, PlatformError> {
+    inspect_checked_child(parent_path, child, cancel, || {
+        validate_expected_directory_request(child, expected)?;
+        let entry = platform.inspect_child_with_expected_directory(
+            parent,
+            child,
+            cancel,
+            expected,
+            directory_admission,
+        )?;
+        if directory_admission == DirectoryHandleAdmission::Deny
+            && matches!(entry, WalkEntry::Directory(_))
+        {
+            return Err(PlatformError::ResourceLimit(
+                "backend opened a denied expected directory".into(),
+            ));
+        }
+        validate_expected_directory_result(&entry, expected)?;
+        Ok(entry)
+    })
+}
+
+pub(crate) fn validate_expected_directory_request(
+    child: &DirectoryEntryRecord,
+    expected: &EntryMetadata,
+) -> Result<(), PlatformError> {
+    if expected.path != child.path
+        || expected.file_name != child.file_name
+        || expected.kind != EntryKind::Directory
+        || expected.identity.is_none()
+        || expected.filesystem_identity.is_none()
+        || expected.mount_identity.is_none()
+    {
+        return Err(PlatformError::InvalidDirectoryEntry {
+            parent: child.path.parent().unwrap_or(&child.path).to_path_buf(),
+            detail: "expected directory entrance lacks a matching bound path or native identities"
+                .into(),
+        });
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_expected_directory_result<H>(
+    entry: &WalkEntry<H>,
+    expected: &EntryMetadata,
+) -> Result<(), PlatformError> {
+    match entry {
+        WalkEntry::Directory(opened)
+            if opened.metadata.kind == EntryKind::Directory
+                && opened.metadata.identity == expected.identity
+                && opened.metadata.filesystem_identity == expected.filesystem_identity
+                && opened.metadata.mount_identity == expected.mount_identity =>
+        {
+            Ok(())
+        }
+        WalkEntry::Boundary(_) | WalkEntry::Error(_) => Ok(()),
+        _ => Err(PlatformError::InvalidDirectoryEntry {
+            parent: expected
+                .path
+                .parent()
+                .unwrap_or(&expected.path)
+                .to_path_buf(),
+            detail: "directory entrance changed its native object, filesystem, mount or type"
+                .into(),
+        }),
+    }
 }
 
 // Both entry points enforce the same authority checks; optional evidence cannot bypass binding.

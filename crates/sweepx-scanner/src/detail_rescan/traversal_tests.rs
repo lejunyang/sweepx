@@ -1220,7 +1220,7 @@ fn streamed_fallback_file_facts_keep_size_without_hard_link_or_allocation_claims
 }
 
 #[test]
-fn size_browser_counts_two_admitted_volumes_once_and_retains_exclusions() {
+fn all_detail_modes_share_two_volume_admission_and_alias_deduplication() {
     let (_temp, root) = fixture();
     let logical = root.join("Users");
     let data = root.join("Data");
@@ -1340,11 +1340,23 @@ fn size_browser_counts_two_admitted_volumes_once_and_retains_exclusions() {
             .len(),
         1
     );
-    // Strict inventories and content authority do not inherit the size browser's mount scope.
-    assert_eq!(
-        scanner.observe_direct_children(subrequest, &mut ids, &cancel),
-        Err(DetailRescanError::MountChanged)
-    );
+    // Strict inventory has the same volume scope, while retaining every native direct row.
+    let strict = scanner
+        .observe_direct_children(subrequest, &mut ids, &cancel)
+        .unwrap();
+    assert_eq!(strict.len(), 1);
+    assert_eq!(strict[0].logical_bytes, known_u128(7));
+    assert!(strict[0].executable_native_locator().unwrap().is_some());
+    scanner.revalidate_directory(subrequest, &cancel).unwrap();
+    #[cfg(unix)]
+    let child_name = sweepx_model::NativeName::unix(b"user-file".to_vec());
+    #[cfg(windows)]
+    let child_name =
+        sweepx_model::NativeName::windows_utf16("user-file".encode_utf16().collect::<Vec<_>>());
+    let child = scanner
+        .observe_child(subrequest, &child_name, &mut ids, &cancel)
+        .unwrap();
+    assert_eq!(child.logical_bytes, known_u128(7));
     let data_request = DetailRescanRequest {
         source_directory_identity: data_row.identity.as_ref().unwrap(),
         directory_locator: data_row.executable_native_locator().unwrap().unwrap(),
@@ -1358,18 +1370,71 @@ fn size_browser_counts_two_admitted_volumes_once_and_retains_exclusions() {
         .iter()
         .find(|row| row.display_path == alias.display().to_string())
         .unwrap();
-    assert_eq!(
+    assert!(!matches!(
         alias_row.logical_bytes,
-        EvidenceValue::NotChecked {
-            reason: ReasonCode::NotRevalidated
-        }
-    );
+        EvidenceValue::NotChecked { .. }
+    ));
     assert!(alias_row.executable_native_locator().unwrap().is_some());
+    let expected_data = u128::from(fs::metadata(data.join("unique")).unwrap().len())
+        + u128::from(fs::metadata(alias.join("user-file")).unwrap().len());
+    assert_eq!(expected_data, 18);
+    let data_detail = scanner.rescan(data_request, &mut ids, &cancel).unwrap();
+    assert_eq!(
+        data_detail.aggregate.apparent_logical_bytes,
+        known_u128(expected_data)
+    );
+    let measured_alias = data_detail
+        .rows
+        .iter()
+        .find(|row| row.display_path == alias.display().to_string())
+        .unwrap();
+    assert_eq!(measured_alias.logical_bytes, known_u128(7));
     assert!(
         observations
             .iter()
             .any(|o| o.identity == *users.identity.as_ref().unwrap())
     );
+    // Full-fact junk breakdowns and logical aggregation use the same admitted and deduplicated
+    // native objects even without the size browser's visible-exclusion presentation option.
+    scanner.size_browser = false;
+    for logical_only in [false, true] {
+        let measured = if logical_only {
+            scanner.rescan_logical_with_progress(
+                request(&scan_id, &observed),
+                &mut ids,
+                &cancel,
+                |_| {},
+            )
+        } else {
+            scanner.rescan(request(&scan_id, &observed), &mut ids, &cancel)
+        }
+        .unwrap();
+        assert_eq!(
+            measured.aggregate.apparent_logical_bytes,
+            EvidenceValue::LowerBound {
+                value: DecimalU128::new(expected),
+                reason: ReasonCode::IncompleteStreamCoverage,
+            }
+        );
+        assert!(
+            measured
+                .rows
+                .iter()
+                .any(|row| row.display_path == logical.display().to_string())
+        );
+        assert!(
+            measured
+                .rows
+                .iter()
+                .any(|row| row.display_path == data.display().to_string())
+        );
+        assert!(
+            !measured
+                .rows
+                .iter()
+                .any(|row| row.display_path == outside.display().to_string())
+        );
+    }
     released(&probe);
 }
 
@@ -1378,7 +1443,7 @@ fn verified_alias_replacement_or_missing_identity_fails_closed() {
     let (_temp, root) = fixture();
     let cancel = CancellationToken::new();
     let platform = HostPlatformScanner::new();
-    let mut metadata = platform
+    let metadata = platform
         .admit_root(&ScanRoot::new(&root).unwrap(), &cancel)
         .unwrap()
         .metadata;
@@ -1387,11 +1452,134 @@ fn verified_alias_replacement_or_missing_identity_fails_closed() {
         ..Default::default()
     };
     assert!(scope.is_counted_alias(&metadata).unwrap());
-    metadata.identity = None;
+    for change in ["object", "filesystem", "mount", "kind", "changed_mount"] {
+        let mut changed = metadata.clone();
+        match change {
+            "object" => changed.identity = None,
+            "filesystem" => changed.filesystem_identity = None,
+            "mount" => changed.mount_identity = None,
+            "kind" => changed.kind = EntryKind::File,
+            "changed_mount" => {
+                let mount = changed.mount_identity.as_mut().unwrap();
+                mount.value = mount.value.wrapping_add(1);
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            scope.is_counted_alias(&changed),
+            Err(VolumeScopeError::IdentityMismatch),
+            "{change} must not turn the captured alias into uncounted coverage",
+        );
+    }
+}
+
+#[test]
+fn logical_firmlink_or_data_root_replacement_on_the_same_mount_fails_closed() {
+    for replace_data in [false, true] {
+        let (_temp, root) = fixture();
+        let logical = root.join("Users");
+        let data = root.join("Data");
+        let physical = data.join("Users");
+        for path in [&logical, &data, &physical] {
+            fs::create_dir(path).unwrap();
+        }
+        fs::write(logical.join("old-content"), b"old logical bytes").unwrap();
+        fs::write(physical.join("old-content"), b"old logical bytes").unwrap();
+        let (scan_id, observed) = source(&root);
+        let probe = Arc::new(Probe::default());
+        let mut platform = ProbedPlatform::new(Arc::clone(&probe));
+        platform.volume_prefixes.insert(logical.clone(), 100);
+        platform.volume_prefixes.insert(data.clone(), 100);
+        let cancel = CancellationToken::new();
+        let logical_metadata = platform
+            .admit_root(&ScanRoot::new(&logical).unwrap(), &cancel)
+            .unwrap()
+            .metadata;
+        let data_metadata = platform
+            .admit_root(&ScanRoot::new(&data).unwrap(), &cancel)
+            .unwrap()
+            .metadata;
+        platform
+            .aliases
+            .insert(physical.clone(), logical_metadata.clone());
+        let mut scanner = DetailRescanner::new(platform, limits());
+        scanner.scope_override = Some(volume_scope::VolumeScope {
+            data: Some(data_metadata),
+            aliases: [(physical, logical_metadata)].into_iter().collect(),
+            unverified_logical: Default::default(),
+        });
+        let replaced = if replace_data { &data } else { &logical };
+        fs::rename(replaced, root.join("preserved-original")).unwrap();
+        fs::create_dir(replaced).unwrap();
+        fs::write(replaced.join("new-content"), b"new bytes").unwrap();
+        assert_eq!(
+            scanner.rescan(
+                request(&scan_id, &observed),
+                &mut DetailEntryIdAllocator::new(scan_id.clone()).unwrap(),
+                &cancel,
+            ),
+            Err(DetailRescanError::IdentityMismatch),
+            "same-mount replacement must not justify dropping the original alias",
+        );
+        assert_eq!(
+            fs::read(root.join("preserved-original/old-content")).unwrap_or_else(|_| {
+                fs::read(root.join("preserved-original/Users/old-content")).unwrap()
+            }),
+            b"old logical bytes",
+        );
+        released(&probe);
+    }
+}
+
+#[test]
+fn logical_file_length_shortcut_cannot_accept_a_tracked_directory_replaced_by_file() {
+    let (_temp, root) = fixture();
+    let logical = root.join("Users");
+    let data = root.join("Data");
+    let physical = data.join("Users");
+    for path in [&logical, &data, &physical] {
+        fs::create_dir(path).unwrap();
+    }
+    let (scan_id, observed) = source(&root);
+    let probe = Arc::new(Probe::default());
+    let mut platform = ProbedPlatform::new(Arc::clone(&probe));
+    platform.volume_prefixes.insert(logical.clone(), 100);
+    platform.volume_prefixes.insert(data.clone(), 100);
+    let cancel = CancellationToken::new();
+    let logical_metadata = platform
+        .admit_root(&ScanRoot::new(&logical).unwrap(), &cancel)
+        .unwrap()
+        .metadata;
+    let data_metadata = platform
+        .admit_root(&ScanRoot::new(&data).unwrap(), &cancel)
+        .unwrap()
+        .metadata;
+    platform
+        .aliases
+        .insert(physical.clone(), logical_metadata.clone());
+    let mut scanner = DetailRescanner::new(platform, limits());
+    scanner.scope_override = Some(volume_scope::VolumeScope {
+        data: Some(data_metadata),
+        aliases: [(physical.clone(), logical_metadata)].into_iter().collect(),
+        unverified_logical: Default::default(),
+    });
+    fs::rename(&physical, data.join("preserved-directory")).unwrap();
+    fs::write(
+        &physical,
+        b"ordinary file must not inherit the directory admission",
+    )
+    .unwrap();
     assert_eq!(
-        scope.is_counted_alias(&metadata),
-        Err(DetailRescanError::IdentityMismatch)
+        scanner.rescan_logical_with_progress(
+            request(&scan_id, &observed),
+            &mut DetailEntryIdAllocator::new(scan_id.clone()).unwrap(),
+            &cancel,
+            |_| {},
+        ),
+        Err(DetailRescanError::IdentityMismatch),
     );
+    assert!(data.join("preserved-directory").is_dir());
+    released(&probe);
 }
 
 #[cfg(unix)]

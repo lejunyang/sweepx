@@ -75,6 +75,107 @@ fn native_file_content_uses_native_lineage_and_refuses_parent_replacement() {
     assert_eq!(fs::read(root.join("original/file")).unwrap(), b"abcde");
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn native_system_root_file_content_reopens_data_lineage_with_default_detail_policy() {
+    use crate::{ClassifiedScanObserver, JunkClassifier};
+    use std::collections::{BTreeMap, BTreeSet};
+
+    struct Local;
+    impl JunkClassifier for Local {
+        fn uses_only_local_markers(&self) -> bool {
+            true
+        }
+        fn needs_file_marker(&self, _: &sweepx_model::NativeName) -> bool {
+            false
+        }
+        fn classify(
+            &self,
+            _: &ScannedEntry,
+            _: &BTreeMap<ScanEntryId, BTreeSet<String>>,
+        ) -> Option<String> {
+            None
+        }
+    }
+    struct FileObserver {
+        path: PathBuf,
+        entry: Option<ScannedEntry>,
+    }
+    impl ClassifiedScanObserver for FileObserver {
+        fn wants_file_observations(&self) -> bool {
+            true
+        }
+        fn on_entry(&mut self, entry: &ScannedEntry) {
+            if entry.object_type == ObjectType::File && Path::new(&entry.display_path) == self.path
+            {
+                assert!(
+                    self.entry.is_none(),
+                    "one native file must be observed once"
+                );
+                self.entry = Some(entry.clone());
+            }
+        }
+    }
+
+    let (_fixture, root, _) = fixture();
+    let path = root.join("nested/file");
+    let cancel = CancellationToken::new();
+    let mut observer = FileObserver { path, entry: None };
+    // Walk only this controlled Data subtree and its shallow native ancestors. This exercises
+    // system-root lineage without an unbounded host-root scan or a fabricated source locator.
+    Scanner::new(
+        HostPlatformScanner::new(),
+        ScannerOptions {
+            retain_file_index: false,
+            retain_directory_index: false,
+            ..ScannerOptions::default()
+        },
+    )
+    .scan_classified_subtrees_with_observer(
+        &[ScanRoot::new("/").unwrap()],
+        &cancel,
+        &Local,
+        None,
+        &[root],
+        &mut observer,
+    )
+    .unwrap();
+    let entry = observer
+        .entry
+        .expect("selected native Data file was observed");
+    let locator = entry.validated_native_locator().unwrap().unwrap();
+    assert_eq!(
+        locator.scan_root_absolute_path.as_ref().unwrap(),
+        &NativeAbsolutePath::from_path(Path::new("/")).unwrap()
+    );
+    assert!(
+        locator.parent_reopen_recipe.iter().any(|parent| {
+            matches!(
+                parent.volume_or_mount_identity,
+                IdentityEvidence::Known { .. }
+            ) && parent.volume_or_mount_identity != locator.scan_root.volume_or_mount_identity
+        }),
+        "the native parent lineage must exercise the system-to-Data volume transition"
+    );
+    let mut bytes = Vec::new();
+    DetailRescanner::new(HostPlatformScanner::new(), ScanResourceLimits::default())
+        .stream_file(
+            FileContentRequest {
+                entry: &entry,
+                offset: 0,
+                max_bytes: 5,
+                previous: None,
+            },
+            &cancel,
+            &mut |chunk| {
+                bytes.extend_from_slice(chunk);
+                Ok(())
+            },
+        )
+        .unwrap();
+    assert_eq!(bytes, fs::read(&observer.path).unwrap());
+}
+
 struct GrowingPlatform {
     host: HostPlatformScanner,
     path: PathBuf,

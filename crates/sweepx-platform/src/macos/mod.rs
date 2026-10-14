@@ -929,6 +929,200 @@ mod backend {
         }
     }
 
+    impl MacosPlatformScanner {
+        fn directory_device_admitted(
+            parent_device: u64,
+            observed: &ObservedMetadata,
+            expected: Option<&EntryMetadata>,
+        ) -> Result<bool, PlatformError> {
+            let Some(expected) = expected else {
+                return Ok(observed.stat.st_dev as u64 == parent_device);
+            };
+            let identity =
+                EntryIdentity::from_unix(observed.stat.st_dev as u64, observed.stat.st_ino);
+            let filesystem = FilesystemIdentity {
+                device: observed.stat.st_dev as u64,
+            };
+            if kind_from_mode(observed.stat.st_mode) != EntryKind::Directory
+                || expected.identity.as_ref() != Some(&identity)
+                || expected.filesystem_identity.as_ref() != Some(&filesystem)
+            {
+                return Err(PlatformError::InvalidDirectoryEntry {
+                    parent: expected
+                        .path
+                        .parent()
+                        .unwrap_or(&expected.path)
+                        .to_path_buf(),
+                    detail: "preflight directory identity changed before relative open".into(),
+                });
+            }
+            // The independent preflight admission already observed this exact native object;
+            // only that identity may cross a device here. The opened handle must still match
+            // its captured mount before the expected-directory API returns authority.
+            Ok(true)
+        }
+
+        fn inspect_child_observation(
+            parent: &OpenDirectory,
+            child: &DirectoryEntryRecord,
+            cancel: &CancellationToken,
+            directory_admission: DirectoryHandleAdmission,
+            expected: Option<&EntryMetadata>,
+        ) -> Result<WalkEntry<OpenDirectory>, PlatformError> {
+            child.validate_for_parent(&parent.path).map_err(|error| {
+                PlatformError::InvalidDirectoryEntry {
+                    parent: parent.path.clone(),
+                    detail: error.to_string(),
+                }
+            })?;
+            Self::ensure_not_cancelled(cancel)?;
+            Self::assert_directory_identity_current(parent)?;
+
+            // A bulk page already supplied this child's attributes; otherwise inspect it
+            // directly with fstatat as before.
+            let NativeName::UnixBytes(child_bytes) = &child.file_name else {
+                unreachable!("this backend only produces UnixBytes child names")
+            };
+            let (observed, from_bulk) = if expected.is_none()
+                && let Some(stat) = parent.bulk_attributes.get(child_bytes).cloned()
+            {
+                (ObservedMetadata { stat }, true)
+            } else {
+                let parent_fd = Self::dirfd(parent)
+                    .map_err(|error| PlatformError::io(parent.path.clone(), error))?;
+                let child_name = Self::name_c_string(&child.file_name)?;
+                match Self::fstatat_raw(parent_fd, &child_name) {
+                    Ok(value) => (value, false),
+                    Err(error) => {
+                        return Ok(WalkEntry::Error(ErrorRecord {
+                            path: child.path.clone(),
+                            kind: crate::error_kind_for_io(&error),
+                            reason: crate::reason_for_io(&error),
+                            detail: error.to_string(),
+                        }));
+                    }
+                }
+            };
+            // getattrlistbulk does not report the hard-link count, so a bulk-decoded row carries
+            // an honest unknown instead of a fabricated zero; fstatat rows keep the real count.
+            let link_count = if from_bulk {
+                CountValue::Unknown {
+                    reason: ReasonCode::IncompleteStreamCoverage,
+                }
+            } else {
+                known_count(observed.stat.st_nlink as u128)
+            };
+
+            match kind_from_mode(observed.stat.st_mode) {
+                EntryKind::Directory => {
+                    // Bulk attributes can describe the covered vnode beneath a mount. A
+                    // no-follow stat of the name sees the mounted object without activating
+                    // it via openat. Keep files on the bulk path; directories need this check.
+                    let observed =
+                        if from_bulk && observed.stat.st_dev as u64 == parent.identity.device {
+                            let parent_fd = Self::dirfd(parent)
+                                .map_err(|error| PlatformError::io(parent.path.clone(), error))?;
+                            let name = Self::name_c_string(&child.file_name)?;
+                            match Self::fstatat_raw(parent_fd, &name) {
+                                Ok(current) => current,
+                                Err(error) => {
+                                    return Ok(WalkEntry::Error(ErrorRecord {
+                                        path: child.path.clone(),
+                                        kind: crate::error_kind_for_io(&error),
+                                        reason: crate::reason_for_io(&error),
+                                        detail: error.to_string(),
+                                    }));
+                                }
+                            }
+                        } else {
+                            observed
+                        };
+                    // Reject an already observed foreign device before opening its directory:
+                    // openat can trigger an automount and block even though traversal would
+                    // subsequently refuse that mount. Equality is only a preliminary check;
+                    // the opened handle still supplies the authoritative mount identity.
+                    if !Self::directory_device_admitted(
+                        parent.identity.device,
+                        &observed,
+                        expected,
+                    )? {
+                        return Ok(WalkEntry::Boundary(BoundaryRecord {
+                            path: child.path.clone(),
+                            kind: BoundaryKind::Mount,
+                            reason: ReasonCode::UnsupportedFilesystem,
+                            detail: "entry crosses the observed device boundary".to_string(),
+                        }));
+                    }
+                    if kind_from_mode(observed.stat.st_mode) != EntryKind::Directory {
+                        return Ok(WalkEntry::Error(ErrorRecord {
+                            path: child.path.clone(),
+                            kind: crate::ErrorKind::Io,
+                            reason: ReasonCode::UnknownIdentity,
+                            detail: "directory type changed after bulk observation".to_string(),
+                        }));
+                    }
+                    if directory_admission == DirectoryHandleAdmission::Deny {
+                        return Ok(WalkEntry::Boundary(BoundaryRecord {
+                            path: child.path.clone(),
+                            kind: BoundaryKind::ResourceLimit,
+                            reason: ReasonCode::ResourceLimit,
+                            detail: "frontier limit exceeded".to_string(),
+                        }));
+                    }
+                    let handle = match Self::open_child_directory(parent, child, &observed) {
+                        Ok(handle) => handle,
+                        // A directory that cannot be opened (TCC refusal, a child that vanished,
+                        // a stat/open race) is a skipped subtree, not a fatal scan error: report
+                        // it as an error record so the totals covering it become lower bounds and
+                        // an ancestor delete still fails closed on the incomplete coverage.
+                        Err(error) => {
+                            return Ok(WalkEntry::Error(ErrorRecord {
+                                path: child.path.clone(),
+                                kind: crate::error_kind_for_io(&error),
+                                reason: crate::reason_for_io(&error),
+                                detail: error.to_string(),
+                            }));
+                        }
+                    };
+                    let metadata = Self::metadata_to_entry(
+                        &child.path,
+                        child.file_name.clone(),
+                        &observed,
+                        Some(handle.mount_identity.clone()),
+                        link_count,
+                    );
+                    Ok(WalkEntry::Directory(OpenedDirectory { metadata, handle }))
+                }
+                EntryKind::File => Ok(WalkEntry::File(Self::metadata_to_entry(
+                    &child.path,
+                    child.file_name.clone(),
+                    &observed,
+                    None,
+                    link_count,
+                ))),
+                EntryKind::Symlink => Ok(WalkEntry::Link(Self::metadata_to_entry(
+                    &child.path,
+                    child.file_name.clone(),
+                    &observed,
+                    None,
+                    link_count,
+                ))),
+                EntryKind::ReparsePoint => Ok(WalkEntry::Boundary(BoundaryRecord {
+                    path: child.path.clone(),
+                    kind: BoundaryKind::ReparsePoint,
+                    reason: ReasonCode::UnsupportedFilesystem,
+                    detail: "macOS reparse-like entry is unsupported".to_string(),
+                })),
+                EntryKind::Other => Ok(WalkEntry::Boundary(BoundaryRecord {
+                    path: child.path.clone(),
+                    kind: BoundaryKind::OtherFilesystem,
+                    reason: ReasonCode::UnsupportedFilesystem,
+                    detail: "special filesystem entry rejected".to_string(),
+                })),
+            }
+        }
+    }
+
     impl PlatformScanner for MacosPlatformScanner {
         fn monitor_directory(
             &self,
@@ -1161,152 +1355,27 @@ mod backend {
             cancel: &CancellationToken,
             directory_admission: DirectoryHandleAdmission,
         ) -> Result<WalkEntry<Self::DirectoryHandle>, PlatformError> {
-            child.validate_for_parent(&parent.path).map_err(|error| {
-                PlatformError::InvalidDirectoryEntry {
-                    parent: parent.path.clone(),
-                    detail: error.to_string(),
-                }
-            })?;
-            Self::ensure_not_cancelled(cancel)?;
-            Self::assert_directory_identity_current(parent)?;
+            Self::inspect_child_observation(parent, child, cancel, directory_admission, None)
+        }
 
-            // A bulk page already supplied this child's attributes; otherwise inspect it
-            // directly with fstatat as before.
-            let NativeName::UnixBytes(child_bytes) = &child.file_name else {
-                unreachable!("this backend only produces UnixBytes child names")
-            };
-            let (observed, from_bulk) =
-                if let Some(stat) = parent.bulk_attributes.get(child_bytes).cloned() {
-                    (ObservedMetadata { stat }, true)
-                } else {
-                    let parent_fd = Self::dirfd(parent)
-                        .map_err(|error| PlatformError::io(parent.path.clone(), error))?;
-                    let child_name = Self::name_c_string(&child.file_name)?;
-                    match Self::fstatat_raw(parent_fd, &child_name) {
-                        Ok(value) => (value, false),
-                        Err(error) => {
-                            return Ok(WalkEntry::Error(ErrorRecord {
-                                path: child.path.clone(),
-                                kind: crate::error_kind_for_io(&error),
-                                reason: crate::reason_for_io(&error),
-                                detail: error.to_string(),
-                            }));
-                        }
-                    }
-                };
-            // getattrlistbulk does not report the hard-link count, so a bulk-decoded row carries
-            // an honest unknown instead of a fabricated zero; fstatat rows keep the real count.
-            let link_count = if from_bulk {
-                CountValue::Unknown {
-                    reason: ReasonCode::IncompleteStreamCoverage,
-                }
-            } else {
-                known_count(observed.stat.st_nlink as u128)
-            };
-
-            match kind_from_mode(observed.stat.st_mode) {
-                EntryKind::Directory => {
-                    // Bulk attributes can describe the covered vnode beneath a mount. A
-                    // no-follow stat of the name sees the mounted object without activating
-                    // it via openat. Keep files on the bulk path; directories need this check.
-                    let observed =
-                        if from_bulk && observed.stat.st_dev as u64 == parent.identity.device {
-                            let parent_fd = Self::dirfd(parent)
-                                .map_err(|error| PlatformError::io(parent.path.clone(), error))?;
-                            let name = Self::name_c_string(&child.file_name)?;
-                            match Self::fstatat_raw(parent_fd, &name) {
-                                Ok(current) => current,
-                                Err(error) => {
-                                    return Ok(WalkEntry::Error(ErrorRecord {
-                                        path: child.path.clone(),
-                                        kind: crate::error_kind_for_io(&error),
-                                        reason: crate::reason_for_io(&error),
-                                        detail: error.to_string(),
-                                    }));
-                                }
-                            }
-                        } else {
-                            observed
-                        };
-                    // Reject an already observed foreign device before opening its directory:
-                    // openat can trigger an automount and block even though traversal would
-                    // subsequently refuse that mount. Equality is only a preliminary check;
-                    // the opened handle still supplies the authoritative mount identity.
-                    if observed.stat.st_dev as u64 != parent.identity.device {
-                        return Ok(WalkEntry::Boundary(BoundaryRecord {
-                            path: child.path.clone(),
-                            kind: BoundaryKind::Mount,
-                            reason: ReasonCode::UnsupportedFilesystem,
-                            detail: "entry crosses the observed device boundary".to_string(),
-                        }));
-                    }
-                    if kind_from_mode(observed.stat.st_mode) != EntryKind::Directory {
-                        return Ok(WalkEntry::Error(ErrorRecord {
-                            path: child.path.clone(),
-                            kind: crate::ErrorKind::Io,
-                            reason: ReasonCode::UnknownIdentity,
-                            detail: "directory type changed after bulk observation".to_string(),
-                        }));
-                    }
-                    if directory_admission == DirectoryHandleAdmission::Deny {
-                        return Ok(WalkEntry::Boundary(BoundaryRecord {
-                            path: child.path.clone(),
-                            kind: BoundaryKind::ResourceLimit,
-                            reason: ReasonCode::ResourceLimit,
-                            detail: "frontier limit exceeded".to_string(),
-                        }));
-                    }
-                    let handle = match Self::open_child_directory(parent, child, &observed) {
-                        Ok(handle) => handle,
-                        // A directory that cannot be opened (TCC refusal, a child that vanished,
-                        // a stat/open race) is a skipped subtree, not a fatal scan error: report
-                        // it as an error record so the totals covering it become lower bounds and
-                        // an ancestor delete still fails closed on the incomplete coverage.
-                        Err(error) => {
-                            return Ok(WalkEntry::Error(ErrorRecord {
-                                path: child.path.clone(),
-                                kind: crate::error_kind_for_io(&error),
-                                reason: crate::reason_for_io(&error),
-                                detail: error.to_string(),
-                            }));
-                        }
-                    };
-                    let metadata = Self::metadata_to_entry(
-                        &child.path,
-                        child.file_name.clone(),
-                        &observed,
-                        Some(handle.mount_identity.clone()),
-                        link_count,
-                    );
-                    Ok(WalkEntry::Directory(OpenedDirectory { metadata, handle }))
-                }
-                EntryKind::File => Ok(WalkEntry::File(Self::metadata_to_entry(
-                    &child.path,
-                    child.file_name.clone(),
-                    &observed,
-                    None,
-                    link_count,
-                ))),
-                EntryKind::Symlink => Ok(WalkEntry::Link(Self::metadata_to_entry(
-                    &child.path,
-                    child.file_name.clone(),
-                    &observed,
-                    None,
-                    link_count,
-                ))),
-                EntryKind::ReparsePoint => Ok(WalkEntry::Boundary(BoundaryRecord {
-                    path: child.path.clone(),
-                    kind: BoundaryKind::ReparsePoint,
-                    reason: ReasonCode::UnsupportedFilesystem,
-                    detail: "macOS reparse-like entry is unsupported".to_string(),
-                })),
-                EntryKind::Other => Ok(WalkEntry::Boundary(BoundaryRecord {
-                    path: child.path.clone(),
-                    kind: BoundaryKind::OtherFilesystem,
-                    reason: ReasonCode::UnsupportedFilesystem,
-                    detail: "special filesystem entry rejected".to_string(),
-                })),
-            }
+        fn inspect_child_with_expected_directory(
+            &self,
+            parent: &Self::DirectoryHandle,
+            child: &DirectoryEntryRecord,
+            cancel: &CancellationToken,
+            expected: &EntryMetadata,
+            directory_admission: DirectoryHandleAdmission,
+        ) -> Result<WalkEntry<Self::DirectoryHandle>, PlatformError> {
+            crate::validate_expected_directory_request(child, expected)?;
+            let entry = Self::inspect_child_observation(
+                parent,
+                child,
+                cancel,
+                directory_admission,
+                Some(expected),
+            )?;
+            crate::validate_expected_directory_result(&entry, expected)?;
+            Ok(entry)
         }
 
         fn is_same_mount(
@@ -1464,6 +1533,165 @@ mod backend {
     mod device_boundary_tests {
         use super::*;
         use std::os::unix::fs::MetadataExt;
+
+        #[test]
+        fn known_directory_preview_is_the_only_different_device_admission() {
+            let scanner = MacosPlatformScanner::new();
+            let cancel = CancellationToken::new();
+            let root = scanner
+                .admit_root(&ScanRoot::new("/").unwrap(), &cancel)
+                .unwrap();
+            let known = scanner
+                .admit_root(&ScanRoot::new("/dev").unwrap(), &cancel)
+                .unwrap();
+            let child = DirectoryEntryRecord::from_parent_and_name(
+                Path::new("/"),
+                NativeName::unix(b"dev".to_vec()),
+            )
+            .unwrap();
+            let observed = MacosPlatformScanner::fstatat_raw(
+                MacosPlatformScanner::dirfd(&root.directory).unwrap(),
+                &MacosPlatformScanner::name_c_string(&child.file_name).unwrap(),
+            )
+            .unwrap();
+            // Independent host metadata pins the actually different device, rather than
+            // manufacturing the production predicate's expected result from its constant.
+            let parent_device = fs::symlink_metadata("/").unwrap().dev();
+            assert_ne!(fs::symlink_metadata("/dev").unwrap().dev(), parent_device);
+            assert!(
+                !MacosPlatformScanner::directory_device_admitted(parent_device, &observed, None)
+                    .unwrap()
+            );
+            assert!(
+                MacosPlatformScanner::directory_device_admitted(
+                    parent_device,
+                    &observed,
+                    Some(&known.metadata)
+                )
+                .unwrap()
+            );
+            assert!(matches!(
+                scanner
+                    .inspect_child(&root.directory, &child, &cancel)
+                    .unwrap(),
+                WalkEntry::Boundary(BoundaryRecord {
+                    kind: BoundaryKind::Mount,
+                    ..
+                })
+            ));
+            let opened = crate::inspect_bound_child_with_expected_directory(
+                &scanner,
+                &root.directory,
+                Path::new("/"),
+                &child,
+                &cancel,
+                &known.metadata,
+                DirectoryHandleAdmission::Allow,
+            )
+            .unwrap();
+            let WalkEntry::Directory(opened) = opened else {
+                panic!("known mounted directory was not admitted");
+            };
+            assert_eq!(opened.metadata.identity, known.metadata.identity);
+            assert_eq!(
+                opened.metadata.filesystem_identity,
+                known.metadata.filesystem_identity
+            );
+            assert_eq!(
+                opened.metadata.mount_identity,
+                known.metadata.mount_identity
+            );
+            for mismatch in ["object", "filesystem", "mount", "path", "missing"] {
+                let mut expected = known.metadata.clone();
+                match mismatch {
+                    "object" => {
+                        expected.identity = Some(EntryIdentity::from_unix(parent_device, 0))
+                    }
+                    "filesystem" => {
+                        expected.filesystem_identity.as_mut().unwrap().device = parent_device
+                    }
+                    "mount" => {
+                        let mount = expected.mount_identity.as_mut().unwrap();
+                        mount.value = mount.value.wrapping_add(1);
+                    }
+                    "path" => expected.path = PathBuf::from("/unadmitted"),
+                    "missing" => expected.mount_identity = None,
+                    _ => unreachable!(),
+                }
+                assert!(
+                    matches!(
+                        crate::inspect_bound_child_with_expected_directory(
+                            &scanner,
+                            &root.directory,
+                            Path::new("/"),
+                            &child,
+                            &cancel,
+                            &expected,
+                            DirectoryHandleAdmission::Allow,
+                        ),
+                        Err(PlatformError::InvalidDirectoryEntry { .. })
+                    ),
+                    "{mismatch}"
+                );
+            }
+        }
+
+        #[test]
+        fn expected_directory_keeps_handle_denial_and_changed_type_nofollow() {
+            let fixture = tempfile::tempdir().unwrap();
+            let path = fixture.path().canonicalize().unwrap();
+            let child_path = path.join("known");
+            fs::create_dir(&child_path).unwrap();
+            fs::write(child_path.join("payload"), b"original directory").unwrap();
+            let scanner = MacosPlatformScanner::new();
+            let cancel = CancellationToken::new();
+            let root = scanner
+                .admit_root(&ScanRoot::new(&path).unwrap(), &cancel)
+                .unwrap();
+            let expected = scanner
+                .admit_root(&ScanRoot::new(&child_path).unwrap(), &cancel)
+                .unwrap()
+                .metadata;
+            let child = DirectoryEntryRecord::from_parent_and_name(
+                &path,
+                NativeName::unix(b"known".to_vec()),
+            )
+            .unwrap();
+            assert!(matches!(
+                crate::inspect_bound_child_with_expected_directory(
+                    &scanner,
+                    &root.directory,
+                    &path,
+                    &child,
+                    &cancel,
+                    &expected,
+                    DirectoryHandleAdmission::Deny,
+                )
+                .unwrap(),
+                WalkEntry::Boundary(BoundaryRecord {
+                    kind: BoundaryKind::ResourceLimit,
+                    ..
+                })
+            ));
+            fs::rename(&child_path, path.join("preserved")).unwrap();
+            std::os::unix::fs::symlink("preserved", &child_path).unwrap();
+            assert!(matches!(
+                crate::inspect_bound_child_with_expected_directory(
+                    &scanner,
+                    &root.directory,
+                    &path,
+                    &child,
+                    &cancel,
+                    &expected,
+                    DirectoryHandleAdmission::Allow,
+                ),
+                Err(PlatformError::InvalidDirectoryEntry { .. })
+            ));
+            assert_eq!(
+                fs::read(path.join("preserved/payload")).unwrap(),
+                b"original directory"
+            );
+        }
 
         #[test]
         fn bulk_file_lengths_refuse_foreign_devices_and_invalid_native_lengths() {

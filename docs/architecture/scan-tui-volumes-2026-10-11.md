@@ -1,5 +1,10 @@
 # macOS System + Data size browsing — 2026-10-11
 
+Historical validation record. The size-browser-only scope distinction below was superseded
+by the [shared System/Data scan policy on 2026-10-15](system-data-scan-policy-2026-10-15.md).
+The measurements and checks here still describe the October 11 build, including its separate
+full-fact inventory behavior; they are not validation of the later unified implementation.
+
 `scan --tui /` previously counted only its original mount, approximately 19 GiB on the
 validation host, and silently removed the Data entrances. Ordinary macOS size browsing now
 independently admits `/System/Volumes/Data`, validates its native mount, and includes both

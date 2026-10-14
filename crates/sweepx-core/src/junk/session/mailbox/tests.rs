@@ -2,6 +2,37 @@ use super::*;
 use std::sync::mpsc::sync_channel;
 
 #[test]
+fn macos_root_physical_data_changes_require_full_replacement_scope() {
+    let physical = PathBuf::from("/System/Volumes/Data/Users/person/project/target");
+    let logical = PathBuf::from("/Users/person/project/target");
+    let roots = [PathBuf::from("/")];
+    assert!(watch_paths_for_macos_aliases(&roots, Some(vec![physical.clone()])).is_none());
+    for ancestor in ["/System/Volumes", "/System", "/"] {
+        assert!(
+            watch_paths_for_macos_aliases(&roots, Some(vec![PathBuf::from(ancestor)])).is_none(),
+            "coalesced {ancestor} scope still includes physical firmlink entrances"
+        );
+    }
+    assert_eq!(
+        watch_paths_for_macos_aliases(&roots, Some(vec![logical.clone()])),
+        Some(vec![logical])
+    );
+    assert_eq!(
+        watch_paths_for_macos_aliases(
+            &[PathBuf::from("/System/Volumes/Data/Users/person")],
+            Some(vec![physical.clone()]),
+        ),
+        Some(vec![physical])
+    );
+    let unrelated = PathBuf::from("/System/Volumes/Database/target");
+    assert_eq!(
+        watch_paths_for_macos_aliases(&roots, Some(vec![unrelated.clone()])),
+        Some(vec![unrelated])
+    );
+    assert!(watch_paths_for_macos_aliases(&roots, None).is_none());
+}
+
+#[test]
 fn backpressure_preserves_errors_and_reserved_terminal() {
     let shared = Arc::new(Shared::new(JunkSessionLimits {
         max_events: 1,

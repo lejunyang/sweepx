@@ -176,10 +176,12 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    /// Scan directories or analyze large files and duplicate content.
+    /// On macOS, / includes verified System and Data volumes with native alias deduplication.
     Scan {
         /// Browse directories with live paths and file sizes, or show --large-files/--duplicates results.
         /// Reuse this session's size results while browsing; press r to rescan the current directory.
-        /// Ordinary macOS browsing of / includes System and Data with verified alias deduplication.
+        /// macOS root scans include System and Data with verified alias deduplication in every mode.
         /// Unreadable entries and excluded volumes stay visible with reasons.
         #[arg(long)]
         tui: bool,
@@ -241,6 +243,7 @@ enum Commands {
     },
     /// Discover known rebuildable or disposable artifacts under the selected roots.
     /// Reports partial results when discovery or scan evidence is incomplete.
+    /// macOS / includes verified System and Data volumes, sharing the ordinary scan's alias deduplication.
     /// Cargo target candidates report current manifests and bounded workspace/default output for a parent-cwd/no-CLI model; ownership and activity remain unverified.
     Junk {
         /// Open the live junk view for explicit directory roots or --system. Space selects; d moves selected
@@ -248,7 +251,7 @@ enum Commands {
         /// Linux/macOS/Windows show historical caches first, then keep native change listeners alive.
         /// Changes refresh affected directories; listener gaps trigger a full fresh scan.
         /// Junk traversal allows up to 4,194,304 directories while retaining bounded candidate
-        /// evidence. Mount/permission gaps remain partial; macOS / keeps its initial mount scope.
+        /// evidence. Mount/permission gaps remain partial; macOS / includes verified System and Data.
         /// Enter opens a read-only directory breakdown. Space there records up to 32 review paths;
         /// q returns to candidates, and the latest review list is printed on exit without deleting.
         /// Only freshly verified rows can be moved; c pauses automatic refresh until manual refresh.

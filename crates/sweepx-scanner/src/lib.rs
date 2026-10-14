@@ -1,6 +1,7 @@
 mod acceleration;
 mod detail_rescan;
 mod locator_reader;
+mod volume_scope;
 
 pub use acceleration::{
     AcceleratedPreview, AccelerationDecision, AccelerationRefusal, qualify_acceleration,
@@ -36,7 +37,8 @@ use sweepx_platform::{
     BoundaryKind, BoundaryRecord, CancellationToken, DirectoryHandleAdmission, DirectoryReadLimits,
     EntryKind, EntryMetadata, HardLinkKey, PlatformError, PlatformScanner, RootAdmission,
     ScanResourceLimits, ScanRoot, WalkEntry, inspect_bound_child_with_directory_admission,
-    known_count, known_u128, lower_bound_u128, unknown_u128,
+    inspect_bound_child_with_expected_directory, known_count, known_u128, lower_bound_u128,
+    unknown_u128,
 };
 use thiserror::Error;
 
@@ -1240,6 +1242,8 @@ pub struct Scanner<P> {
     platform: P,
     options: ScannerOptions,
     monitor: Option<Arc<sweepx_platform::change_monitor::ChangeMonitor>>,
+    #[cfg(test)]
+    scope_override: Option<volume_scope::VolumeScope>,
 }
 
 #[derive(Debug)]
@@ -1366,6 +1370,14 @@ struct SubtreeScope<'a> {
     paths: &'a [PathBuf],
     classifier: &'a (dyn JunkClassifier + Sync),
 }
+
+/// Borrowed work selection and freshly admitted volume facts for one worker batch. Selection
+/// can reduce work, but it never expands native volume authority or qualifies an alias by text.
+#[derive(Clone, Copy)]
+struct TraversalScope<'a> {
+    subtree: Option<SubtreeScope<'a>>,
+    volumes: &'a volume_scope::VolumeScope,
+}
 impl SubtreeScope<'_> {
     fn selected(&self, path: &Path) -> bool {
         self.paths.iter().any(|selected| path.starts_with(selected))
@@ -1400,8 +1412,12 @@ fn prepare_directory_task<P: PlatformScanner + ?Sized>(
     limits: ScanResourceLimits,
     reuse: Option<&dyn SubtreeReuse>,
     allow_file_lengths: bool,
-    subtree_scope: Option<SubtreeScope<'_>>,
+    scope: TraversalScope<'_>,
 ) -> DirectoryTaskResult<P::DirectoryHandle> {
+    let TraversalScope {
+        subtree: subtree_scope,
+        volumes: volume_scope,
+    } = scope;
     let DirectoryTask {
         ticket,
         mut current,
@@ -1586,6 +1602,7 @@ fn prepare_directory_task<P: PlatformScanner + ?Sized>(
         // with a cloned native ancestor recipe. The backend's current native observation supplies
         // those facts independently of an on-disk cache or delayed change-history delivery.
         if allow_file_lengths
+            && !volume_scope.tracks_entrance(&directory_entry.path)
             && native_basename_marker(&directory_entry.file_name).as_deref() != Some(".git")
             && let Some(observed) = platform.observe_file_length(&current.handle, &directory_entry)
             && observed.path == directory_entry.path
@@ -1598,6 +1615,7 @@ fn prepare_directory_task<P: PlatformScanner + ?Sized>(
         // misaligned plan must not suppress directory traversal or turn a link into a file.
         if let Some(PlannedEntry::ReuseFile(cached)) =
             plan.as_ref().and_then(|entries| entries.get(index))
+            && !volume_scope.tracks_entrance(&directory_entry.path)
             && cached.path == directory_entry.path
             && cached.file_name == directory_entry.file_name
             // Keep gitfile native lineage available to post-scan boundary interpretation.
@@ -1611,6 +1629,7 @@ fn prepare_directory_task<P: PlatformScanner + ?Sized>(
             inspected.push(WalkEntry::CachedFile(cached.clone()));
             continue;
         }
+        let expected_entrance = volume_scope.entrance_expectation(&directory_entry);
         match inspect_directory_entry(
             platform,
             &current.handle,
@@ -1618,6 +1637,7 @@ fn prepare_directory_task<P: PlatformScanner + ?Sized>(
             &directory_entry,
             cancel,
             permit_available,
+            expected_entrance.as_ref(),
         ) {
             Ok(WalkEntry::Directory(opened)) => {
                 opened_child_permits += 1;
@@ -1659,18 +1679,33 @@ fn inspect_directory_entry<P: PlatformScanner + ?Sized>(
     directory_entry: &sweepx_platform::DirectoryEntryRecord,
     cancel: &CancellationToken,
     child_directory_permit: bool,
+    expected: Option<&EntryMetadata>,
 ) -> Result<WalkEntry<P::DirectoryHandle>, PlatformError> {
+    let admission = if child_directory_permit {
+        DirectoryHandleAdmission::Allow
+    } else {
+        DirectoryHandleAdmission::Deny
+    };
+    if let Some(expected) = expected {
+        // Only a preflight native entrance may cross a device before the ordinary mount
+        // filter. The platform rechecks that exact object after its relative directory open.
+        return inspect_bound_child_with_expected_directory(
+            platform,
+            parent,
+            parent_path,
+            directory_entry,
+            cancel,
+            expected,
+            admission,
+        );
+    }
     inspect_bound_child_with_directory_admission(
         platform,
         parent,
         parent_path,
         directory_entry,
         cancel,
-        if child_directory_permit {
-            DirectoryHandleAdmission::Allow
-        } else {
-            DirectoryHandleAdmission::Deny
-        },
+        admission,
     )
 }
 
@@ -1683,6 +1718,8 @@ where
             platform,
             options,
             monitor: None,
+            #[cfg(test)]
+            scope_override: None,
         }
     }
 
@@ -2097,6 +2134,35 @@ where
             directory,
         } = admission;
         let root_path = root.path().to_path_buf();
+        // All analyses share native System/Data admission. A display path or a cached row
+        // cannot expand this fresh scope; every firmlink alias is checked again when observed.
+        #[cfg(test)]
+        let volume_scope = self.scope_override.clone().map_or_else(
+            || volume_scope::VolumeScope::prepare(&self.platform, &root_metadata, cancel),
+            Ok,
+        );
+        #[cfg(not(test))]
+        let volume_scope =
+            volume_scope::VolumeScope::prepare(&self.platform, &root_metadata, cancel);
+        let volume_scope = match volume_scope {
+            Ok(scope) => scope,
+            Err(volume_scope::VolumeScopeError::Cancelled) => {
+                // Cancellation can race RootAccepted while preflight admits the Data volume.
+                // Preserve the ordinary cancelled result contract rather than reporting failure.
+                sink.push_progress(
+                    &root_path,
+                    ProgressEvent::Cancelled {
+                        path: root_path.clone(),
+                    },
+                )?;
+                sink.push_aggregate(
+                    &root_path,
+                    cancelled_root_aggregate(&self.options.scan_id, root_identity.entry_id.clone()),
+                )?;
+                return Ok(());
+            }
+            Err(error) => return Err(error.into_platform_error(&root_path).into()),
+        };
 
         if let Some(monitor) = &self.monitor
             && monitor.is_available()
@@ -2204,6 +2270,7 @@ where
                 let result_tx = result_tx.clone();
                 let platform = &self.platform;
                 let limits = self.options.resource_limits;
+                let native_scope = &volume_scope;
                 // `reuse` is `Copy` (an optional shared reference) and is captured per worker.
                 scope.spawn(move || {
                     loop {
@@ -2227,7 +2294,10 @@ where
                                 limits,
                                 reuse,
                                 allow_file_lengths,
-                                subtree_scope,
+                                TraversalScope {
+                                    subtree: subtree_scope,
+                                    volumes: native_scope,
+                                },
                             )
                         }))
                         .unwrap_or(DirectoryTaskResult {
@@ -2527,67 +2597,58 @@ where
                                     .into());
                                 }
                                 opened_child_permits -= 1;
-                                let metadata = opened.metadata;
-                                let same_mount = if root_metadata.mount_identity.is_none()
-                                    || metadata.mount_identity.is_none()
-                                {
-                                    Err(PlatformError::Unsupported(
-                                        "mount identity unavailable".to_string(),
-                                    ))
-                                } else {
-                                    self.platform.is_same_mount(&root_metadata, &metadata)
-                                };
-                                match same_mount {
-                                    Ok(true) => {}
-                                    Ok(false) => {
-                                        let boundary = BoundaryRecord {
-                                            path: metadata.path.clone(),
-                                            kind: BoundaryKind::Mount,
-                                            reason: ReasonCode::UnsupportedFilesystem,
-                                            detail: "entry crosses the initial mount boundary"
-                                                .to_string(),
+                                let observed_path = opened.metadata.path.clone();
+                                let opened = match volume_scope.restrict_child(
+                                    &self.platform,
+                                    &root_metadata,
+                                    WalkEntry::Directory(opened),
+                                ) {
+                                    Ok(WalkEntry::Directory(opened)) => opened,
+                                    result => {
+                                        let boundary = match result {
+                                            Ok(WalkEntry::Boundary(boundary)) => boundary,
+                                            Err(volume_scope::VolumeScopeError::IdentityUnavailable) => BoundaryRecord {
+                                                path: observed_path,
+                                                kind: BoundaryKind::Mount,
+                                                reason: ReasonCode::UnknownIdentity,
+                                                detail: "mount identity unavailable; refusing to cross uncertain boundary".into(),
+                                            },
+                                            Err(error) => return Err(error.into_platform_error(&path).into()),
+                                            _ => return Err(PlatformError::Unsupported("volume admission changed directory kind".into()).into()),
                                         };
                                         note_boundary(
                                             &mut directory_states,
-                                            &metadata.path,
+                                            &boundary.path,
                                             boundary.reason.clone(),
                                         );
                                         sink.push_progress(
                                             &root_path,
                                             ProgressEvent::Boundary {
-                                                path: metadata.path.clone(),
+                                                path: boundary.path.clone(),
                                                 kind: boundary.kind.clone(),
                                             },
                                         )?;
                                         sink.push_boundary(&root_path, boundary)?;
                                         continue;
                                     }
-                                    Err(_) => {
-                                        let boundary = BoundaryRecord {
-                                    path: metadata.path.clone(),
-                                    kind: BoundaryKind::Mount,
-                                    reason: ReasonCode::UnknownIdentity,
-                                    detail: "mount identity unavailable; refusing to cross uncertain boundary".to_string(),
                                 };
-                                        note_boundary(
-                                            &mut directory_states,
-                                            &metadata.path,
-                                            boundary.reason.clone(),
-                                        );
-                                        sink.push_progress(
-                                            &root_path,
-                                            ProgressEvent::Boundary {
-                                                path: metadata.path.clone(),
-                                                kind: boundary.kind.clone(),
+                                let metadata = opened.metadata;
+                                let alias = volume_scope
+                                    .is_counted_alias(&metadata)
+                                    .map_err(|error| error.into_platform_error(&metadata.path))?
+                                    && subtree_scope.is_none_or(|scope| {
+                                        volume_scope.aliases.get(&metadata.path).is_none_or(
+                                            |logical| {
+                                                // Shallow ancestors supply markers, not complete
+                                                // coverage of the logical entrance's descendants.
+                                                scope.selected(&logical.path)
                                             },
-                                        )?;
-                                        sink.push_boundary(&root_path, boundary)?;
-                                        continue;
-                                    }
-                                }
+                                        )
+                                    });
 
-                                let descend =
-                                    subtree_scope.is_none_or(|scope| scope.related(&metadata.path));
+                                let descend = !alias
+                                    && subtree_scope
+                                        .is_none_or(|scope| scope.related(&metadata.path));
                                 if descend
                                     && sink
                                         .retained_aggregate_count()
@@ -2629,7 +2690,7 @@ where
                                     &metadata,
                                 );
                                 let native_component = native_path_component(&identity, &metadata);
-                                let scanned = scanned_entry_from_metadata(
+                                let mut scanned = scanned_entry_from_metadata(
                                     &self.options.scan_id,
                                     &metadata,
                                     identity.clone(),
@@ -2641,6 +2702,13 @@ where
                                     ),
                                     complete_coverage(),
                                 );
+                                if alias {
+                                    // Retain a navigable alias row without inventing a zero size or
+                                    // a second candidate. Its verified logical entrance owns totals.
+                                    scanned.logical_bytes = EvidenceValue::NotChecked {
+                                        reason: ReasonCode::NotRevalidated,
+                                    };
+                                }
                                 sink.push_progress(
                                     &root_path,
                                     ProgressEvent::EntryObserved {
@@ -2712,6 +2780,9 @@ where
                                 sink.note_cached_file(&current.identity.entry_id, &cached);
                             }
                             WalkEntry::File(metadata) => {
+                                volume_scope
+                                    .verify_entrance(&metadata)
+                                    .map_err(|error| error.into_platform_error(&metadata.path))?;
                                 let identity = scan_object_identity(
                                     entry_id,
                                     root_identity.entry_id.clone(),
@@ -2746,6 +2817,9 @@ where
                                 sink.push_entry(&root_path, scanned)?;
                             }
                             WalkEntry::Link(metadata) => {
+                                volume_scope
+                                    .verify_entrance(&metadata)
+                                    .map_err(|error| error.into_platform_error(&metadata.path))?;
                                 let identity = scan_object_identity(
                                     entry_id,
                                     root_identity.entry_id.clone(),
@@ -3638,6 +3712,8 @@ fn native_basename_marker(name: &NativeName) -> Option<String> {
 #[cfg(test)]
 mod tests {
     mod early_candidates;
+    #[path = "volume_scope.rs"]
+    mod volume_scope_tests;
     use std::collections::BTreeMap;
     #[cfg(all(target_os = "linux", feature = "platform-linux"))]
     use std::fs;
