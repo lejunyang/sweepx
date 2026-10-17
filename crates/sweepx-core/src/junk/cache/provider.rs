@@ -1188,7 +1188,7 @@ mod tests {
         };
         let (_fixture, cache, roots) = seeded_cache();
         let root = &roots[0];
-        fs::create_dir(root.join("user-data-child")).unwrap();
+        fs::create_dir_all(root.join("user-data-child/wheels")).unwrap();
         let project = JunkService::built_in().unwrap();
         let empty_evidence = PlatformJunkEvidence::default();
         let project_classifier = project.with_platform(&[], &empty_evidence);
@@ -1218,10 +1218,17 @@ mod tests {
         let rules = load_platform_junk_rules()
             .unwrap()
             .into_iter()
-            .filter(|rule| rule.id == "macos.user-caches")
+            .filter(|rule| rule.id == "tool.pip-cache")
             .collect::<Vec<_>>();
         assert_eq!(rules.len(), 1);
-        let classifier = project.with_platform(&rules, &empty_evidence);
+        // A new platform context needs a real native cache binding. The previous generic
+        // depth-only fixture incorrectly treated any root's child as an application cache.
+        let evidence = PlatformJunkEvidence::precompute_with(
+            &rules,
+            |_| Some(root.join("user-data-child")),
+            Vec::new(),
+        );
+        let classifier = project.with_platform(&rules, &evidence);
         let new_context = classifier.classification_context_digest().unwrap();
         let empty_log = |_: &[&Path], _: FsEventId| {
             Ok(ChangeLog {

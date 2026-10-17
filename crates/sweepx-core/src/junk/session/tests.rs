@@ -84,6 +84,8 @@ fn native_closed_candidate_reaches_session_mailbox_before_unrelated_subtree() {
             limits,
             retained_bytes: 0,
             retained_rows: 0,
+            continue_on_candidate_limit: false,
+            candidate_limit_reached: false,
             rules_digest: [0; 32],
             observed: 0,
         },
@@ -2844,4 +2846,113 @@ fn benchmark_changed_directory_revision_against_warm_full_revision() {
         fs::write(output, serde_json::to_vec_pretty(&result).unwrap()).unwrap();
     }
     println!("{result}");
+}
+
+#[test]
+fn deep_scope_keeps_project_roots_and_includes_fresh_platform_rules() {
+    use crate::junk::platform::{PlatformJunkEvidence, load_platform_junk_rules};
+    let fixture = tempfile::tempdir().unwrap();
+    let base = fixture_root(&fixture);
+    let root = base.join("disk");
+    fs::create_dir_all(&root).unwrap();
+    let target = project(&root, "app", b"build payload");
+    let cache = root.join("pip-cache");
+    fs::create_dir_all(cache.join("wheels")).unwrap();
+    fs::write(cache.join("wheels/payload"), b"cached wheel bytes").unwrap();
+    let mut worker = controlled_worker(&root);
+    worker.request = JunkSessionRequest::deep(vec![root.clone()]);
+    worker.request.cache_dir = Some(base.join("history"));
+    let run = |worker: &mut Worker, revision| {
+        let rules: Vec<_> = load_platform_junk_rules()
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.id == "tool.pip-cache")
+            .collect();
+        let evidence =
+            PlatformJunkEvidence::precompute_with(&rules, |_| Some(cache.clone()), Vec::new());
+        let shared = Arc::new(Shared::new(worker.request.limits));
+        let job = Job {
+            revision: JunkSessionRevision(revision),
+            selected: None,
+            paths: None,
+            cancel: CancellationToken::new(),
+        };
+        let mut writer = Writer::new(Arc::clone(&shared), job.revision, job.cancel.clone());
+        worker
+            .run_with_discovery(&job, &mut writer, |_| {
+                // Regular discovery would scan only cache; deep scope must retain the disk root.
+                Ok((PlatformJunkSetup { rules, evidence }, vec![cache.clone()]))
+            })
+            .unwrap();
+        let session = JunkSession { shared };
+        let events = drain(&session, job.revision);
+        session.close();
+        events
+    };
+    let first = run(&mut worker, 1);
+    assert!(matches!(
+        first.last().unwrap().kind,
+        JunkSessionEventKind::Completed {
+            outcome: JunkSessionOutcome::Complete,
+            ..
+        }
+    ));
+    let rows = current(&first);
+    let rules: BTreeSet<_> = rows
+        .values()
+        .map(|row| row.candidate.rule_id.as_str())
+        .collect();
+    assert_eq!(rules, BTreeSet::from(["rust.target", "tool.pip-cache"]));
+    for row in rows.values() {
+        let payload = if row.candidate.rule_id == "rust.target" {
+            target.join("payload")
+        } else {
+            cache.join("wheels/payload")
+        };
+        assert_eq!(
+            row.logical_bytes(),
+            &sweepx_platform::known_u128(u128::from(fs::symlink_metadata(payload).unwrap().len()))
+        );
+    }
+    fs::rename(cache.join("wheels"), cache.join("no-longer-a-marker")).unwrap();
+    let second = current(&run(&mut worker, 2));
+    assert_eq!(second.len(), 1);
+    assert_eq!(
+        second.values().next().unwrap().candidate.rule_id,
+        "rust.target"
+    );
+    assert!(cache.join("no-longer-a-marker/payload").exists());
+}
+
+#[test]
+fn deep_candidate_limit_preserves_bounded_rows_and_finishes_read_only_traversal() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture_root(&fixture);
+    let expected: BTreeSet<_> = (0..12)
+        .map(|n| project(&root, &format!("project-{n}"), b"retained payload").join("payload"))
+        .collect();
+    let observed = Arc::new(Mutex::new(BTreeSet::new()));
+    let callback = Arc::clone(&observed);
+    let mut worker = controlled_worker(&root);
+    worker.request.continue_on_candidate_limit = true;
+    worker.request.limits.max_candidates = 1;
+    worker.presentations.observe_path = Some(Box::new(move |path| {
+        if path.file_name().is_some_and(|name| name == "payload") {
+            callback.lock().unwrap().insert(path.to_path_buf());
+        }
+    }));
+    let events = controlled_revision(&mut worker, 1, None);
+    assert_eq!(*observed.lock().unwrap(), expected);
+    assert_eq!(current(&events).len(), 1);
+    assert!(events.iter().any(|event| matches!(&event.kind,
+        JunkSessionEventKind::Error(failure) if failure.code == "resource_limit")));
+    assert!(matches!(
+        events.last().unwrap().kind,
+        JunkSessionEventKind::Completed {
+            outcome: JunkSessionOutcome::Partial,
+            replaced: false,
+            ..
+        }
+    ));
+    assert_eq!(worker.current.len(), 1);
 }

@@ -109,7 +109,7 @@ fn cargo_context_reports_current_declarations_in_both_locales_without_ownership(
             }
             contexts.push(row["projectContext"].clone());
             let human = cli_command()
-                .args(["--locale", locale, "junk"])
+                .args(["--locale", locale, "junk", "--details"])
                 .arg(&root)
                 .output()
                 .unwrap();
@@ -2389,7 +2389,7 @@ fn project_execution_policy_is_locale_stable_and_generic_outputs_stay_visible() 
             json!(["project_report_only", "project_activity_not_verified"])
         );
         let human = cli_command()
-            .args(["--locale", locale, "junk"])
+            .args(["--locale", locale, "junk", "--details"])
             .arg(&root)
             .assert()
             .success()

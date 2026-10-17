@@ -20,9 +20,19 @@ use sweepx_tui::junk::{
 #[cfg(target_os = "linux")]
 mod quarantine;
 
+/// Scan scope selected by the CLI before any worker starts.
+pub(crate) enum ScanScope {
+    /// Current platform cache discovery, optionally restricted to rule IDs.
+    Regular(Vec<String>),
+    /// A manual full-disk pass with platform and project rules.
+    Deep,
+    /// Explicit roots using project rules.
+    Directories,
+}
+
 pub(crate) fn run(
     roots: Vec<PathBuf>,
-    system_rules: Option<Vec<String>>,
+    scope: ScanScope,
     locale: Locale,
     unit: HumanSizeUnit,
     sort: ScanSort,
@@ -34,17 +44,22 @@ pub(crate) fn run(
         eprintln!("--quarantine-dir is available only for Linux temporary objects");
         return ExitCode::from(2);
     }
-    let mut request = if let Some(rule_ids) = system_rules {
-        let mut request = JunkSessionRequest::system();
-        request.platform_rule_ids = rule_ids;
-        request
-    } else {
-        JunkSessionRequest::new(roots)
+    let (scan_mode, mut request) = match scope {
+        ScanScope::Regular(rule_ids) => {
+            let mut request = JunkSessionRequest::system();
+            request.platform_rule_ids = rule_ids;
+            ("regular", request)
+        }
+        ScanScope::Deep => ("deep", JunkSessionRequest::deep(roots)),
+        ScanScope::Directories => ("custom", JunkSessionRequest::new(roots)),
     };
     if let Some(root) = cache_state_root {
         request.set_state_cache(root);
     }
-    request.watch = true;
+    // Disk-wide notifications continuously arrive from unrelated applications. Deep mode is
+    // one explicit pass, with manual refresh, so those events cannot schedule endless full walks.
+    request.watch = scan_mode != "deep";
+    let candidate_byte_budget = request.limits.max_candidate_bytes;
     let session = match JunkSession::start(request) {
         Ok(session) => session,
         Err(error) => {
@@ -52,7 +67,9 @@ pub(crate) fn run(
             return ExitCode::from(8);
         }
     };
-    let provider = Provider::new(session);
+    let mut provider = Provider::new(session);
+    provider.scan_mode = scan_mode;
+    provider.limits.bytes = candidate_byte_budget;
     #[cfg(target_os = "linux")]
     let provider = {
         let mut provider = provider;
@@ -85,6 +102,27 @@ impl JunkRow for Row {
     }
     fn rule(&self) -> &str {
         &self.row.candidate.rule_id
+    }
+    fn grouping(&self, locale: Locale) -> Option<sweepx_tui::junk::JunkGrouping> {
+        let group = sweepx_core::junk::organization::organize(&self.row.candidate);
+        Some(sweepx_tui::junk::JunkGrouping {
+            category: group.category.id().into(),
+            category_label: group.category.label(locale).into(),
+            owner: group.owner_key,
+            owner_label: group.owner_label,
+            named_application: group.named_application,
+        })
+    }
+    fn entry_identity(&self) -> Option<&str> {
+        Some(self.row.candidate.entry_id.as_str())
+    }
+    fn ancestor_identities(&self) -> Vec<&str> {
+        self.row
+            .candidate
+            .ancestor_ids
+            .iter()
+            .map(|id| id.as_str())
+            .collect()
     }
     fn evidence(&self) -> &str {
         &self.row.candidate.evidence
@@ -160,6 +198,7 @@ impl Default for RetentionLimits {
 }
 
 struct Provider {
+    scan_mode: &'static str,
     session: JunkSession,
     rows: BTreeMap<String, Arc<Row>>,
     historical: BTreeSet<String>,
@@ -207,6 +246,7 @@ pub(crate) fn mutation_permit() -> Result<MutationPermit, String> {
 impl Provider {
     fn new(session: JunkSession) -> Self {
         Self {
+            scan_mode: "custom",
             session,
             rows: BTreeMap::new(),
             historical: BTreeSet::new(),
@@ -279,7 +319,9 @@ impl Provider {
         {
             self.complete = false;
             self.mark_historical(&row.key);
-            self.session.cancel();
+            if self.scan_mode != "deep" {
+                self.session.cancel();
+            }
             if self.rejected {
                 return None;
             }
@@ -450,10 +492,18 @@ impl Provider {
                 return Some(JunkEvent::Invalidated { revision, key });
             }
             JunkSessionEventKind::Boundary(boundary) => {
-                return Some(JunkEvent::Error {
-                    revision,
-                    message: format!("{}: {}", boundary.path.display(), boundary.detail),
-                });
+                let message = format!("{}: {}", boundary.path.display(), boundary.detail);
+                return Some(
+                    if matches!(
+                        boundary.kind,
+                        sweepx_platform::BoundaryKind::Symlink
+                            | sweepx_platform::BoundaryKind::RootSymlink
+                    ) {
+                        JunkEvent::Notice { revision, message }
+                    } else {
+                        JunkEvent::Error { revision, message }
+                    },
+                );
             }
             JunkSessionEventKind::Error(error)
             | JunkSessionEventKind::CacheWarning(error)
@@ -471,9 +521,13 @@ impl Provider {
                 if self.rejected {
                     // The worker may have completed before seeing our cooperative cancellation.
                     // A dropped bridge row still prevents a complete view or mutation authority.
-                    if outcome == JunkSessionOutcome::Complete {
+                    if outcome != JunkSessionOutcome::Failed {
                         outcome = JunkSessionOutcome::Partial;
                     }
+                    self.pending.push_back(JunkEvent::Error {
+                        revision,
+                        message: "Candidate retention limit reached; scan incomplete. Narrow the scan scope.".into(),
+                    });
                     replaced = false;
                 }
                 self.busy = false;
@@ -528,6 +582,15 @@ impl Provider {
 }
 
 impl JunkProvider for Provider {
+    fn grouped(&self) -> bool {
+        true
+    }
+    fn scan_mode(&self) -> &'static str {
+        self.scan_mode
+    }
+    fn candidate_byte_budget(&self) -> usize {
+        self.limits.bytes
+    }
     fn inspect(&mut self, key: &str) -> Result<JunkInspection, String> {
         if self.busy || self.mutation_busy() || !self.pending.is_empty() {
             return Err("complete the current scan or operation first".into());

@@ -423,6 +423,11 @@ fn cargo_profile_artifact(entry: &ScannedEntry) -> bool {
 pub fn scan_limits() -> sweepx_platform::ScanResourceLimits {
     sweepx_platform::ScanResourceLimits {
         max_visited_entries: 4_194_304,
+        // A disk-wide request is one root. Let it use the existing global allowance
+        // rather than stopping classification at half that budget; total retention
+        // remains bounded by the same 256 MiB shared limit.
+        max_classified_root_metadata_bytes: sweepx_platform::ScanResourceLimits::default()
+            .max_classified_metadata_bytes,
         ..Default::default()
     }
 }
@@ -686,3 +691,6 @@ mod tests {
         }
     }
 }
+
+/// Presentation categories and application/project location groups.
+pub mod organization;

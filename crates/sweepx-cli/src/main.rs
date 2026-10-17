@@ -25,6 +25,7 @@ use sweepx_core::junk::load_project_rules as load_project_junk_rules;
 mod browser_extension;
 mod browser_model_command;
 mod file_tui;
+mod junk_report;
 mod junk_timings;
 mod junk_tui;
 mod managed_cache;
@@ -241,18 +242,24 @@ enum Commands {
         #[command(subcommand)]
         command: CleanerCommands,
     },
-    /// Discover known rebuildable or disposable artifacts under the selected roots.
+    /// Discover known rebuildable or disposable artifacts. Defaults to regular cleanup.
+    /// --regular/--system discovers known cache roots; --deep scans the system disk.
+    /// Explicit roots retain project-only analysis.
     /// Reports partial results when discovery or scan evidence is incomplete.
     /// macOS / includes verified System and Data volumes, sharing the ordinary scan's alias deduplication.
     /// Cargo target candidates report current manifests and bounded workspace/default output for a parent-cwd/no-CLI model; ownership and activity remain unverified.
     Junk {
-        /// Open the live junk view for explicit directory roots or --system. Space selects; d moves selected
+        /// Open categories, applications/projects, and nested cleanup items. No roots defaults to
+        /// regular cleanup; --deep traverses the system disk with all supported rules.
+        /// Space selects eligible items; d previews the selection, Enter confirms. Moves selected
         /// current, complete directory candidates to Trash after native identity revalidation.
-        /// Linux/macOS/Windows show historical caches first, then keep native change listeners alive.
+        /// Linux/macOS/Windows show historical caches first. Regular/custom scans keep native
+        /// change listeners alive; --deep runs one pass and refreshes only on request.
         /// Changes refresh affected directories; listener gaps trigger a full fresh scan.
         /// Junk traversal allows up to 4,194,304 directories while retaining bounded candidate
         /// evidence. Mount/permission gaps remain partial; macOS / includes verified System and Data.
-        /// Enter opens a read-only directory breakdown. Space there records up to 32 review paths;
+        /// Enter expands groups and nested candidates; i or Enter on a leaf opens read-only files.
+        /// Space in file details records up to 32 review paths;
         /// q returns to candidates, and the latest review list is printed on exit without deleting.
         /// Only freshly verified rows can be moved; c pauses automatic refresh until manual refresh.
         /// Dart and SvelteKit content-profile candidates remain report-only while ownership is unverified.
@@ -271,8 +278,12 @@ enum Commands {
         /// Scan conservative platform cache roots; conflicts with explicit roots.
         /// Tool discovery has a 10s batch budget, a 2s probe timeout and a 64 KiB answer limit.
         /// npm inventory also bounds filesystem observations and reports incomplete discovery.
-        #[arg(long)]
+        #[arg(long, visible_alias = "regular", conflicts_with = "deep")]
         system: bool,
+        /// Deep cleanup scan: traverse the system disk with project and platform cache rules.
+        /// Other volumes and permission gaps remain explicit exclusions. No time limit is imposed.
+        #[arg(long, conflicts_with_all = ["system", "roots", "rules", "clean_temp"])]
+        deep: bool,
         /// Limit --system discovery and classification to a platform rule ID. Repeat to select
         /// multiple categories, e.g. --rule tool.npm-cache. Other categories are outside this scan.
         #[arg(long = "rule", requires = "system", value_name = "RULE_ID")]
@@ -762,12 +773,22 @@ fn main() -> ProcessExitCode {
             timings,
             details,
             system,
+            deep,
             rules,
             clean_temp,
             trash,
             quarantine_dir,
             roots,
         } => {
+            // No-root junk scans are the common cleanup path; explicit roots retain project scope.
+            let system = system || (!deep && roots.is_empty());
+            let mode = if deep {
+                "deep"
+            } else if system {
+                "regular"
+            } else {
+                "custom"
+            };
             if quarantine_dir.is_some() && !clean_temp && !tui {
                 eprintln!("--quarantine-dir requires --system with --clean-temp or --tui");
                 return ProcessExitCode::from(2);
@@ -782,7 +803,11 @@ fn main() -> ProcessExitCode {
                     eprintln!("{message}");
                     return ProcessExitCode::from(2);
                 }
-                let roots = match normalize_roots(&roots) {
+                let roots = match if deep {
+                    Ok(default_full_scan_roots())
+                } else {
+                    normalize_roots(&roots)
+                } {
                     Ok(roots) if system && !roots.is_empty() => {
                         eprintln!("junk --tui --system cannot be combined with explicit roots");
                         return ProcessExitCode::from(2);
@@ -803,7 +828,13 @@ fn main() -> ProcessExitCode {
                     .filter(|root| root.join("junk-cache").as_os_str().len() <= 64 * 1024);
                 return junk_tui::run(
                     roots,
-                    system.then_some(rules),
+                    if deep {
+                        junk_tui::ScanScope::Deep
+                    } else if system {
+                        junk_tui::ScanScope::Regular(rules)
+                    } else {
+                        junk_tui::ScanScope::Directories
+                    },
                     context.locale(),
                     size_unit,
                     sort,
@@ -824,7 +855,17 @@ fn main() -> ProcessExitCode {
                 false,
                 format == OutputFormat::Human,
             );
-            let normalized_roots = match normalize_junk_roots(system, &roots, &rules) {
+            let normalized_roots = match if deep {
+                PlatformJunkSetup::discover_selected_with_cancel(&[], CancellationToken::new()).map(
+                    |platform| NormalizedJunkRoots {
+                        platform: Some(platform),
+                        scan_roots: default_full_scan_roots(),
+                        temp_roots: Vec::new(),
+                    },
+                )
+            } else {
+                normalize_junk_roots(system, &roots, &rules)
+            } {
                 Ok(roots) => roots,
                 Err(error) => {
                     eprintln!("{error}");
@@ -847,6 +888,7 @@ fn main() -> ProcessExitCode {
                 normalized_roots.temp_roots,
                 normalized_roots.platform,
                 JunkCleanOptions {
+                    mode,
                     enabled: clean_temp,
                     details,
                     quarantine_dir: quarantine_dir.as_deref(),
@@ -1239,6 +1281,7 @@ fn platform_privilege_provider() -> Box<dyn PrivilegeProvider> {
 }
 
 struct JunkCleanOptions<'a> {
+    mode: &'static str,
     enabled: bool,
     details: bool,
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -1485,6 +1528,32 @@ fn run_junk_scan(
                     "Scan evidence is incomplete: candidates may be missing; an empty list does not establish that the scope contains no junk.",
             }
         );
+    }
+
+    let scan_coverage = scan.as_ref().map(|result| {
+        let summary = &result.scan.summary;
+        let mut kinds = BTreeMap::<String, usize>::new();
+        for boundary in &summary.boundaries {
+            let kind = serde_json::to_value(&boundary.kind)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_owned))
+                .unwrap_or_else(|| "unknown".into());
+            *kinds.entry(kind).or_default() += 1;
+        }
+        json!({
+            "finished": summary.progress_retention.finished,
+            "cancelled": summary.progress_retention.cancelled,
+            "resourceLimited": summary.progress_retention.resource_limited,
+            "retainedBoundaryCount": summary.boundaries.len(),
+            "retainedBoundaryKinds": kinds,
+            "boundaryExamples": junk_report::boundary_examples(summary).take(32).collect::<Vec<_>>(),
+            "errorCount": summary.error_count().to_string(),
+        })
+    });
+    if format == OutputFormat::Human
+        && let Some(result) = &scan
+    {
+        junk_report::print_coverage(&result.scan.summary, context.locale());
     }
 
     // Assemble freshly scanned candidates. Applicability was joined during the walk through scan
@@ -1750,7 +1819,8 @@ fn run_junk_scan(
                     "Junk scan report (candidate evidence and gaps shown per row; report-only)",
             }
         );
-        for candidate in &candidates {
+        junk_report::print_groups(&candidates, context.locale(), size_unit, clean.mode);
+        for candidate in candidates.iter().filter(|_| clean.details) {
             let git_note = match (
                 context.locale(),
                 candidate.git.is_some(),
@@ -1918,6 +1988,9 @@ fn run_junk_scan(
             "{}",
             json!({
                 "schema": "sweepx.junk.result/v1",
+                "scanMode": clean.mode,
+                "requestedRoots": canonical_roots,
+                "scanCoverage": scan_coverage,
                 "status": if scan_status_ok && temp_discovery_complete && !evidence.discovery_incomplete() { "ok" } else { "partial" },
                 "readOnly": true,
                 "tempDiscovery": temp_discovery_json,
@@ -1946,7 +2019,8 @@ fn run_junk_scan(
                 "detailsIncluded": clean.details,
                 "topLevelCandidateCount": selected_ids.len(),
                 "sizeSummaryScope": "non_overlapping_top_level_candidates",
-                "candidates": candidates.iter().map(|candidate| json!({
+                "candidates": candidates.iter().zip(sweepx_core::junk::organization::organize_candidates(&candidates)).map(|(candidate, organization)| json!({
+                    "organization": organization,
                     "path": candidate.path, "ruleId": candidate.rule_id, "risk": candidate.risk,
                     "entryId": candidate.entry_id,
                     "parentCandidateEntryId": junk_parent_candidate_id(candidate, &displayed_ids),
@@ -2925,6 +2999,36 @@ mod tests {
         assert!(validate_tui_environment(OutputFormat::Ndjson, true, true).is_err());
         assert!(validate_tui_environment(OutputFormat::Human, false, true).is_err());
         assert!(validate_tui_environment(OutputFormat::Human, true, false).is_err());
+    }
+
+    #[test]
+    fn cleanup_modes_parse_and_reject_ambiguous_scopes_before_discovery() {
+        let regular = Cli::try_parse_from(["sweepx", "junk", "--regular", "--tui"]).unwrap();
+        assert!(matches!(
+            regular.command,
+            Commands::Junk {
+                system: true,
+                deep: false,
+                ..
+            }
+        ));
+        let deep = Cli::try_parse_from(["sweepx", "junk", "--deep", "--tui"]).unwrap();
+        assert!(matches!(
+            deep.command,
+            Commands::Junk {
+                system: false,
+                deep: true,
+                ..
+            }
+        ));
+        for args in [
+            vec!["sweepx", "junk", "--deep", "--regular"],
+            vec!["sweepx", "junk", "--deep", "/tmp"],
+            vec!["sweepx", "junk", "--deep", "--rule", "tool.pip-cache"],
+            vec!["sweepx", "junk", "--deep", "--clean-temp"],
+        ] {
+            assert!(Cli::try_parse_from(args).is_err());
+        }
     }
 
     #[test]

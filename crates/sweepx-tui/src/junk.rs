@@ -34,7 +34,9 @@ pub enum ResultPresentation {
 }
 mod quarantine;
 use quarantine::QuarantineView;
+mod grouped;
 mod inspection;
+pub use grouped::JunkGrouping;
 pub use inspection::JunkInspection;
 
 /// Shared presentation data; no display field can authorize filesystem operations.
@@ -57,6 +59,18 @@ pub trait JunkRow: Send + Sync {
     /// filter: the provider and native worker must independently enforce execution guards.
     fn report_allows_trash(&self) -> bool {
         true
+    }
+    /// Display grouping only; never used to derive native operation targets.
+    fn grouping(&self, _locale: Locale) -> Option<JunkGrouping> {
+        None
+    }
+    /// Captured scan identity used only to suppress overlapping presentation totals.
+    fn entry_identity(&self) -> Option<&str> {
+        None
+    }
+    /// Captured ancestor identities; display paths cannot establish accounting ancestry.
+    fn ancestor_identities(&self) -> Vec<&str> {
+        Vec::new()
     }
     /// Conservative retained-data estimate, including shared data; not RSS.
     fn retained_bytes(&self) -> usize;
@@ -101,6 +115,8 @@ pub enum JunkEvent {
     Invalidated { revision: u64, key: String },
     /// Bounded diagnostic; never treated as an empty successful result.
     Error { revision: u64, message: String },
+    /// Expected traversal exclusion, retained separately so it cannot hide an error.
+    Notice { revision: u64, message: String },
     /// Commit a scope or retain its rows as historical after incomplete work.
     Completed {
         revision: u64,
@@ -133,6 +149,20 @@ pub enum JunkEvent {
 
 /// Nonblocking bridge to scanning and Trash workers. Implementations must not do native work here.
 pub trait JunkProvider {
+    /// Enables hierarchical junk presentation; other analyses retain their existing lists.
+    fn grouped(&self) -> bool {
+        false
+    }
+    /// Stable presentation mode: regular, deep or custom.
+    fn scan_mode(&self) -> &'static str {
+        "custom"
+    }
+
+    /// Maximum estimated retained candidate bytes, bounded again by the view at 256 MiB.
+    fn candidate_byte_budget(&self) -> usize {
+        MAX_BYTES
+    }
+
     /// Return already-computed, bounded inspection text. No IO runs on the terminal thread.
     fn inspect_text(&self, _key: &str) -> Option<String> {
         None
@@ -177,6 +207,9 @@ pub trait JunkProvider {
 }
 
 struct ViewRow {
+    // Freshly measured base rows and complete observations from an incomplete revision
+    // contribute only a lower bound. This flag never authorizes selection or Trash.
+    observed_partial: bool,
     row: Arc<dyn JunkRow>,
     revision: u64,
     historical: bool,
@@ -186,6 +219,8 @@ struct ViewRow {
 /// Bounded presentation state. Stable keys retain selection across revisions and reordered rows.
 pub struct JunkModel {
     presentation: ResultPresentation,
+    grouped: Option<grouped::GroupedView>,
+    scan_mode: &'static str,
     locale: Locale,
     unit: HumanSizeUnit,
     sort: ScanSort,
@@ -195,6 +230,7 @@ pub struct JunkModel {
     affected: Option<BTreeSet<String>>,
     cursor: usize,
     bytes: usize,
+    max_bytes: usize,
     revision: u64,
     busy: bool,
     trash_pending: BTreeSet<String>,
@@ -203,6 +239,9 @@ pub struct JunkModel {
     progress: Option<u64>,
     path: String,
     diagnostic: String,
+    issue_count: u64,
+    issue_history: Vec<String>,
+    notice_history: Vec<String>,
     dirty: bool,
     rejected: bool,
     quarantine: Option<QuarantineView>,
@@ -216,6 +255,8 @@ impl JunkModel {
     pub fn new(locale: Locale, unit: HumanSizeUnit) -> Self {
         Self {
             presentation: ResultPresentation::Junk,
+            grouped: None,
+            scan_mode: "custom",
             locale,
             unit,
             sort: ScanSort::Size,
@@ -225,6 +266,7 @@ impl JunkModel {
             affected: None,
             cursor: 0,
             bytes: 0,
+            max_bytes: MAX_BYTES,
             revision: 0,
             busy: true,
             trash_pending: BTreeSet::new(),
@@ -233,6 +275,9 @@ impl JunkModel {
             progress: None,
             path: String::new(),
             diagnostic: String::new(),
+            issue_count: 0,
+            issue_history: Vec::new(),
+            notice_history: Vec::new(),
             dirty: false,
             rejected: false,
             quarantine: None,
@@ -278,10 +323,15 @@ impl JunkModel {
             return;
         }
         if let JunkEvent::TrashResult { key, error } = event {
+            self.dirty = true;
+            if let Some(view) = &mut self.grouped {
+                view.preview = None;
+            }
             self.trash_pending.remove(&key);
             if let Some(error) = error {
                 if let Some(row) = self.rows.get_mut(&key) {
                     row.historical = true;
+                    row.observed_partial = false;
                 }
                 self.outcome = Some(JunkOutcome::Partial);
                 self.diagnostic(error);
@@ -298,6 +348,7 @@ impl JunkModel {
             | JunkEvent::Removed { revision, .. }
             | JunkEvent::Invalidated { revision, .. }
             | JunkEvent::Error { revision, .. }
+            | JunkEvent::Notice { revision, .. }
             | JunkEvent::Completed { revision, .. } => *revision,
             JunkEvent::TrashResult { .. } => unreachable!(),
             JunkEvent::QuarantinePreview { .. } | JunkEvent::QuarantineFinished { .. } => {
@@ -310,6 +361,26 @@ impl JunkModel {
         if !matches!(event, JunkEvent::Started { .. }) && revision != self.revision {
             return;
         }
+        if matches!(
+            event,
+            JunkEvent::Started { .. }
+                | JunkEvent::Candidate { .. }
+                | JunkEvent::Removed { .. }
+                | JunkEvent::Invalidated { .. }
+                | JunkEvent::Completed { .. }
+        ) {
+            self.dirty = true;
+        }
+        if matches!(
+            event,
+            JunkEvent::Started { .. }
+                | JunkEvent::Candidate { .. }
+                | JunkEvent::Removed { .. }
+                | JunkEvent::Invalidated { .. }
+        ) && let Some(view) = &mut self.grouped
+        {
+            view.preview = None;
+        }
         match event {
             JunkEvent::Started { revision, keys } => {
                 self.revision = revision;
@@ -317,12 +388,16 @@ impl JunkModel {
                 for (key, row) in &mut self.rows {
                     if self.affected.as_ref().is_none_or(|keys| keys.contains(key)) {
                         row.historical = true;
+                        row.observed_partial = false;
                     }
                 }
                 self.busy = true;
                 self.outcome = None;
                 self.progress = None;
                 self.rejected = false;
+                self.issue_count = 0;
+                self.issue_history.clear();
+                self.notice_history.clear();
             }
             JunkEvent::Phase { phase, .. } => self.phase = phase,
             JunkEvent::Progress { count, path, .. } => {
@@ -343,7 +418,7 @@ impl JunkModel {
                     .map_or(0, |row| row.row.retained_bytes().saturating_add(512));
                 let bytes = self.bytes.saturating_sub(old).saturating_add(cost);
                 if key.len() > 128
-                    || bytes > MAX_BYTES
+                    || bytes > self.max_bytes
                     || (!self.rows.contains_key(key) && self.rows.len() >= MAX_ROWS)
                 {
                     self.rejected = true;
@@ -360,6 +435,7 @@ impl JunkModel {
                 self.rows.insert(
                     key.to_owned(),
                     ViewRow {
+                        observed_partial: !historical && !current && row.complete(),
                         row,
                         revision,
                         historical,
@@ -372,9 +448,29 @@ impl JunkModel {
             JunkEvent::Invalidated { key, .. } => {
                 if let Some(row) = self.rows.get_mut(&key) {
                     row.historical = true;
+                    row.observed_partial = false;
                 }
             }
-            JunkEvent::Error { message, .. } => self.diagnostic(message),
+            JunkEvent::Error { message, .. } => {
+                self.issue_count = self.issue_count.saturating_add(1);
+                self.diagnostic(message);
+                if self.issue_history.len() == 16 {
+                    self.issue_history.remove(0);
+                }
+                self.issue_history.push(self.diagnostic.clone());
+            }
+            JunkEvent::Notice { message, .. } => {
+                self.issue_count = self.issue_count.saturating_add(1);
+                let previous = self.diagnostic.clone();
+                self.diagnostic(message);
+                if self.notice_history.len() == 16 {
+                    self.notice_history.remove(0);
+                }
+                self.notice_history.push(self.diagnostic.clone());
+                if !self.issue_history.is_empty() {
+                    self.diagnostic = previous;
+                }
+            }
             JunkEvent::Completed {
                 outcome, replaced, ..
             } => {
@@ -389,6 +485,10 @@ impl JunkModel {
                         if row.revision == revision
                             || self.affected.as_ref().is_none_or(|keys| keys.contains(key))
                         {
+                            row.observed_partial = row.revision == revision
+                                && (!row.historical || row.observed_partial)
+                                && row.row.complete()
+                                && matches!(outcome, JunkOutcome::Partial | JunkOutcome::Cancelled);
                             row.historical = true;
                         }
                     }
@@ -446,9 +546,17 @@ impl JunkModel {
             .unwrap_or(self.cursor)
             .min(self.order.len().saturating_sub(1));
         self.dirty = false;
+        self.rebuild_groups();
     }
 
     fn chosen(&self) -> Vec<String> {
+        if let Some(view) = &self.grouped {
+            return if self.marked.is_empty() {
+                view.focused_keys()
+            } else {
+                self.marked.iter().cloned().collect()
+            };
+        }
         if self.marked.is_empty() {
             self.order.get(self.cursor).cloned().into_iter().collect()
         } else {
@@ -537,6 +645,10 @@ impl JunkModel {
 pub fn render_junk(frame: &mut Frame<'_>, model: &JunkModel) {
     if let Some(view) = &model.quarantine {
         quarantine::render(frame, model, view);
+        return;
+    }
+    if model.grouped.is_some() {
+        grouped::render(frame, model);
         return;
     }
     let [header, list, details, help] = Layout::vertical([
@@ -725,6 +837,41 @@ pub fn render_junk(frame: &mut Frame<'_>, model: &JunkModel) {
 // Presentation labels leave the classifier's IDs unchanged for reports and authorization guards.
 fn rule_label(rule: &str, locale: Locale) -> &str {
     let labels = match rule {
+        "rust.target" => ("Rust 构建产物", "Rust build output"),
+        "node.modules" => ("Node.js 项目依赖", "Node.js dependencies"),
+        "python.cache" => ("Python 字节码缓存", "Python bytecode cache"),
+        "project.build-output" => ("项目构建输出", "Project build output"),
+        "maven.target" => ("Maven 构建输出", "Maven build output"),
+        "dart.tool-state" => ("Dart 工具缓存", "Dart tool state"),
+        "node.sveltekit-output" => ("SvelteKit 构建输出", "SvelteKit build output"),
+        "macos.user-caches" | "linux.xdg-user-cache" | "windows.packaged-app-cache" => {
+            ("应用缓存目录", "Application cache directory")
+        }
+        "macos.browser-derived-cache"
+        | "macos.chromium-cache"
+        | "macos.firefox-cache"
+        | "macos.safari-cache"
+        | "windows.chromium-http-cache"
+        | "windows.chromium-code-cache"
+        | "windows.chromium-shader-cache" => ("浏览器缓存目录", "Browser cache directory"),
+        "linux.stale-temp-object" => ("临时对象", "Temporary object"),
+        "macos.browser-state-diagnostics" | "tool.osdk-data" => {
+            ("用户数据：待单独核验", "User data: separate review")
+        }
+        "tool.npm-cache"
+        | "tool.pnpm-store"
+        | "tool.pip-cache"
+        | "macos.cargo-registry-cache"
+        | "macos.go-cache"
+        | "macos.uv-cache"
+        | "macos.bun-cache"
+        | "macos.yarn-cache"
+        | "macos.gradle-cache"
+        | "macos.deno-cache"
+        | "macos.homebrew-cache" => ("工具缓存目录", "Tool cache directory"),
+        "macos.xcode-derived-data" => ("Xcode 构建与索引", "Xcode builds and indexes"),
+        "macos.jetbrains-cache" => ("JetBrains 缓存", "JetBrains caches"),
+        "macos.tencent-meeting-cache" => ("腾讯会议缓存", "Tencent Meeting caches"),
         "rust.incremental" => ("Rust 增量缓存", "Rust incremental cache"),
         "rust.dependencies" => ("Rust 依赖与测试产物", "Rust dependencies/tests"),
         "rust.build-script-output" => ("Rust 构建脚本输出", "Rust build-script output"),
@@ -785,7 +932,7 @@ pub fn run_junk_loop<B: Backend, E: BrowserEventSource, P: JunkProvider, T: Term
             Err(_) if termination.termination_signal().is_some() => continue,
             Err(error) => return Err(error.into()),
         };
-        let Some(Event::Key(key)) = event else {
+        let Some(Event::Key(mut key)) = event else {
             continue;
         };
         if key.kind == KeyEventKind::Release {
@@ -806,6 +953,9 @@ pub fn run_junk_loop<B: Backend, E: BrowserEventSource, P: JunkProvider, T: Term
             continue;
         }
         if model.quarantine_key(key, provider) {
+            continue;
+        }
+        if model.grouped_key(&mut key, provider) {
             continue;
         }
         match key.code {
@@ -997,6 +1147,11 @@ pub fn run_junk_browser<P: JunkProvider>(
         let mut model = JunkModel::new(locale, unit)
             .with_sort(sort)
             .with_presentation(provider.presentation());
+        model.scan_mode = provider.scan_mode();
+        model.max_bytes = provider.candidate_byte_budget().min(256 * 1024 * 1024);
+        if provider.grouped() {
+            model.grouped = Some(grouped::GroupedView::default());
+        }
         let result = run_junk_loop(
             &mut terminal,
             &mut model,

@@ -93,17 +93,45 @@ impl LayoutRoot {
         let Some(locator) = entry.validated_native_locator().ok().flatten() else {
             return false;
         };
-        self.native_path == *path
-            && locator.entry.metadata_fingerprint == self.fingerprint
-            && matches!(&locator.entry.platform_file_identity,
+        self.matches_component(path, &locator.entry)
+    }
+
+    /// Match captured native identity before allocating a lossless absolute path. Most full-disk
+    /// directories cannot match any discovered cache, so this keeps classification inexpensive.
+    pub fn matches_identity(&self, component: &sweepx_model::NativePathComponent) -> bool {
+        component.metadata_fingerprint == self.fingerprint
+            && matches!(&component.platform_file_identity,
                 IdentityEvidence::Known { value }
                     if value.device.0 == u128::from(self.identity.device())
                     && value.inode.0 == self.identity.inode())
-            && matches!(&locator.entry.filesystem_object_domain_identity,
+            && matches!(&component.filesystem_object_domain_identity,
                 IdentityEvidence::Known { value }
                     if value.device.0 == u128::from(self.filesystem.device))
-            && matches!(&locator.entry.volume_or_mount_identity,
+            && matches!(&component.volume_or_mount_identity,
                 IdentityEvidence::Known { value } if value.value.0 == u128::from(self.mount.value))
+    }
+
+    /// The path and native component must both match the current discovery snapshot.
+    pub fn matches_component(
+        &self,
+        path: &NativeAbsolutePath,
+        component: &sweepx_model::NativePathComponent,
+    ) -> bool {
+        self.native_path == *path && self.matches_identity(component)
+    }
+
+    /// Matches the directory at any depth without substituting the outer scan root's identity.
+    pub fn matches_entry(&self, entry: &ScannedEntry) -> bool {
+        let Some(locator) = entry.native_locator.as_ref() else {
+            return false;
+        };
+        // This preliminary negative check cannot admit an entry. Validate the entire chain
+        // only for an identity match, rather than once per discovered cache for every directory.
+        self.matches_identity(&locator.entry)
+            && entry.validated_native_locator().ok().flatten().is_some()
+            && super::git::native_path(entry)
+                .and_then(|path| NativeAbsolutePath::from_path(&path).ok())
+                .is_some_and(|path| self.matches(&path, entry))
     }
 
     pub fn same_object(&self, other: &Self) -> bool {

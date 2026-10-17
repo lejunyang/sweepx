@@ -10,6 +10,8 @@
 
 > **安全声明：本文只定义接口、数据契约和发布门槛，不是实现或操作手册；本文编写过程没有扫描、清理、删除、移动、提权、启动生态工具、修改浏览器/开发环境，也没有调用任何外部副作用。** 文中的命令仅表示未来产品接口。
 
+分层清理视图与常规/全盘模式：[设计与验证记录](junk-organization-2026-10-18.md)。分组只投影现有候选，执行继续使用原生绑定；任意文件浏览仍为只读。
+
 ## 1. 范围、原则与共同下限
 
 本设计为本地人类 CLI、全屏 TUI 和 Cleaner 插件定义同一个产品边界。三者不是三套清理器：它们都只能调用同一个 Scanner、Candidate Builder、Planner、Human Approval Broker、Preflight、Executor、Audit/Reconciler。CLI/TUI 只是呈现层；Cleaner 只能提供受约束的发现规则和证据；任何一层都不能直接取得删除 adapter。

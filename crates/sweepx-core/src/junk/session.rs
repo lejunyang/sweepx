@@ -378,6 +378,9 @@ pub struct JunkSessionRequest {
     pub watch: bool,
     /// Notification queue and native subscription bounds, independent of scan retention.
     pub watch_limits: sweepx_platform::change_monitor::ChangeMonitorLimits,
+    /// Continue read-only traversal after candidate retention exhausts; omitted results stay
+    /// explicitly partial and cannot authorize cleanup. Enabled by deep disk requests.
+    pub continue_on_candidate_limit: bool,
     /// Storage, traversal and Git bounds.
     pub limits: JunkSessionLimits,
 }
@@ -393,6 +396,7 @@ impl JunkSessionRequest {
             cache_dir: None,
             cache_state_root: None,
             watch: false,
+            continue_on_candidate_limit: false,
             watch_limits: sweepx_platform::change_monitor::ChangeMonitorLimits::default(),
             limits: JunkSessionLimits::default(),
         }
@@ -404,6 +408,22 @@ impl JunkSessionRequest {
             system: true,
             include_platform_rules: true,
             ..Self::new(Vec::new())
+        }
+    }
+
+    /// Includes current platform cache rules while traversing explicit disk roots.
+    /// Volume admission and native execution guards remain unchanged.
+    pub fn deep(roots: Vec<PathBuf>) -> Self {
+        Self {
+            include_platform_rules: true,
+            continue_on_candidate_limit: true,
+            // Whole-disk candidates retain native ancestor evidence. Keep room for both
+            // the prior and replacement generation without removing the fixed row cap.
+            limits: JunkSessionLimits {
+                max_candidate_bytes: 256 * 1024 * 1024,
+                ..Default::default()
+            },
+            ..Self::new(roots)
         }
     }
 
@@ -898,6 +918,8 @@ impl Worker {
             limits: self.request.limits,
             retained_bytes: old_bytes,
             retained_rows: self.current.len(),
+            continue_on_candidate_limit: self.request.continue_on_candidate_limit,
+            candidate_limit_reached: false,
             rules_digest,
             observed: 0,
         };
@@ -998,10 +1020,16 @@ impl Worker {
                 .saturating_sub(old_cost)
                 .saturating_add(row.cost());
             if retained_bytes > self.request.limits.max_candidate_bytes {
-                return Err(JunkSessionFailure::new(
+                let failure = JunkSessionFailure::new(
                     "resource_limit",
                     "current Git interpretation exceeds candidate retention budget",
-                ));
+                );
+                if self.request.continue_on_candidate_limit {
+                    writer.failure(failure);
+                    writer.finish(JunkSessionOutcome::Partial, false, pending.len());
+                    return Ok(());
+                }
+                return Err(failure);
             }
             if job.cancel.is_cancelled() {
                 writer.finish(JunkSessionOutcome::Cancelled, false, pending.len());
@@ -1020,7 +1048,12 @@ impl Worker {
             self.current.insert(*key, Arc::clone(row));
         }
         #[cfg(target_os = "linux")]
-        if self.request.system
+        if self.request.include_platform_rules
+            && (self.request.system
+                || self
+                    .scan_roots
+                    .iter()
+                    .any(|root| Path::new("/tmp").starts_with(root)))
             && job.selected.is_none()
             && job.paths.is_none()
             && platform
@@ -1094,6 +1127,8 @@ struct Observer<'a> {
     limits: JunkSessionLimits,
     retained_bytes: usize,
     retained_rows: usize,
+    continue_on_candidate_limit: bool,
+    candidate_limit_reached: bool,
     rules_digest: [u8; 32],
     observed: u64,
 }
@@ -1146,7 +1181,10 @@ impl ClassifiedScanObserver for Observer<'_> {
         self.writer.shared.lock().preferred.clone()
     }
     fn on_candidate(&mut self, entry: &ScannedEntry, rule: &str, aggregate: &DirectoryAggregate) {
-        if self.writer.fault.is_some() || self.writer.shared.lock().closed {
+        if self.candidate_limit_reached
+            || self.writer.fault.is_some()
+            || self.writer.shared.lock().closed
+        {
             return;
         }
         let Some(path) = native_path(entry) else {
@@ -1190,10 +1228,19 @@ impl ClassifiedScanObserver for Observer<'_> {
         if self.retained_rows >= self.limits.max_candidates
             || self.retained_bytes.saturating_add(row.cost()) > self.limits.max_candidate_bytes
         {
-            self.writer.abort(JunkSessionFailure::new(
+            let failure = JunkSessionFailure::new(
                 "resource_limit",
-                "old and pending candidate retention exceeds session budget",
-            ));
+                "candidate retention exhausted; results are incomplete",
+            );
+            if self.continue_on_candidate_limit {
+                // Keep already admitted evidence bounded. Missing candidates are not zero and
+                // cannot become a successful replacement or a reusable complete cache scope.
+                self.candidate_limit_reached = true;
+                self.writer.coverage_incomplete = true;
+                self.writer.failure(failure);
+            } else {
+                self.writer.abort(failure);
+            }
             return;
         }
         self.retained_rows += 1;

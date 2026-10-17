@@ -168,6 +168,19 @@ impl PlatformJunkEvidence {
             if !rule_applies_to_host(rule) || !discovery.admit_rule(&rule.id) {
                 continue;
             }
+            if matches!(
+                rule.match_kind.as_str(),
+                "direct_children" | "named_descendant"
+            ) {
+                let mut roots = Vec::new();
+                if let Some(path) = resolve_base(&rule.root_kind) {
+                    discovery.push_root(&path, &mut roots);
+                } else {
+                    discovery.unavailable_anchor();
+                }
+                layout_roots.insert(rule.id.clone(), roots);
+                continue;
+            }
             let reported_root = resolve(rule).and_then(|path| discovery.retain_path(&path));
             let snapshots = if rule.match_kind == "verified_tool_root" {
                 tool_cache_candidates_with_root(
@@ -266,18 +279,44 @@ impl PlatformJunkEvidence {
         else {
             return false;
         };
+        roots.iter().any(|root| root.matches_entry(entry))
+    }
+
+    /// Generic depth rules are relative to a natively observed cache anchor, not the arbitrary
+    /// scan root. Both the captured ancestor identity and its lossless path must match.
+    fn matches_cache_descendant(
+        &self,
+        rule: &PlatformJunkRule,
+        entry: &sweepx_model::ScannedEntry,
+    ) -> bool {
+        let Some(roots) = self.layout_roots.get(&rule.id) else {
+            return false;
+        };
         let Some(locator) = entry.validated_native_locator().ok().flatten() else {
             return false;
         };
-        #[cfg(target_os = "macos")]
-        let path = if rule.match_kind == "verified_known_root" {
-            entry_native_absolute_path(locator)
-        } else {
-            locator.scan_root_absolute_path.clone()
+        let Some(index) = locator.parent_reopen_recipe.len().checked_sub(rule.depth) else {
+            return false;
         };
-        #[cfg(not(target_os = "macos"))]
-        let path = locator.scan_root_absolute_path.clone();
-        path.is_some_and(|path| roots.iter().any(|root| root.matches(&path, entry)))
+        let Some(ancestor) = locator.parent_reopen_recipe.get(index) else {
+            return false;
+        };
+        if !roots.iter().any(|root| root.matches_identity(ancestor)) {
+            return false;
+        }
+        let Some(path) = super::git::native_path(entry) else {
+            return false;
+        };
+        let Some(anchor) = path
+            .ancestors()
+            .nth(rule.depth)
+            .and_then(|path| sweepx_model::NativeAbsolutePath::from_path(path).ok())
+        else {
+            return false;
+        };
+        roots
+            .iter()
+            .any(|root| root.matches_component(&anchor, ancestor))
     }
 
     /// Precomputed evidence for one rule, or `None` if the rule set this snapshot was built from
@@ -351,7 +390,11 @@ impl CombinedJunkClassifier<'_> {
                         hash.fact(root.context_fact())?;
                     }
                 }
-                "verified_browser_cache" | "verified_cache_root" | "verified_known_root" => {
+                "verified_browser_cache"
+                | "verified_cache_root"
+                | "verified_known_root"
+                | "direct_children"
+                | "named_descendant" => {
                     let facts = self.evidence.layout_roots.get(&rule.id)?;
                     if facts.len() > 1024 {
                         return None;
@@ -447,31 +490,26 @@ fn platform_rule_specificity(rule: &PlatformJunkRule) -> u8 {
 
 /// Whether a platform rule matches an observed directory, evaluated at walk time.
 ///
-/// Depth is read from the entry's captured locator. The depth-zero match kinds behave exactly
-/// as before: those directories are still their own scan roots except known roots, which may
-/// legitimately be nested inside a wider root.
+/// Exact roots match their current discovery identities at any depth. Generic depth rules
+/// count from their native cache anchor, never from an arbitrary full-disk scan root.
 fn platform_rule_classifies(
     rule: &PlatformJunkRule,
     entry: &sweepx_model::ScannedEntry,
     evidence: &PlatformJunkEvidence,
 ) -> bool {
-    let Some(locator) = entry.native_locator.as_ref() else {
-        return false;
-    };
-    let depth = locator.parent_reopen_recipe.len();
     match rule.match_kind.as_str() {
-        "direct_children" => depth == rule.depth,
+        "direct_children" => evidence.matches_cache_descendant(rule, entry),
         "named_descendant" => {
-            depth == rule.depth
+            evidence.matches_cache_descendant(rule, entry)
                 && native_name_for_rule(&entry.native_basename).is_some_and(|name| {
                     rule.names
                         .iter()
                         .any(|candidate| normalized_rule_name(candidate) == name)
                 })
         }
-        "verified_tool_root" => depth == 0 && tool_reported_root_matches(rule, entry, evidence),
-        "verified_cache_root" => depth == 0 && evidence.matches_layout_root(rule, entry),
-        "verified_browser_cache" => depth == 0 && evidence.matches_layout_root(rule, entry),
+        "verified_tool_root" => tool_reported_root_matches(rule, entry, evidence),
+        "verified_cache_root" => evidence.matches_layout_root(rule, entry),
+        "verified_browser_cache" => evidence.matches_layout_root(rule, entry),
         "verified_known_root" => evidence.matches_layout_root(rule, entry),
         #[cfg(target_os = "linux")]
         "stale_inactive_direct_child" => false,
@@ -538,16 +576,11 @@ pub fn classify_tool_root(
     entry: &sweepx_model::ScannedEntry,
     evidence: &PlatformJunkEvidence,
 ) -> Option<ToolRootActivity> {
-    let path = entry
-        .native_locator
-        .as_ref()?
-        .scan_root_absolute_path
-        .as_ref()?;
     evidence
         .tool_snapshots
         .get(&rule.id)?
         .iter()
-        .find(|snapshot| snapshot.root.matches(path, entry))
+        .find(|snapshot| snapshot.root.matches_entry(entry))
         .map(|snapshot| snapshot.activity)
 }
 
@@ -661,50 +694,6 @@ fn chromium_render_cache_roots() -> Vec<PathBuf> {
         .collect()
 }
 
-/// Reconstructs an entry's own absolute native path from its locator chain.
-///
-/// The locator stores only the scan root as an absolute path; intermediate and entry components
-/// are retained natively. `parent_reopen_recipe` starts with a component duplicating the scan
-/// root (the locator invariant), so it is skipped; every remaining intermediate basename and
-/// the entry basename are appended byte-for-byte without normalization. This is what lets a
-/// known root nested inside a wider scan root (Homebrew/Yarn under `~/Library/Caches`) be
-/// classified at its real depth instead of only when it is a depth-0 root.
-/// The root row itself has no parent recipe and already has its own absolute path; appending
-/// its basename would instead compare `…/Homebrew/Homebrew` and silently miss the root.
-#[cfg(target_os = "macos")]
-fn entry_native_absolute_path(
-    locator: &sweepx_model::NativeLocatorEvidence,
-) -> Option<sweepx_model::NativeAbsolutePath> {
-    let sweepx_model::NativeAbsolutePath::UnixBytes(root) =
-        locator.scan_root_absolute_path.as_ref()?
-    else {
-        return None;
-    };
-    if locator.entry.entry_id == locator.scan_root.entry_id {
-        return Some(sweepx_model::NativeAbsolutePath::unix(root.clone()));
-    }
-    let mut bytes = root.clone();
-    let append = |bytes: &mut Vec<u8>, name: &sweepx_model::NativeName| {
-        let sweepx_model::NativeName::UnixBytes(component) = name else {
-            return false;
-        };
-        if bytes.last() != Some(&b'/') {
-            bytes.push(b'/');
-        }
-        bytes.extend_from_slice(component);
-        true
-    };
-    for component in locator.parent_reopen_recipe.iter().skip(1) {
-        if !append(&mut bytes, &component.native_basename) {
-            return None;
-        }
-    }
-    if !append(&mut bytes, &locator.entry.native_basename) {
-        return None;
-    }
-    Some(sweepx_model::NativeAbsolutePath::unix(bytes))
-}
-
 fn known_roots_with_base(
     rule: &PlatformJunkRule,
     resolve_base: &mut impl FnMut(&str) -> Option<PathBuf>,
@@ -731,6 +720,21 @@ fn known_roots_with_base(
 /// yields `None` rather than a guessed path.
 fn browser_base_dir(base: &str) -> Option<PathBuf> {
     match base {
+        "macos_user_caches" => user_home_dir()
+            .filter(|path| path.is_absolute())
+            .map(|home| home.join("Library/Caches")),
+        "xdg_cache_home" => std::env::var_os("XDG_CACHE_HOME")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .or_else(|| {
+                user_home_dir()
+                    .filter(|path| path.is_absolute())
+                    .map(|home| home.join(".cache"))
+            }),
+        "windows_packages" => std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .map(|path| path.join("Packages")),
         "home" => user_home_dir().filter(|path| path.is_absolute()),
         "application_support" => user_home_dir()
             .filter(|path| path.is_absolute())
@@ -898,55 +902,6 @@ pub fn default_platform_junk_roots(platform: &PlatformJunkSetup) -> Vec<PathBuf>
                 seen.push(root);
                 roots.push(root.path.clone());
             }
-        }
-    }
-    #[cfg(target_os = "linux")]
-    {
-        // XDG_CACHE_HOME is valid only as an absolute path. Falling back to ~/.cache follows the
-        // XDG Base Directory specification; data/config homes are intentionally excluded.
-        if rules.iter().any(|rule| rule.root_kind == "xdg_cache_home")
-            && let Some(cache) = std::env::var_os("XDG_CACHE_HOME")
-                .map(PathBuf::from)
-                .filter(|path| path.is_absolute())
-                .or_else(|| {
-                    user_home_dir()
-                        .filter(|home| home.is_absolute())
-                        .map(|home| home.join(".cache"))
-                })
-            && is_existing_real_directory(&cache)
-        {
-            roots.push(cache);
-        }
-    }
-    #[cfg(target_os = "macos")]
-    {
-        // Apple defines Library/Caches as discardable, but candidate classification remains
-        // report-only and no broader Library/Application Support root is admitted here.
-        if rules
-            .iter()
-            .any(|rule| rule.root_kind == "macos_user_caches")
-            && let Some(cache) = user_home_dir()
-                .filter(|home| home.is_absolute())
-                .map(|home| home.join("Library/Caches"))
-                .filter(|cache| is_existing_real_directory(cache))
-        {
-            roots.push(cache);
-        }
-    }
-    #[cfg(target_os = "windows")]
-    {
-        // LocalCache is narrower than LocalAppData. SweepX does not classify an application's
-        // LocalFolder or the whole LocalAppData tree as disposable.
-        if rules
-            .iter()
-            .any(|rule| rule.root_kind == "windows_packages")
-            && let Some(packages) = std::env::var_os("LOCALAPPDATA")
-                .map(PathBuf::from)
-                .filter(|path| path.is_absolute())
-                .map(|path| path.join("Packages"))
-            && is_existing_real_directory(&packages)
-        {
-            roots.push(packages);
         }
     }
     roots
@@ -1391,19 +1346,12 @@ pub fn superseded_format_generations(
     entry: &sweepx_model::ScannedEntry,
     evidence: &PlatformJunkEvidence,
 ) -> Vec<String> {
-    let Some(path) = entry
-        .native_locator
-        .as_ref()
-        .and_then(|locator| locator.scan_root_absolute_path.as_ref())
-    else {
-        return Vec::new();
-    };
     evidence
         .tool_snapshots
         .get(&rule.id)
         .into_iter()
         .flatten()
-        .find(|snapshot| snapshot.root.matches(path, entry))
+        .find(|snapshot| snapshot.root.matches_entry(entry))
         .map(|snapshot| snapshot.superseded.clone())
         .unwrap_or_default()
 }
@@ -1597,6 +1545,72 @@ mod tests {
         assert_eq!(discovery.enumerations, 0);
     }
 
+    #[test]
+    fn generic_cache_depth_is_relative_to_verified_anchor_and_rejects_replacements() {
+        let fixture = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        let root = fixture.path().canonicalize().unwrap();
+        #[cfg(windows)]
+        let root = fixture.path().to_path_buf();
+        let anchor = root.join("cache");
+        for path in [
+            anchor.join("app/nested"),
+            root.join("unrelated/app"),
+            root.join("ordinary"),
+        ] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        let mut rule = load_platform_junk_rules()
+            .unwrap()
+            .into_iter()
+            .find(|r| r.id == "macos.user-caches")
+            .unwrap();
+        // Exercise the generic anchor contract with the host native backend on every platform.
+        rule.platform = "any".into();
+        let rules = vec![rule];
+        let evidence = PlatformJunkEvidence::precompute_with_layout(
+            &rules,
+            |_| None,
+            Vec::new(),
+            LayoutDiscoveryLimits::default(),
+            CancellationToken::new(),
+            |_| Some(anchor.clone()),
+        );
+        assert!(evidence.layout_failure().is_none());
+        let service = JunkService::built_in().unwrap();
+        let scan = |path: PathBuf| {
+            let scanned = sweepx_scanner::Scanner::new(
+                sweepx_scanner::HostPlatformScanner::new(),
+                sweepx_scanner::ScannerOptions::default(),
+            )
+            .scan_classified(
+                &[sweepx_platform::ScanRoot::new(path).unwrap()],
+                &CancellationToken::new(),
+                &service.with_platform(&rules, &evidence),
+                None,
+            )
+            .unwrap();
+            scanned
+                .summary
+                .entries
+                .iter()
+                .chain(&scanned.summary.roots)
+                .filter(|entry| {
+                    entry
+                        .identity
+                        .as_ref()
+                        .is_some_and(|id| scanned.decisions.contains_key(&id.entry_id))
+                })
+                .map(|entry| super::super::git::native_path(entry).unwrap())
+                .collect::<BTreeSet<_>>()
+        };
+        assert_eq!(scan(root.clone()), BTreeSet::from([anchor.join("app")]));
+        assert_eq!(scan(anchor.clone()), BTreeSet::from([anchor.join("app")]));
+        std::fs::rename(&anchor, root.join("old-cache")).unwrap();
+        std::fs::create_dir_all(anchor.join("app")).unwrap();
+        assert!(scan(root).is_empty());
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn known_root_snapshot_binds_root_and_nested_rows_and_refuses_replacements() {
@@ -1747,8 +1761,9 @@ mod tests {
                 .chain(&scan.summary.entries)
                 .filter(|entry| entry.object_type == sweepx_model::ObjectType::Directory)
                 .map(|entry| {
-                    let locator = entry.validated_native_locator().unwrap().unwrap();
-                    let path = entry_native_absolute_path(locator).unwrap();
+                    let path = super::super::git::native_path(entry)
+                        .and_then(|path| sweepx_model::NativeAbsolutePath::from_path(&path).ok())
+                        .unwrap();
                     let matches = expected
                         .iter()
                         .filter(|expected| path.equals_path(expected).unwrap())

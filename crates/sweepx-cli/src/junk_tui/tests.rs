@@ -438,7 +438,7 @@ fn private_registry_keeps_cancelled_rows_under_one_cross_revision_row_budget() {
         let terminal = provider.translate_event(revision, terminal_event(final_outcome, true));
         let expected = match final_outcome {
             JunkSessionOutcome::Complete => JunkOutcome::Partial,
-            JunkSessionOutcome::Cancelled => JunkOutcome::Cancelled,
+            JunkSessionOutcome::Cancelled => JunkOutcome::Partial,
             _ => JunkOutcome::Failed,
         };
         assert!(
@@ -448,6 +448,10 @@ fn private_registry_keeps_cancelled_rows_under_one_cross_revision_row_budget() {
         assert_eq!(provider.retained, retained);
         assert_eq!(provider.historical, BTreeSet::from([rows[0].key.clone()]));
         assert!(provider.rejected && !provider.complete && !provider.busy);
+        assert!(
+            matches!(provider.poll(), Some(JunkEvent::Error { message, .. }) if message.contains("retention limit")),
+            "terminal retains the cause after intervening boundary messages"
+        );
         assert_eq!(
             provider
                 .trash(std::slice::from_ref(&rows[0].key))
