@@ -143,7 +143,11 @@ fn directory_inspection_drills_native_children_without_promoting_project_trash()
             .contains("unverified")
     );
     provider.historical.insert(row.key.clone());
-    assert!(provider.inspect(&row.key).is_err());
+    drop(
+        provider
+            .inspect(&row.key)
+            .expect("historical status does not prohibit read-only inspection"),
+    );
     provider.historical.clear();
     let inspection = provider.inspect(&row.key).unwrap();
     fs::rename(root.join("target"), root.join("old-target")).unwrap();
@@ -894,5 +898,30 @@ fn changed_directory_scope_marks_existing_descendants_without_affecting_sibling_
             .keys()
             .any(|key| !provider.historical.contains(key))
     );
+    stop_adapter_fixture(&mut provider, &rows);
+}
+
+#[test]
+fn fresh_directory_remains_inspectable_during_scan_and_after_partial_completion() {
+    let _gate = SESSION_FIXTURE_GATE.lock().unwrap();
+    let (_fixture, mut provider, rows) = adapter_fixture();
+    let key = rows[0].key.clone();
+    provider.rows.insert(key.clone(), rows[0].clone());
+    provider.revision = rows[0].revision;
+    provider.busy = true;
+    provider.complete = false;
+    provider.historical.insert(key.clone());
+    let inspection = provider
+        .inspect(&key)
+        .expect("read-only inspection during scan");
+    assert!(inspection.directory.identity.is_some());
+    drop(inspection);
+    assert!(provider.trash(std::slice::from_ref(&key)).is_err());
+    provider.busy = false;
+    let inspection = provider
+        .inspect(&key)
+        .expect("read-only inspection despite a partial sibling scope");
+    drop(inspection);
+    assert!(provider.trash(std::slice::from_ref(&key)).is_err());
     stop_adapter_fixture(&mut provider, &rows);
 }

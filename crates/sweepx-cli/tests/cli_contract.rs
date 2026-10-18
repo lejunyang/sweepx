@@ -4810,7 +4810,7 @@ fn junk_system_reports_bounded_tool_discovery_in_both_locales() {
         assert_eq!(report["status"], "partial");
         assert_eq!(
             report["npmDiscovery"],
-            json!({"complete": false, "incompleteReason": "resource_limit"})
+            json!({"complete": false, "incompleteReason": "resource_limit", "detail": null})
         );
         assert_eq!(report["toolInstallations"], json!([]));
         assert!(

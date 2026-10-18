@@ -35,6 +35,8 @@ pub enum ResultPresentation {
 mod quarantine;
 use quarantine::QuarantineView;
 mod grouped;
+mod issues;
+pub use issues::JunkIssueKind;
 mod inspection;
 pub use grouped::JunkGrouping;
 pub use inspection::JunkInspection;
@@ -115,6 +117,12 @@ pub enum JunkEvent {
     Invalidated { revision: u64, key: String },
     /// Bounded diagnostic; never treated as an empty successful result.
     Error { revision: u64, message: String },
+    /// A classified coverage failure with a localized explanation.
+    Issue {
+        revision: u64,
+        kind: JunkIssueKind,
+        detail: String,
+    },
     /// Expected traversal exclusion, retained separately so it cannot hide an error.
     Notice { revision: u64, message: String },
     /// Commit a scope or retain its rows as historical after incomplete work.
@@ -227,6 +235,7 @@ pub struct JunkModel {
     rows: BTreeMap<String, ViewRow>,
     order: Vec<String>,
     marked: BTreeSet<String>,
+    pending_selection: Option<Vec<String>>,
     affected: Option<BTreeSet<String>>,
     cursor: usize,
     bytes: usize,
@@ -241,6 +250,7 @@ pub struct JunkModel {
     diagnostic: String,
     issue_count: u64,
     issue_history: Vec<String>,
+    issues: BTreeMap<JunkIssueKind, issues::IssueSummary>,
     notice_history: Vec<String>,
     dirty: bool,
     rejected: bool,
@@ -263,6 +273,7 @@ impl JunkModel {
             rows: BTreeMap::new(),
             order: Vec::new(),
             marked: BTreeSet::new(),
+            pending_selection: None,
             affected: None,
             cursor: 0,
             bytes: 0,
@@ -277,6 +288,7 @@ impl JunkModel {
             diagnostic: String::new(),
             issue_count: 0,
             issue_history: Vec::new(),
+            issues: BTreeMap::new(),
             notice_history: Vec::new(),
             dirty: false,
             rejected: false,
@@ -349,6 +361,7 @@ impl JunkModel {
             | JunkEvent::Invalidated { revision, .. }
             | JunkEvent::Error { revision, .. }
             | JunkEvent::Notice { revision, .. }
+            | JunkEvent::Issue { revision, .. }
             | JunkEvent::Completed { revision, .. } => *revision,
             JunkEvent::TrashResult { .. } => unreachable!(),
             JunkEvent::QuarantinePreview { .. } | JunkEvent::QuarantineFinished { .. } => {
@@ -397,6 +410,7 @@ impl JunkModel {
                 self.rejected = false;
                 self.issue_count = 0;
                 self.issue_history.clear();
+                self.issues.clear();
                 self.notice_history.clear();
             }
             JunkEvent::Phase { phase, .. } => self.phase = phase,
@@ -451,6 +465,10 @@ impl JunkModel {
                     row.observed_partial = false;
                 }
             }
+            JunkEvent::Issue { kind, detail, .. } => self.record_issue(kind, detail),
+            JunkEvent::Error { message, .. } if self.grouped.is_some() => {
+                self.record_issue(JunkIssueKind::Unavailable, message);
+            }
             JunkEvent::Error { message, .. } => {
                 self.issue_count = self.issue_count.saturating_add(1);
                 self.diagnostic(message);
@@ -459,6 +477,7 @@ impl JunkModel {
                 }
                 self.issue_history.push(self.diagnostic.clone());
             }
+            JunkEvent::Notice { .. } if self.grouped.is_some() => {}
             JunkEvent::Notice { message, .. } => {
                 self.issue_count = self.issue_count.saturating_add(1);
                 let previous = self.diagnostic.clone();
@@ -475,6 +494,17 @@ impl JunkModel {
                 outcome, replaced, ..
             } => {
                 self.busy = false;
+                if (outcome != JunkOutcome::Complete || !replaced || self.rejected)
+                    && self.pending_selection.take().is_some()
+                {
+                    self.diagnostic(
+                        self.text(
+                            "所选项目未能完成检查，按 e 查看原因",
+                            "Selected items could not be checked; press e for details",
+                        )
+                        .into(),
+                    );
+                }
                 self.outcome = Some(if self.rejected {
                     JunkOutcome::Partial
                 } else {
@@ -547,6 +577,7 @@ impl JunkModel {
             .min(self.order.len().saturating_sub(1));
         self.dirty = false;
         self.rebuild_groups();
+        self.finish_group_selection();
     }
 
     fn chosen(&self) -> Vec<String> {
@@ -577,6 +608,29 @@ impl JunkModel {
                     && row.row.complete()
                     && row.row.report_allows_trash()
             })
+    }
+
+    fn selection_message(&self, keys: &[String]) -> &str {
+        if self.busy {
+            self.text(
+                "扫描中，完成后可选择清理项；Enter 可查看文件",
+                "Scanning; select items when finished. Enter opens files",
+            )
+        } else if keys.iter().any(|key| {
+            self.rows
+                .get(key)
+                .is_some_and(|row| !row.row.report_allows_trash())
+        }) {
+            self.text(
+                "此项暂不支持直接清理；Enter 可查看文件",
+                "This item cannot be cleaned directly. Enter opens files",
+            )
+        } else {
+            self.text(
+                "此项尚未检查完成；Enter 查看文件，r 重新检查",
+                "This item has not been fully checked. Enter opens files; r checks it again",
+            )
+        }
     }
 
     fn trash_unavailable_message(&self, keys: &[String]) -> &str {
@@ -1014,25 +1068,15 @@ pub fn run_junk_loop<B: Backend, E: BrowserEventSource, P: JunkProvider, T: Term
                     );
                 }
             }
-            KeyCode::Char('u') => model.marked.clear(),
+            KeyCode::Char('u') => {
+                model.marked.clear();
+                model.pending_selection = None;
+            }
             KeyCode::Enter
                 if model.presentation == ResultPresentation::Junk
-                    && !model.busy
                     && model.trash_pending.is_empty() =>
             {
                 if let Some(key) = model.order.get(model.cursor).cloned() {
-                    let row = &model.rows[&key];
-                    if row.historical || !row.current {
-                        model.diagnostic(
-                            model
-                                .text(
-                                    "先刷新当前候选再查看细分",
-                                    "Refresh this candidate before opening its breakdown",
-                                )
-                                .into(),
-                        );
-                        continue;
-                    }
                     match provider.inspect(&key) {
                         Ok(inspection) => {
                             let result = inspection::run(
@@ -1051,10 +1095,7 @@ pub fn run_junk_loop<B: Backend, E: BrowserEventSource, P: JunkProvider, T: Term
                             if !model.review_paths.is_empty() {
                                 model.diagnostic(format!(
                                     "{}\n{}",
-                                    model.text(
-                                        "待核验清单（未授权删除）",
-                                        "Review list (deletion not authorized)"
-                                    ),
+                                    model.text("已标记的文件", "Marked files"),
                                     model.review_paths.join("\n")
                                 ));
                             }
@@ -1073,6 +1114,16 @@ pub fn run_junk_loop<B: Backend, E: BrowserEventSource, P: JunkProvider, T: Term
                 {
                     model.diagnostic(error);
                 }
+            }
+            KeyCode::Char('r' | 'R') if model.busy => {
+                model.diagnostic(
+                    model
+                        .text(
+                            "正在扫描，c 可停止本次扫描",
+                            "Scanning; press c to stop this scan",
+                        )
+                        .into(),
+                );
             }
             KeyCode::Char('r' | 'R') if !model.busy && model.trash_pending.is_empty() => {
                 let keys = if key.code == KeyCode::Char('R') {
@@ -1162,13 +1213,7 @@ pub fn run_junk_browser<P: JunkProvider>(
         drop(terminal);
         guard.restore();
         if !model.review_paths.is_empty() {
-            println!(
-                "{}",
-                model.text(
-                    "待核验清单（未授权删除；大小不代表可删除性）",
-                    "Review list (deletion not authorized; size does not establish disposability)"
-                )
-            );
+            println!("{}", model.text("已标记的文件", "Marked files"));
             for path in &model.review_paths {
                 println!("{}", crate::live::sanitize_terminal_text(path));
             }

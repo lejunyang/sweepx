@@ -2392,7 +2392,7 @@ fn incomplete_tool_discovery_keeps_positive_rows_and_partial_terminal_state() {
         .unwrap();
     let session = JunkSession { shared };
     let events = drain(&session, job.revision);
-    assert!(events.iter().any(|event| matches!(&event.kind, JunkSessionEventKind::Error(failure) if failure.code == "discovery_incomplete")));
+    assert!(events.iter().any(|event| matches!(&event.kind, JunkSessionEventKind::Error(failure) if failure.code == "layout_discovery_incomplete" || failure.code == "npm_discovery_incomplete")));
     assert!(matches!(
         events.last().unwrap().kind,
         JunkSessionEventKind::Completed {
@@ -2913,6 +2913,23 @@ fn deep_scope_keeps_project_roots_and_includes_fresh_platform_rules() {
             row.logical_bytes(),
             &sweepx_platform::known_u128(u128::from(fs::symlink_metadata(payload).unwrap().len()))
         );
+    }
+    for (key, row) in &rows {
+        let job = Job {
+            revision: JunkSessionRevision(2),
+            selected: Some(vec![*key]),
+            paths: None,
+            cancel: CancellationToken::new(),
+        };
+        let ids = worker.discovery_rule_ids(&job).unwrap();
+        if row.candidate.rule_id == "tool.pip-cache" {
+            assert_eq!(ids, ["tool.pip-cache"]);
+        } else {
+            assert!(
+                ids.is_empty(),
+                "project-only rechecks do not invoke unrelated platform probes"
+            );
+        }
     }
     fs::rename(cache.join("wheels"), cache.join("no-longer-a-marker")).unwrap();
     let second = current(&run(&mut worker, 2));

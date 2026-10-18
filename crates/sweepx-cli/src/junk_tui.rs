@@ -15,7 +15,7 @@ use sweepx_core::junk::session::{
 use sweepx_i18n::Locale;
 use sweepx_model::{ByteValue, HumanSizeUnit, ScanSort};
 use sweepx_tui::junk::{
-    JunkEvent, JunkInspection, JunkOutcome, JunkProvider, JunkRow, run_junk_browser,
+    JunkEvent, JunkInspection, JunkIssueKind, JunkOutcome, JunkProvider, JunkRow, run_junk_browser,
 };
 #[cfg(target_os = "linux")]
 mod quarantine;
@@ -56,9 +56,9 @@ pub(crate) fn run(
     if let Some(root) = cache_state_root {
         request.set_state_cache(root);
     }
-    // Disk-wide notifications continuously arrive from unrelated applications. Deep mode is
-    // one explicit pass, with manual refresh, so those events cannot schedule endless full walks.
-    request.watch = scan_mode != "deep";
+    // An interactive cleanup result must remain available while the user reviews it. Cache
+    // writes can otherwise immediately replace a finished scan with another busy revision.
+    request.watch = false;
     let candidate_byte_budget = request.limits.max_candidate_bytes;
     let session = match JunkSession::start(request) {
         Ok(session) => session,
@@ -501,16 +501,42 @@ impl Provider {
                     ) {
                         JunkEvent::Notice { revision, message }
                     } else {
-                        JunkEvent::Error { revision, message }
+                        JunkEvent::Issue {
+                            revision,
+                            kind: match boundary.kind {
+                                _ if boundary.detail == "special filesystem entry rejected" => {
+                                    JunkIssueKind::SkippedEntry
+                                }
+                                sweepx_platform::BoundaryKind::AccessDenied => {
+                                    JunkIssueKind::Permission
+                                }
+                                sweepx_platform::BoundaryKind::Mount
+                                | sweepx_platform::BoundaryKind::OtherFilesystem => {
+                                    JunkIssueKind::OtherVolume
+                                }
+                                sweepx_platform::BoundaryKind::ResourceLimit => {
+                                    JunkIssueKind::Capacity
+                                }
+                                _ => JunkIssueKind::Unavailable,
+                            },
+                            detail: message,
+                        }
                     },
                 );
             }
             JunkSessionEventKind::Error(error)
             | JunkSessionEventKind::CacheWarning(error)
             | JunkSessionEventKind::WatchWarning(error) => {
-                return Some(JunkEvent::Error {
+                return Some(JunkEvent::Issue {
                     revision,
-                    message: format!("{}: {}", error.code, error.detail),
+                    kind: match error.code {
+                        "npm_discovery_incomplete" => JunkIssueKind::NpmDiscovery,
+                        "layout_discovery_incomplete" => JunkIssueKind::AppDiscovery,
+                        "resource_limit" => JunkIssueKind::Capacity,
+                        "watch_unavailable" => JunkIssueKind::Watch,
+                        _ => JunkIssueKind::Unavailable,
+                    },
+                    detail: error.detail,
                 });
             }
             JunkSessionEventKind::Completed {
@@ -592,16 +618,12 @@ impl JunkProvider for Provider {
         self.limits.bytes
     }
     fn inspect(&mut self, key: &str) -> Result<JunkInspection, String> {
-        if self.busy || self.mutation_busy() || !self.pending.is_empty() {
-            return Err("complete the current scan or operation first".into());
+        if self.mutation_busy() {
+            return Err("a cleanup operation is running".into());
         }
         let row = self.rows.get(key).ok_or("unknown candidate key")?;
-        if !row.current
-            || row.preview
-            || self.historical.contains(key)
-            || row.row.directory_aggregate().is_none()
-        {
-            return Err("refresh this directory candidate first".into());
+        if row.preview || row.revision != self.revision || row.row.directory_aggregate().is_none() {
+            return Err("refresh this item before opening its files".into());
         }
         let directory = row
             .row
@@ -611,10 +633,18 @@ impl JunkProvider for Provider {
             .ok_or("native directory unavailable")?;
         // Atomically prevent a watcher revision racing the captured binding. Native notifications
         // keep accumulating while the detail worker independently revalidates the original chain.
-        let pause = self
-            .session
-            .suspend_auto_refresh()
-            .map_err(|e| e.to_string())?;
+        // During a scan the consumer stops draining events while inspecting. The bounded
+        // mailbox prevents a later revision from overtaking it; no filesystem work joins the
+        // UI thread. An idle session needs a lease against independently enabled listeners.
+        let pause = if self.busy {
+            None
+        } else {
+            Some(
+                self.session
+                    .suspend_auto_refresh()
+                    .map_err(|e| e.to_string())?,
+            )
+        };
         let provider = super::tui_adapter::tui_directory_detail_rescan_provider(&directory);
         Ok(JunkInspection {
             directory,
@@ -844,7 +874,7 @@ impl JunkProvider for Provider {
 /// The lease survives a detached/non-cooperative detail worker; notifications are never discarded.
 struct InspectionProvider {
     inner: super::tui_adapter::TuiDetailRescanProvider,
-    _pause: JunkAutoRefreshPause,
+    _pause: Option<JunkAutoRefreshPause>,
 }
 impl sweepx_tui::DetailRescanProvider for InspectionProvider {
     fn prepare_detail_rescan(&self) {

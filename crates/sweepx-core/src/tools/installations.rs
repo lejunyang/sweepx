@@ -191,6 +191,8 @@ pub struct ToolDiscoveryReport {
     pub installations: Vec<ToolInstallation>,
     /// First failure to establish complete coverage, if any.
     pub incomplete_reason: Option<ToolDiscoveryFailure>,
+    /// First failed observation or cache probe, with a bounded location/error explanation.
+    pub failure_detail: Option<String>,
     /// Charged filesystem operations, including unsuccessful calls.
     pub observations: usize,
     /// Charged cumulative retained-data estimate, including temporary discovery indexes.
@@ -202,6 +204,7 @@ struct Discovery {
     observations: usize,
     retained_bytes: usize,
     failure: Option<ToolDiscoveryFailure>,
+    failure_detail: Option<String>,
     stopped: bool,
     executable_identities: std::collections::BTreeMap<PathBuf, Option<PathBuf>>,
     cache_activity: std::collections::BTreeMap<PathBuf, Option<SystemTime>>,
@@ -214,6 +217,7 @@ impl Discovery {
             observations: 0,
             retained_bytes: 0,
             failure: None,
+            failure_detail: None,
             stopped: false,
             executable_identities: std::collections::BTreeMap::new(),
             cache_activity: std::collections::BTreeMap::new(),
@@ -284,11 +288,39 @@ impl Discovery {
         }
         match result {
             Ok(value) => Some(value),
-            Err(_) => {
+            Err(error) => {
+                self.retain_failure_detail(error.to_string());
                 self.fail(ToolDiscoveryFailure::ObservationUnavailable);
                 None
             }
         }
+    }
+
+    fn retain_failure_detail(&mut self, mut detail: String) {
+        if self.failure_detail.is_some() {
+            return;
+        }
+        if detail.len() > 2048 {
+            let mut end = 2048;
+            while !detail.is_char_boundary(end) {
+                end -= 1;
+            }
+            detail.truncate(end);
+        }
+        self.failure_detail = Some(detail);
+    }
+
+    fn observe_at<T>(
+        &mut self,
+        runner: &ProbeRunner,
+        path: &Path,
+        read: impl FnOnce() -> std::io::Result<T>,
+    ) -> Option<T> {
+        self.observe(runner, || {
+            read().map_err(|error| {
+                std::io::Error::new(error.kind(), format!("{}: {error}", path.display()))
+            })
+        })
     }
 
     fn observe_optional_path<T>(
@@ -302,6 +334,19 @@ impl Discovery {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             result => result.map(Some),
         })?
+    }
+
+    fn observe_optional_path_at<T>(
+        &mut self,
+        runner: &ProbeRunner,
+        path: &Path,
+        read: impl FnOnce() -> std::io::Result<T>,
+    ) -> Option<T> {
+        self.observe_optional_path(runner, || {
+            read().map_err(|error| {
+                std::io::Error::new(error.kind(), format!("{}: {error}", path.display()))
+            })
+        })
     }
 
     fn executable_identity(&mut self, runner: &ProbeRunner, path: &Path) -> Option<PathBuf> {
@@ -327,7 +372,7 @@ impl Discovery {
         if !self.path(path) {
             return None;
         }
-        let metadata = self.observe_optional_path(runner, || std::fs::metadata(path))?;
+        let metadata = self.observe_optional_path_at(runner, path, || std::fs::metadata(path))?;
         if !metadata.is_file() {
             return None;
         }
@@ -340,7 +385,7 @@ impl Discovery {
         }
         // Executable resolution intentionally follows package-manager launchers. This is tool
         // inventory, never native scanner or mutation authority. Resolve each spelling once.
-        let identity = self.observe(runner, || std::fs::canonicalize(path))?;
+        let identity = self.observe_at(runner, path, || std::fs::canonicalize(path))?;
         self.path(&identity).then_some(identity)
     }
 
@@ -355,6 +400,36 @@ impl Discovery {
             return None;
         }
         let mut command = std::process::Command::new(executable);
+        // npm launchers commonly use /usr/bin/env node. An inventory of several installed
+        // versions must use each installation's sibling runtime rather than an unrelated or
+        // unconfigured ambient shim. This changes only the probe's child environment.
+        #[cfg(windows)]
+        let runtime_name = "node.exe";
+        #[cfg(not(windows))]
+        let runtime_name = "node";
+        if let Some(directory) = executable.parent()
+            && self
+                .executable_identity(runner, &directory.join(runtime_name))
+                .is_some()
+        {
+            let ambient_path = std::env::var_os("PATH").unwrap_or_default();
+            let path = std::env::join_paths(
+                std::iter::once(directory.to_path_buf())
+                    .chain(std::env::split_paths(&ambient_path)),
+            );
+            let Ok(path) = path else {
+                self.retain_failure_detail(format!(
+                    "{}: matching Node path cannot be encoded",
+                    directory.display()
+                ));
+                self.fail(ToolDiscoveryFailure::ProbeUnavailable);
+                return None;
+            };
+            command.env("PATH", path);
+        }
+        if !self.available(runner) {
+            return None;
+        }
         #[cfg(test)]
         let started = std::time::Instant::now();
         let result = runner.run(command.args(arguments));
@@ -390,9 +465,16 @@ impl Discovery {
                         ),
                     }
                 }
-                #[cfg(not(test))]
-                let _ = rejected;
                 if required {
+                    let reason = match rejected {
+                        Err(error) => error.to_string(),
+                        Ok(output) => format!("cache query exited with status {}", output.status),
+                    };
+                    self.retain_failure_detail(format!(
+                        "{} {}: {reason}",
+                        executable.display(),
+                        arguments.join(" ")
+                    ));
                     self.fail(ToolDiscoveryFailure::ProbeUnavailable);
                 }
                 return None;
@@ -407,6 +489,11 @@ impl Discovery {
         });
         let Some(answer) = answer else {
             if required {
+                self.retain_failure_detail(format!(
+                    "{} {}: cache query returned no usable location",
+                    executable.display(),
+                    arguments.join(" ")
+                ));
                 self.fail(ToolDiscoveryFailure::ProbeUnavailable);
             }
             return None;
@@ -424,7 +511,8 @@ impl Discovery {
         if !self.path(directory) {
             return None;
         }
-        let root = self.observe_optional_path(runner, || std::fs::symlink_metadata(directory))?;
+        let root = self
+            .observe_optional_path_at(runner, directory, || std::fs::symlink_metadata(directory))?;
         if !root.is_dir() || root.file_type().is_symlink() {
             return None;
         }
@@ -449,11 +537,11 @@ impl Discovery {
             }
         }
         let mut newest = root.modified().ok()?;
-        let mut entries = self.observe(runner, || std::fs::read_dir(directory))?;
+        let mut entries = self.observe_at(runner, directory, || std::fs::read_dir(directory))?;
         loop {
             // Iterator advancement consumes budget, including its terminal check. An exhausted
             // prefix cannot prove newest activity, so return unknown and discard its partial max.
-            let next = self.observe(runner, || entries.next().transpose())?;
+            let next = self.observe_at(runner, directory, || entries.next().transpose())?;
             let Some(entry) = next else {
                 break;
             };
@@ -461,7 +549,7 @@ impl Discovery {
             if !self.path(&path) {
                 return None;
             }
-            let metadata = self.observe(runner, || std::fs::symlink_metadata(&path))?;
+            let metadata = self.observe_at(runner, &path, || std::fs::symlink_metadata(&path))?;
             // Link metadata describes the link itself; do not measure its target or read contents.
             let modified = metadata.modified().ok()?;
             newest = newest.max(modified);
@@ -535,6 +623,7 @@ fn finish(discovery: Discovery, installations: Vec<ToolInstallation>) -> ToolDis
     ToolDiscoveryReport {
         installations,
         incomplete_reason: discovery.failure,
+        failure_detail: discovery.failure_detail,
         observations: discovery.observations,
         retained_bytes: discovery.retained_bytes,
     }
@@ -598,11 +687,11 @@ fn discover_from(
             break;
         }
         let Some(mut entries) =
-            discovery.observe_optional_path(runner, || std::fs::read_dir(&root))
+            discovery.observe_optional_path_at(runner, &root, || std::fs::read_dir(&root))
         else {
             continue;
         };
-        while let Some(next) = discovery.observe(runner, || entries.next().transpose()) {
+        while let Some(next) = discovery.observe_at(runner, &root, || entries.next().transpose()) {
             let Some(entry) = next else {
                 break;
             };
@@ -613,7 +702,26 @@ fn discover_from(
                 discovery.fail(ToolDiscoveryFailure::ResourceLimit);
                 break;
             }
-            let mut executable = entry.path();
+            let path = entry.path();
+            let Some(kind) = discovery.observe_at(runner, &path, || entry.file_type()) else {
+                continue;
+            };
+            // Version roots may contain host files such as .DS_Store. A regular file is
+            // not an installation prefix; appending bin/npm would fabricate an I/O failure.
+            if !kind.is_dir() {
+                if !kind.is_symlink() {
+                    continue;
+                }
+                let Some(metadata) =
+                    discovery.observe_at(runner, &path, || std::fs::metadata(&path))
+                else {
+                    continue;
+                };
+                if !metadata.is_dir() {
+                    continue;
+                }
+            }
+            let mut executable = path;
             for component in layout.executable_from_version {
                 executable.push(component);
             }

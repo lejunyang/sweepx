@@ -3725,7 +3725,16 @@ pub fn render_live_browser_at_phase(
         ])
         .split(area);
 
-    let title = if model.progressive_navigation && model.inspection.is_none() {
+    let title = if model.inspection.is_some() {
+        format!(
+            "{} · {}",
+            match model.locale {
+                Locale::ZhCn => "文件详情",
+                Locale::EnUs => "Files",
+            },
+            inspection_state_label(model)
+        )
+    } else if model.progressive_navigation {
         let state = match model.current_detail_rescan_state() {
             _ if model.background_directory().is_some()
                 && !matches!(
@@ -4252,6 +4261,25 @@ fn browser_row_coverage_label(row: &BrowserRow) -> String {
 /// The path goes in the footer rather than in the row because the footer spans the whole width and can
 /// wrap, while the name column is the very thing that was too narrow. It is wrapped in an explicit
 /// marker so a path that itself ends in whitespace, or that is empty, still reads unambiguously.
+fn inspection_state_label(model: &BrowserModel) -> &'static str {
+    let labels = match model.current_detail_rescan_state() {
+        Some(DetailRescanState::Stale {
+            failure: DetailRescanFailure::AccessDenied,
+            ..
+        }) => ("没有权限读取", "Permission denied"),
+        Some(DetailRescanState::Stale { .. }) => {
+            ("读取失败，r 重试", "Could not read files; r retries")
+        }
+        Some(DetailRescanState::Pending { .. }) => ("正在读取", "Loading"),
+        _ if model.current_size_scanning() => ("正在统计大小", "Calculating sizes"),
+        _ => ("文件列表", "File list"),
+    };
+    match model.locale {
+        Locale::ZhCn => labels.0,
+        Locale::EnUs => labels.1,
+    }
+}
+
 fn browser_footer_text(model: &BrowserModel) -> String {
     let help = if model.inspection.is_some() {
         inspection_help(model.locale())
@@ -4263,7 +4291,9 @@ fn browser_footer_text(model: &BrowserModel) -> String {
     } else {
         help.to_owned()
     };
-    let detail = if model.progressive_navigation && model.inspection.is_none() {
+    let detail = if model.inspection.is_some() {
+        format!("{help} | {}", inspection_state_label(model))
+    } else if model.progressive_navigation {
         let state = match model.current_detail_rescan_state() {
             Some(DetailRescanState::Stale {
                 failure: DetailRescanFailure::AccessDenied,
@@ -4418,18 +4448,18 @@ fn read_only_label(locale: Locale) -> &'static str {
 
 fn inspection_label(locale: Locale) -> &'static str {
     match locale {
-        Locale::ZhCn => "只读细分 · 待核验清单",
-        Locale::EnUs => "Read-only breakdown · Review list",
+        Locale::ZhCn => "文件详情",
+        Locale::EnUs => "Files",
     }
 }
 
 fn inspection_help(locale: Locale) -> &'static str {
     match locale {
         Locale::ZhCn => {
-            "↑/↓ 选择  Enter/→ 进入  Esc/← 返回  Space 待核验(≤32)  p 完整路径  q 返回候选 · 清单不授权删除"
+            "↑/↓ 选择  Enter/→ 进入  Esc/← 返回  Space 标记(≤32)  p 完整路径  q 返回列表"
         }
         Locale::EnUs => {
-            "↑/↓ select  Enter/→ open  Esc/← back  Space review (≤32)  p full path  q back to candidates · review does not authorize deletion"
+            "↑/↓ select  Enter/→ open  Esc/← back  Space mark (≤32)  p full path  q back to results"
         }
     }
 }
@@ -4849,6 +4879,36 @@ mod tests {
     }
 
     #[test]
+    fn inspection_header_and_footer_show_file_state_without_internal_scan_identifiers() {
+        let root = rescan_model(coverage()).nodes[0].entry.clone();
+        let model = BrowserModel::from_progressive_inspection(
+            Locale::ZhCn,
+            root,
+            HumanSizeUnit::Bytes,
+            ScanSort::Path,
+        )
+        .unwrap();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 24)).unwrap();
+        terminal
+            .draw(|frame| render_live_browser(frame, frame.area(), &model))
+            .unwrap();
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(screen.replace(' ', "").contains("文件详情"));
+        assert!(
+            !screen.contains("scan-live")
+                && !screen.contains("partial")
+                && !screen.contains("revision")
+        );
+    }
+
+    #[test]
     fn inspection_review_is_bounded_and_never_emits_trash() {
         let root = rescan_model(coverage()).nodes[0].entry.clone();
         let inspection = BrowserModel::from_progressive_inspection(
@@ -4905,9 +4965,7 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect();
         assert!(
-            screen.contains("On disk")
-                && screen.contains("Read-only breakdown")
-                && screen.contains("31 / 32")
+            screen.contains("On disk") && screen.contains("Files") && screen.contains("31 / 32")
         );
         assert!(!screen.contains("move to Trash"));
         let mut unbound = model.nodes[0].entry.clone();

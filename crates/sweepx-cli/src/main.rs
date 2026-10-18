@@ -253,15 +253,13 @@ enum Commands {
         /// regular cleanup; --deep traverses the system disk with all supported rules.
         /// Space selects eligible items; d previews the selection, Enter confirms. Moves selected
         /// current, complete directory candidates to Trash after native identity revalidation.
-        /// Linux/macOS/Windows show historical caches first. Regular/custom scans keep native
-        /// change listeners alive; --deep runs one pass and refreshes only on request.
-        /// Changes refresh affected directories; listener gaps trigger a full fresh scan.
+        /// Runs one scan and keeps the result open for review. r/R explicitly refreshes results.
         /// Junk traversal allows up to 4,194,304 directories while retaining bounded candidate
         /// evidence. Mount/permission gaps remain partial; macOS / includes verified System and Data.
         /// Enter expands groups and nested candidates; i or Enter on a leaf opens read-only files.
         /// Space in file details records up to 32 review paths;
         /// q returns to candidates, and the latest review list is printed on exit without deleting.
-        /// Only freshly verified rows can be moved; c pauses automatic refresh until manual refresh.
+        /// Only freshly verified rows can be moved; c stops the current scan.
         /// Dart and SvelteKit content-profile candidates remain report-only while ownership is unverified.
         /// On Linux, x previews selected temporary objects for quarantine with typed full-digest confirmation.
         #[arg(long, conflicts_with_all = ["timings", "trash", "clean_temp"])]
@@ -2001,6 +1999,7 @@ fn run_junk_scan(
                 "npmDiscovery": platform_rules.iter().any(|rule| rule.root_kind == "npm_reported_cache").then(|| json!({
                     "complete": tool_failure.is_none(),
                     "incompleteReason": tool_failure.map(|failure| failure.code()),
+                    "detail": evidence.tool_discovery_detail(),
                 })),
                 "candidateCount": candidates.len(),
                 "knownReclaimableBytes": known_reclaimable.map(|value| value.to_string()),

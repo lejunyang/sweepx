@@ -544,8 +544,9 @@ fn enter_inspects_only_the_cursor_and_keeps_report_only_guards() {
         &NeverTerminate,
     )
     .unwrap();
-    assert_eq!(provider.inspected.len(), 1);
-    assert!(model.diagnostic.contains("Refresh this candidate"));
+    assert_eq!(provider.inspected.len(), 2);
+    assert!(model.diagnostic.contains("native directory unavailable"));
+    assert!(provider.trashed.is_empty());
 }
 
 struct TimedEvents {
@@ -1319,4 +1320,32 @@ fn managed_details_scroll_and_return_without_a_cleanup_request() {
     assert!(line(1).contains("/projects/one total=4096"));
     assert!(line(2).contains("/projects/two total=8192"));
     assert!(line(3).contains("Single link can be a clone import"));
+}
+
+#[test]
+fn enter_during_scanning_delegates_read_only_inspection_and_preserves_trash_guards() {
+    let mut provider = Provider::default();
+    let mut model = JunkModel::new(Locale::EnUs, HumanSizeUnit::Bytes);
+    model.apply(JunkEvent::Started {
+        revision: 1,
+        keys: None,
+    });
+    model.apply(JunkEvent::Candidate {
+        revision: 1,
+        current: false,
+        historical: false,
+        row: row("a", "/a"),
+    });
+    let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+    run_junk_loop(
+        &mut terminal,
+        &mut model,
+        &mut Events(VecDeque::from([KeyCode::Enter, KeyCode::Char('q')])),
+        &mut provider,
+        &NeverTerminate,
+    )
+    .unwrap();
+    assert_eq!(provider.inspected, ["a"]);
+    assert!(provider.trashed.is_empty());
+    assert!(!model.eligible("a"));
 }

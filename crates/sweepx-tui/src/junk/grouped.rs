@@ -220,98 +220,115 @@ impl JunkModel {
             owner_label: self.text("未识别来源", "Unidentified source").into(),
             named_application: false,
         };
-        view.title = match &view.location {
-            Location::Categories => self.text("分类总览", "Categories").into(),
-            Location::Owners(category) => groups
-                .values()
-                .find(|group| &group.category == category)
-                .map_or_else(|| category.clone(), |group| group.category_label.clone()),
-            Location::Items(_, owner) => owner.clone(),
-            Location::Children(key) => self.rows.get(key).map_or_else(
-                || self.text("候选已移除", "Candidate removed").into(),
-                |row| row.row.path().into(),
-            ),
-        };
-        let mut nodes: BTreeMap<String, Node> = BTreeMap::new();
-        for key in self.rows.keys() {
-            let outer = &top[key];
-            let group = groups.get(outer).unwrap_or(&fallback);
-            let (id, label, next, candidate) = match &view.location {
-                Location::Categories => (
-                    group.category.clone(),
-                    group.category_label.clone(),
-                    Location::Owners(group.category.clone()),
-                    None,
+        loop {
+            view.title = match &view.location {
+                Location::Categories => self.text("分类总览", "Categories").into(),
+                Location::Owners(category) => groups
+                    .values()
+                    .find(|group| &group.category == category)
+                    .map_or_else(
+                        || self.text("扫描结果", "Results").into(),
+                        |group| group.category_label.clone(),
+                    ),
+                Location::Items(_, owner) => owner.clone(),
+                Location::Children(key) => self.rows.get(key).map_or_else(
+                    || self.text("候选已移除", "Candidate removed").into(),
+                    |row| row.row.path().into(),
                 ),
-                Location::Owners(category) if category == &group.category => {
-                    let label = if group.named_application {
-                        group.owner_label.clone()
-                    } else {
-                        format!(
-                            "{} · {}",
-                            group.owner_label,
-                            self.text("来源目录", "source location")
-                        )
-                    };
-                    (
-                        group.owner.clone(),
-                        label,
-                        Location::Items(category.clone(), group.owner.clone()),
-                        None,
-                    )
-                }
-                Location::Items(category, owner)
-                    if category == &group.category && owner == &group.owner =>
-                {
-                    (
-                        outer.clone(),
-                        item_label(self.rows[outer].row.as_ref(), self.locale),
-                        Location::Children(outer.clone()),
-                        Some(outer.clone()),
-                    )
-                }
-                Location::Children(parent) => {
-                    let mut child = key;
-                    while let Some(ancestor) = view.parents.get(child) {
-                        if ancestor == parent {
-                            break;
-                        }
-                        child = ancestor;
-                    }
-                    if view.parents.get(child) != Some(parent) {
-                        continue;
-                    }
-                    (
-                        child.clone(),
-                        item_label(self.rows[child].row.as_ref(), self.locale),
-                        Location::Children(child.clone()),
-                        Some(child.clone()),
-                    )
-                }
-                _ => continue,
             };
-            nodes
-                .entry(id.clone())
-                .or_insert_with(|| Node {
-                    id,
-                    label,
-                    keys: Vec::new(),
-                    bytes: EvidenceValue::Unknown {
-                        reason: ReasonCode::NotRevalidated,
-                    },
-                    next,
-                    candidate,
+            let mut nodes: BTreeMap<String, Node> = BTreeMap::new();
+            for key in self.rows.keys() {
+                let outer = &top[key];
+                let group = groups.get(outer).unwrap_or(&fallback);
+                let (id, label, next, candidate) = match &view.location {
+                    Location::Categories => (
+                        group.category.clone(),
+                        group.category_label.clone(),
+                        Location::Owners(group.category.clone()),
+                        None,
+                    ),
+                    Location::Owners(category) if category == &group.category => {
+                        let label = if group.named_application {
+                            group.owner_label.clone()
+                        } else {
+                            format!(
+                                "{} · {}",
+                                group.owner_label,
+                                self.text("来源目录", "source location")
+                            )
+                        };
+                        (
+                            group.owner.clone(),
+                            label,
+                            Location::Items(category.clone(), group.owner.clone()),
+                            None,
+                        )
+                    }
+                    Location::Items(category, owner)
+                        if category == &group.category && owner == &group.owner =>
+                    {
+                        (
+                            outer.clone(),
+                            item_label(self.rows[outer].row.as_ref(), self.locale),
+                            Location::Children(outer.clone()),
+                            Some(outer.clone()),
+                        )
+                    }
+                    Location::Children(parent) => {
+                        let mut child = key;
+                        while let Some(ancestor) = view.parents.get(child) {
+                            if ancestor == parent {
+                                break;
+                            }
+                            child = ancestor;
+                        }
+                        if view.parents.get(child) != Some(parent) {
+                            continue;
+                        }
+                        (
+                            child.clone(),
+                            item_label(self.rows[child].row.as_ref(), self.locale),
+                            Location::Children(child.clone()),
+                            Some(child.clone()),
+                        )
+                    }
+                    _ => continue,
+                };
+                nodes
+                    .entry(id.clone())
+                    .or_insert_with(|| Node {
+                        id,
+                        label,
+                        keys: Vec::new(),
+                        bytes: EvidenceValue::Unknown {
+                            reason: ReasonCode::NotRevalidated,
+                        },
+                        next,
+                        candidate,
+                    })
+                    .keys
+                    .push(key.clone());
+            }
+            view.nodes = nodes
+                .into_values()
+                .map(|mut node| {
+                    node.bytes = total(self, &node.keys, &view.parents);
+                    node
                 })
-                .keys
-                .push(key.clone());
+                .collect();
+            if !view.nodes.is_empty() || matches!(view.location, Location::Categories) {
+                break;
+            }
+            // A freshly completed outer candidate can absorb the source/category the user
+            // entered while scanning. Recover through the existing bounded navigation stack
+            // instead of trapping keyboard navigation in a permanently empty location.
+            if let Some((location, cursor)) = view.stack.pop() {
+                view.location = location;
+                view.cursor = cursor;
+            } else {
+                view.location = Location::Categories;
+            }
         }
-        view.nodes = nodes
-            .into_values()
-            .map(|mut node| {
-                node.bytes = total(self, &node.keys, &view.parents);
-                node
-            })
-            .collect();
         view.nodes.sort_by(|a, b| {
             let value = |node: &Node| match node.bytes {
                 EvidenceValue::Known { value } | EvidenceValue::LowerBound { value, .. } => {
@@ -333,15 +350,86 @@ impl JunkModel {
         self.grouped = Some(view);
     }
 
+    pub(super) fn finish_group_selection(&mut self) {
+        if !self.busy
+            && let Some(keys) = self.pending_selection.take()
+        {
+            self.group_select(keys);
+        }
+    }
+
+    fn group_select_or_check<P: JunkProvider>(&mut self, keys: Vec<String>, provider: &mut P) {
+        if !self.busy {
+            let actionable: Vec<_> = keys
+                .iter()
+                .filter(|key| {
+                    self.rows.get(*key).is_some_and(|row| {
+                        row.current && row.row.complete() && row.row.report_allows_trash()
+                    })
+                })
+                .cloned()
+                .collect();
+            let recheck: Vec<_> = actionable
+                .iter()
+                .filter(|key| !self.eligible(key))
+                .cloned()
+                .collect();
+            if !recheck.is_empty() {
+                if actionable.len() > MAX_SELECTION {
+                    self.diagnostic(
+                        self.text(
+                            "请展开后分批选择，每次最多 256 项",
+                            "Expand and select at most 256 items per batch",
+                        )
+                        .into(),
+                    );
+                    return;
+                }
+                match provider.refresh(&recheck) {
+                    Ok(()) => {
+                        self.pending_selection = Some(actionable);
+                        self.busy = true;
+                        self.diagnostic(
+                            self.text("正在检查所选项目…", "Checking selected items…")
+                                .into(),
+                        );
+                    }
+                    Err(error) => self.diagnostic(error),
+                }
+                return;
+            }
+        }
+        self.group_select(keys);
+    }
+
     fn group_select(&mut self, keys: Vec<String>) {
         let Some(view) = &self.grouped else {
             return;
         };
+        if self.busy {
+            self.diagnostic(
+                self.text(
+                    "扫描中，完成后可选择清理项；Enter 可查看文件",
+                    "Scanning; select items when finished. Enter opens files",
+                )
+                .into(),
+            );
+            return;
+        }
         let eligible: Vec<_> = keys
             .iter()
             .filter(|key| self.eligible(key))
             .cloned()
             .collect();
+        if eligible.is_empty()
+            && !self
+                .marked
+                .iter()
+                .any(|marked| keys.iter().any(|key| contains(&view.parents, marked, key)))
+        {
+            self.diagnostic(self.selection_message(&keys).into());
+            return;
+        }
         // Preserve eligible children if their outer candidate is report-only, otherwise select
         // only the outer row. Existing selections outside this group survive.
         let eligible: Vec<_> = roots(&eligible, &view.parents)
@@ -400,11 +488,12 @@ impl JunkModel {
             return;
         }
         self.marked = selection;
-        self.diagnostic(if inherited.is_empty() {
-            self.text("只选择当前满足清理条件的候选；仅报告、历史或不完整项不会选入", "Only current eligible candidates are selected; report-only, historical and incomplete items are excluded")
-        } else {
-            self.text("已取消上层整目录选择，仅保留已识别且可清理的其他子项", "Whole-directory selection removed; only other recognized eligible child candidates remain selected")
-        }.into());
+        self.diagnostic(format!(
+            "{} {} {}",
+            self.text("已选择", "Selected"),
+            self.marked.len(),
+            self.text("项", "items")
+        ));
     }
 
     /// Returns true when the hierarchy consumed the key. Leaf inspection continues through the
@@ -510,7 +599,9 @@ impl JunkModel {
                 view.cursor = 0;
                 self.rebuild_groups();
             }
-            KeyCode::Char(' ') => self.group_select(self.grouped.as_ref().unwrap().focused_keys()),
+            KeyCode::Char(' ') => {
+                self.group_select_or_check(self.grouped.as_ref().unwrap().focused_keys(), provider)
+            }
             KeyCode::Char('a') => {
                 let keys: Vec<String> = self
                     .grouped
@@ -521,12 +612,13 @@ impl JunkModel {
                     .flat_map(|node| node.keys.clone())
                     .collect();
                 let view = self.grouped.as_ref().unwrap();
-                if !keys
-                    .iter()
-                    .filter(|key| self.eligible(key))
-                    .all(|key| effectively_selected(self, view, key))
+                if !keys.iter().any(|key| self.eligible(key))
+                    || !keys
+                        .iter()
+                        .filter(|key| self.eligible(key))
+                        .all(|key| effectively_selected(self, view, key))
                 {
-                    self.group_select(keys);
+                    self.group_select_or_check(keys, provider);
                 }
             }
             KeyCode::Char('d') | KeyCode::Delete => {
@@ -561,28 +653,14 @@ impl JunkModel {
                     || eligible.len() > MAX_SELECTION
                     || !self.trash_pending.is_empty()
                 {
-                    self.diagnostic(
-                        self.text(
-                            "请先完成扫描，并选择 1–256 个符合清理条件的候选",
-                            "Finish scanning and select 1–256 eligible candidates",
-                        )
-                        .into(),
-                    );
+                    self.diagnostic(self.selection_message(&keys).into());
                 } else {
                     self.grouped.as_mut().unwrap().preview_offset = 0;
                     self.grouped.as_mut().unwrap().preview = Some((self.revision, eligible));
                 }
             }
             KeyCode::Char('e') => {
-                self.inspection_text = Some((
-                    self.issue_history
-                        .iter()
-                        .chain(&self.notice_history)
-                        .cloned()
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                    0,
-                ))
+                self.inspection_text = Some((self.coverage_details(), 0));
             }
             _ => return false,
         }
@@ -608,20 +686,34 @@ pub(super) fn render(frame: &mut Frame<'_>, model: &JunkModel) {
     let selected_size =
         crate::byte_value_label_with_unit(&total(model, &keys, &view.parents), model.unit);
     let breadcrumb = &view.title;
+    let coverage = model.coverage_summary();
     frame.render_widget(
         Paragraph::new(format!(
             "{mode} · {} · {} {} · {} {} ({selected_size}) · {} {}\n{}\n{} {} · {}",
-            model.status(),
-            model.text("候选", "candidates"),
+            if !model.busy
+                && model.outcome == Some(JunkOutcome::Complete)
+                && model.affected.is_some()
+            {
+                model.text("所选项目检查完成", "Selected items checked")
+            } else if !model.busy && model.outcome == Some(JunkOutcome::Partial) {
+                if model.has_unchecked_locations() {
+                    model.text("扫描完成（有未检查项）", "Finished with omissions")
+                } else {
+                    model.text("扫描完成（有跳过项）", "Finished with exclusions")
+                }
+            } else {
+                model.status()
+            },
+            model.text("项目", "items"),
             model.rows.len(),
             model.text("已选", "selected"),
             model.marked.len(),
-            model.text("检查限制", "issues"),
-            model.issue_count,
+            model.text("未检查原因", "reasons"),
+            model.issues.len(),
             crate::live::sanitize_terminal_text(breadcrumb),
             model.text("已观察", "observed"),
             model.progress.map_or_else(|| "—".into(), |v| v.to_string()),
-            crate::live::sanitize_terminal_text(&model.path)
+            crate::live::sanitize_terminal_text(if model.busy { &model.path } else { &coverage })
         ))
         .block(Block::default().borders(Borders::ALL)),
         header,
@@ -667,8 +759,8 @@ pub(super) fn render(frame: &mut Frame<'_>, model: &JunkModel) {
     .header(Row::new([
         "",
         model.text("分类 / 应用 / 清理项", "Category / application / item"),
-        model.text("候选逻辑大小", "Candidate size"),
-        model.text("候选 / 可选 / 已选", "Items / ready / selected"),
+        model.text("大小", "Size"),
+        model.text("项目 / 可清理 / 已选", "Items / cleanable / selected"),
     ]))
     .row_highlight_style(Style::default().bg(Color::DarkGray))
     .block(Block::default().borders(Borders::ALL));
@@ -694,8 +786,8 @@ pub(super) fn render(frame: &mut Frame<'_>, model: &JunkModel) {
             } else {
                 model
                     .text(
-                        "检查未完整结束；空列表不表示没有垃圾。按 e 查看限制",
-                        "Scan incomplete; an empty list does not mean no junk. Press e for issues",
+                        "有位置未检查，按 e 查看原因",
+                        "Some locations were not checked. Press e for details",
                     )
                     .into()
             }
@@ -704,27 +796,20 @@ pub(super) fn render(frame: &mut Frame<'_>, model: &JunkModel) {
             node.candidate
                 .as_ref()
                 .and_then(|key| model.rows.get(key))
-                .map_or_else(
-                    || node.id.clone(),
-                    |row| format!("{}\n{}", row.row.path(), row.row.evidence()),
-                )
+                .map_or_else(|| node.label.clone(), |row| row.row.path().into())
         },
     );
     frame.render_widget(
         Paragraph::new(format!(
-            "{}\n{}\n{}",
+            "{}\n{}",
             crate::live::sanitize_terminal_text(&model.diagnostic),
-            crate::live::sanitize_terminal_text(&description),
-            model.text(
-                "父子候选不重复累计；候选大小不代表实际释放空间",
-                "Nested candidates counted once; candidate size is not space freed"
-            )
+            crate::live::sanitize_terminal_text(&description)
         ))
         .wrap(Wrap { trim: false })
         .block(Block::default().borders(Borders::ALL)),
         detail,
     );
-    frame.render_widget(Paragraph::new(model.text("↑↓ 移动 · Enter 展开 · Esc 返回 · Space 选组/项 · a 选当前层 · u 清空 · d 清理预览 · i 文件详情 · e 检查限制 · r/R 刷新 · c 暂停 · q 返回/退出", "↑↓ Move · Enter Open · Esc Back · Space Select group/item · a Select level · u Clear · d Preview Trash · i Files · e Issues · r/R Refresh · c Pause · q Back/quit")).wrap(Wrap { trim: true }).block(Block::default().borders(Borders::ALL)), help);
+    frame.render_widget(Paragraph::new(model.text("↑↓ 移动 · Enter 展开 · Esc 返回 · Space 选组/项 · a 选当前层 · u 清空 · d 清理预览 · i 文件详情 · e 未检查原因 · r/R 刷新 · c 暂停 · q 返回/退出", "↑↓ Move · Enter Open · Esc Back · Space Select group/item · a Select level · u Clear · d Preview Trash · i Files · e Reasons · r/R Refresh · c Pause · q Back/quit")).wrap(Wrap { trim: true }).block(Block::default().borders(Borders::ALL)), help);
     if let Some((_, keys)) = &view.preview {
         let size =
             crate::byte_value_label_with_unit(&total(model, keys, &view.parents), model.unit);
@@ -733,8 +818,8 @@ pub(super) fn render(frame: &mut Frame<'_>, model: &JunkModel) {
             model.text("清理预览", "Cleanup preview"),
             keys.len(),
             model.text(
-                "Enter 确认移入回收站 · Esc 取消；执行前重新核验每项",
-                "Enter confirms Trash · Esc cancels; every item is revalidated before moving"
+                "Enter 确认移入回收站 · Esc 取消",
+                "Enter confirms Trash · Esc cancels"
             )
         );
         for key in keys {
@@ -902,13 +987,15 @@ mod tests {
     #[derive(Default)]
     struct Provider {
         trashed: Vec<String>,
+        refreshed: Vec<Vec<String>>,
     }
     impl JunkProvider for Provider {
         fn poll(&mut self) -> Option<JunkEvent> {
             None
         }
         fn cancel(&mut self) {}
-        fn refresh(&mut self, _: &[String]) -> Result<(), String> {
+        fn refresh(&mut self, keys: &[String]) -> Result<(), String> {
+            self.refreshed.push(keys.to_vec());
             Ok(())
         }
         fn prioritize(&mut self, _: &str) {}
@@ -1135,6 +1222,72 @@ mod tests {
     }
 
     #[test]
+    fn regrouped_results_return_to_a_populated_parent_instead_of_an_empty_level() {
+        let mut model = model();
+        add(&mut model, "child", &["outer"], "old", known(10), true);
+        let mut provider = Provider::default();
+        press(&mut model, &mut provider, KeyCode::Enter);
+        press(&mut model, &mut provider, KeyCode::Enter);
+        assert!(matches!(
+            model.grouped.as_ref().unwrap().location,
+            Location::Items(_, _)
+        ));
+        add(&mut model, "outer", &[], "new", known(20), true);
+        let view = model.grouped.as_ref().unwrap();
+        assert!(!view.nodes.is_empty());
+        assert!(matches!(view.location, Location::Owners(_)));
+        assert_eq!(view.nodes[0].id, "new");
+        assert_ne!(view.title, "projects");
+    }
+
+    #[test]
+    fn selecting_a_fresh_partial_item_checks_it_before_marking_and_never_cleans_it() {
+        for checked_outcome in [JunkOutcome::Complete, JunkOutcome::Partial] {
+            let mut model = model();
+            add(&mut model, "safe", &[], "app", known(10), true);
+            model.apply(JunkEvent::Completed {
+                revision: 0,
+                outcome: JunkOutcome::Partial,
+                replaced: false,
+            });
+            model.reorder();
+            let mut provider = Provider::default();
+            press(&mut model, &mut provider, KeyCode::Char(' '));
+            assert_eq!(provider.refreshed, [vec!["safe"]]);
+            assert!(model.busy && model.marked.is_empty() && provider.trashed.is_empty());
+            model.apply(JunkEvent::Started {
+                revision: 1,
+                keys: Some(vec!["safe".into()]),
+            });
+            model.apply(JunkEvent::Candidate {
+                revision: 1,
+                current: true,
+                historical: false,
+                row: Arc::new(Item {
+                    key: "safe".into(),
+                    ancestors: vec![],
+                    owner: "app".into(),
+                    path: "/app/target".into(),
+                    bytes: known(10),
+                    allowed: true,
+                }),
+            });
+            model.apply(JunkEvent::Completed {
+                revision: 1,
+                outcome: checked_outcome,
+                replaced: checked_outcome == JunkOutcome::Complete,
+            });
+            model.reorder();
+            if checked_outcome == JunkOutcome::Complete {
+                assert_eq!(model.marked, BTreeSet::from(["safe".into()]));
+            } else {
+                assert!(model.marked.is_empty() && model.pending_selection.is_none());
+            }
+            assert!(provider.trashed.is_empty());
+        }
+    }
+
+    #[test]
     fn narrow_and_wide_screens_show_categories_and_explicit_partial_state() {
         let mut model = model();
         add(&mut model, "a", &[], "a", known(10), false);
@@ -1149,7 +1302,8 @@ mod tests {
                 .iter()
                 .map(|cell| cell.symbol())
                 .collect();
-            assert!(screen.contains("Partial"));
+            assert!(screen.contains("Finished with omissions"));
+            assert!(!screen.contains("Nested candidates counted once"));
             assert!(screen.contains("Projects"));
         }
     }

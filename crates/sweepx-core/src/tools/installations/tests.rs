@@ -574,3 +574,81 @@ fn missing_optional_paths_do_not_hide_failed_iterator_observations() {
     );
     assert_eq!(discovery.observations, 2);
 }
+
+#[test]
+fn failed_observation_retains_its_location_and_optional_absence_is_not_a_failure() {
+    let runner = fresh_runner();
+    let mut discovery = Discovery::new(ToolDiscoveryLimits::default());
+    let path = Path::new("/controlled-npm-location");
+    let missing = || Err::<(), _>(std::io::Error::from(std::io::ErrorKind::NotFound));
+    assert!(
+        discovery
+            .observe_optional_path_at(&runner, path, missing)
+            .is_none()
+    );
+    assert!(discovery.failure_detail.is_none());
+    assert!(
+        discovery
+            .observe_at(&runner, path, || Err::<(), _>(std::io::Error::from(
+                std::io::ErrorKind::PermissionDenied
+            )))
+            .is_none()
+    );
+    let detail = discovery.failure_detail.as_ref().unwrap();
+    assert!(
+        detail.contains("controlled-npm-location") && detail.to_lowercase().contains("permission")
+    );
+    assert_eq!(
+        discovery.failure,
+        Some(ToolDiscoveryFailure::ObservationUnavailable)
+    );
+}
+
+#[test]
+fn version_inventory_ignores_host_files_without_inventing_a_broken_installation() {
+    let fixture = tempfile::tempdir().unwrap();
+    let versions = fixture.path().join("versions");
+    std::fs::create_dir_all(versions.join("v-empty")).unwrap();
+    std::fs::write(versions.join(".DS_Store"), b"host metadata").unwrap();
+    std::fs::write(versions.join("README"), b"ordinary file").unwrap();
+    let report = discover_from(
+        &mut fresh_runner(),
+        Discovery::new(ToolDiscoveryLimits::default()),
+        vec![ManagerLayout {
+            manager: "nvm",
+            fixed_executable: None,
+            versions_root: Some(versions),
+            executable_from_version: &["bin", "npm"],
+        }],
+        [],
+    );
+    assert!(report.installations.is_empty());
+    assert_eq!(report.incomplete_reason, None);
+    assert_eq!(report.failure_detail, None);
+}
+
+#[cfg(unix)]
+#[test]
+fn npm_cache_probe_uses_its_sibling_node_instead_of_the_ambient_runtime() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = tempfile::tempdir().unwrap();
+    let npm = fixture.path().join("npm");
+    let node = fixture.path().join("node");
+    std::fs::write(
+        &npm,
+        b"#!/usr/bin/env node\nthis is deliberately not valid JavaScript\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &node,
+        b"#!/bin/sh\nprintf '%s\\n' '/fixture-matching-node-cache'\n",
+    )
+    .unwrap();
+    for path in [&npm, &node] {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let mut discovery = Discovery::new(ToolDiscoveryLimits::default());
+    let answer = discovery.answer(&mut fresh_runner(), &npm, &["config", "get", "cache"], true);
+    assert_eq!(answer.as_deref(), Some("/fixture-matching-node-cache"));
+    assert_eq!(discovery.failure, None);
+}

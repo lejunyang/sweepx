@@ -5,8 +5,9 @@
 Regular cleanup is the no-root `junk` default, also spelled `--regular` or `--system`.
 It discovers supported platform cache roots. Deep cleanup (`--deep`) traverses the system
 root with both project and platform rules; explicit roots keep their previous project-only
-contract. Deep TUI uses one pass plus manual refresh; disk-wide notifications cannot
-continuously restart it. Regular and custom TUI keep their existing listeners. macOS System/Data admission, no-follow traversal, other-volume exclusions and all
+contract. Every CLI junk TUI scope uses one pass plus manual refresh; notifications cannot
+restart a completed result while the user reviews it. Native listeners remain opt-in Core API
+capabilities. macOS System/Data admission, no-follow traversal, other-volume exclusions and all
 queue, handle and traversal-count bounds remain unchanged. Deep cleanup is not a claim to read every attached disk.
 
 Exact tool/browser cache rules now compare their captured native directory at any traversal
@@ -49,8 +50,8 @@ remains read-only, and arbitrary inspector marks remain review paths. Linux temp
 retain their independent quarantine plan and full-digest confirmation.
 
 The header distinguishes regular/deep/custom scope, scan phase, outcome, observations and issue
-count. The issue panel retains up to 16 errors and 16 expected-exclusion notices, separately.
-A stream of symlink notices cannot overwrite an actionable failure. Diagnostic events do not
+count. The issue panel groups structured reasons with counters and at most three bounded examples
+per kind. Normal symlink exclusions do not become coverage failures or overwrite action feedback. Diagnostic events do not
 rebuild candidate groups. Permission/resource failures and
 cancelled scans do not turn empty results into a claim that no junk exists.
 
@@ -157,3 +158,75 @@ passed: core 421 (+ 3 ignored), CLI 76 plus its integrations, native authority 2
 The listener also passed in that final matrix. This does not establish that the two earlier
 startup timeouts are fixed; no listener implementation was changed. No test was removed,
 newly ignored or changed to conceal that intermittent failure.
+
+
+## Interaction correction after real regular-scan reproduction
+
+A native regular TUI reproduction navigated categories during scanning, but the first terminal
+was immediately followed by another discovery revision due to cache notifications. Enter on a
+leaf was ignored while busy, and a global partial result prevented read-only inspection. The
+CLI now performs one pass for every scope. Inspection delegates fresh native bindings during
+scanning and after a partial terminal to the independent read-only detail worker; the reliable
+mailbox provides backpressure while inspecting. Idle sessions retain the existing admission
+lease. Cleanup continues to require fresh complete eligible rows and native revalidation.
+
+When a completed outer candidate absorbs a group that the user entered, the bounded navigation
+stack now returns to the nearest populated parent instead of retaining an empty unreachable
+location. Busy/unavailable selection reports the action that is available. Implementation notes
+about duplicate accounting and reclaimed bytes have been removed from the result footer.
+
+The vague npm discovery failure was reproduced as an attempted read of
+`versions/node/.DS_Store/bin/npm`: manager inventory appended an executable suffix to every
+entry without checking its type. Ordinary files in version roots are now ignored; directory
+links are independently observed. Genuine iterator/metadata or required-probe failures still report partial and
+retain a bounded first location/error. A regular file under a version root is not an installation.
+Special-file exclusions such as an application IPC socket are explained separately from volume
+boundaries. The machine partial state is preserved; the UI distinguishes expected exclusions
+from locations that could not be checked. A targeted recheck invokes only the selected platform
+rules, while retaining the current native binding and cleanup guards.
+
+The live machine also had an unconfigured OSDK Node shim on PATH. `/opt/homebrew/bin/npm
+config get cache` exited 1 because its env-based launcher found that shim. Inventory probes
+now prefer an executable sibling Node in the same npm installation, changing only the child
+PATH. A controlled env-shebang fixture with deliberately invalid JavaScript and a matching
+sibling runtime verifies that the ambient Node cannot be substituted. Probe deadlines,
+filesystem-operation counts and retained-data bounds remain in force. Broken installations
+still retain their executable, reason and exit/probe error instead of fabricating a cache root.
+The read-only file view also presents file-loading states without internal scan IDs, synthetic
+partial state, revision numbers or implementation disclaimers.
+
+Selecting a fresh, policy-eligible row retained by a partial scan now requests a targeted check
+instead of silently ignoring Space. The view records at most 256 pending selection keys,
+selects only after a complete replacement terminal, and clears pending selection on a failed,
+partial or cancelled check. This never submits Trash. Clearing selection cancels pending marking.
+The targeted scope is named explicitly in the completion label, rather than implying the entire
+original scan is now complete. Unsupported/report-only rows keep their restrictions.
+
+Follow-up validation on 2026-10-18, macOS arm64, pinned Rust 1.98.0:
+
+- Real regular-scan PTY reproduction showed a completed scan immediately entering another
+  discovery revision. The fixed native interaction run exercised files during scanning and
+  after partial completion, q/back navigation, the grouped reasons panel, stable completion,
+  a targeted Go check, selection, exact-path cleanup preview and cancellation. User data was
+  not cleaned. Current real omissions included an IPC socket and an OSDK npm shim without a
+  configured npm version; neither was relabeled a completed npm observation.
+- A private pip-cache fixture was changed from 33 to 999 bytes after completion. Its view stayed
+  stable without an automatic refresh; manual R showed 999 bytes. Selection, preview cancellation
+  and file inspection passed with the expected payload still present.
+- Focused tool discovery passed 18 tests, including ordinary host files in version roots,
+  explicit failure locations and matching sibling Node. Native session tests passed 33 with
+  one opt-in case ignored. Final TUI tests passed 130 and cover active/partial inspection, regrouped empty
+  navigation, structured reason retention, and successful/failed selection rechecks.
+
+- The final real regular-scan interaction (50.7 seconds including intentional navigation and
+  pauses, not a timing benchmark) also exercised Space on the Go row retained by partial scope.
+  It automatically completed the targeted check, selected exactly one row, opened the native
+  cleanup preview and cancelled it. The original full-scope omissions remained distinguishable
+  from the selected-scope completion. No Trash confirmation was sent.
+- Core's final native suite passed 424 tests with 3 existing opt-in cases ignored; native authority
+  integrations passed 2. CLI passed 77 unit tests, browser integrations 3, CLI contracts 78
+  (the additive JSON-detail assertion was corrected and rerun separately), elevation 1 and pnpm
+  integrations 7 with 4 opt-in cases ignored. Earlier failure of the old read-only-inspection
+  expectation was corrected to the new inspection contract, retaining mutation refusal checks.
+  Host/Linux/Windows all-target, all-feature workspace Clippy and documentation checks are
+  recorded with this change. Cross-target checks are compile evidence, not native runtime tests.

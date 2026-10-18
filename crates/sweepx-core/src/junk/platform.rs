@@ -46,6 +46,7 @@ pub struct PlatformJunkEvidence {
     tool_snapshots: BTreeMap<String, Vec<ToolRootSnapshot>>,
     layout_failure: Option<LayoutDiscoveryFailure>,
     tool_discovery_failure: Option<tool_installations::ToolDiscoveryFailure>,
+    tool_discovery_detail: Option<String>,
 }
 
 // Current invocation interpretation, bound to the same native root as layout classification.
@@ -91,6 +92,9 @@ impl PlatformJunkEvidence {
         let tool_discovery_failure = npm_discovery
             .as_ref()
             .and_then(|report| report.incomplete_reason);
+        let tool_discovery_detail = npm_discovery
+            .as_ref()
+            .and_then(|report| report.failure_detail.clone());
         let npm_installations = npm_discovery
             .map(|report| report.installations)
             .unwrap_or_default();
@@ -113,6 +117,7 @@ impl PlatformJunkEvidence {
             browser_base_dir,
         );
         evidence.tool_discovery_failure = tool_discovery_failure;
+        evidence.tool_discovery_detail = tool_discovery_detail;
         evidence
     }
 
@@ -248,6 +253,7 @@ impl PlatformJunkEvidence {
             tool_snapshots,
             layout_failure: discovery.failure,
             tool_discovery_failure: None,
+            tool_discovery_detail: None,
         }
     }
 
@@ -259,6 +265,11 @@ impl PlatformJunkEvidence {
     /// Why bounded npm discovery could not establish complete inventory/cache coverage.
     pub fn tool_discovery_failure(&self) -> Option<tool_installations::ToolDiscoveryFailure> {
         self.tool_discovery_failure
+    }
+
+    /// Bounded first observation failure from the current npm inventory invocation.
+    pub fn tool_discovery_detail(&self) -> Option<&str> {
+        self.tool_discovery_detail.as_deref()
     }
 
     /// Missing layout or tool discovery cannot prove an empty scope or justify candidate reuse.

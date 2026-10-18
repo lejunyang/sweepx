@@ -712,8 +712,12 @@ struct Worker {
 impl Worker {
     fn run(&mut self, job: &Job, writer: &mut Writer) -> Result<(), JunkSessionFailure> {
         let system = self.request.system;
-        let rule_ids = self.request.platform_rule_ids.clone();
+        let selected = job.selected.is_some();
+        let rule_ids = self.discovery_rule_ids(job)?;
         self.run_with_discovery(job, writer, move |cancel| {
+            if selected && rule_ids.is_empty() {
+                return Ok((PlatformJunkSetup::default(), Vec::new()));
+            }
             PlatformJunkSetup::discover_selected_with_cancel(&rule_ids, cancel).map(|setup| {
                 let roots = if system {
                     default_platform_junk_roots(&setup)
@@ -722,6 +726,27 @@ impl Worker {
                 };
                 (setup, roots)
             })
+        })
+    }
+
+    fn discovery_rule_ids(&self, job: &Job) -> Result<Vec<String>, JunkSessionFailure> {
+        Ok(if let Some(keys) = &job.selected {
+            // A targeted recheck must not depend on an unrelated application's failed
+            // discovery. It still obtains fresh native layout/activity for every selected rule.
+            let platform_ids: BTreeSet<_> = super::platform::load_platform_junk_rules()
+                .map_err(|error| JunkSessionFailure::new("rules_invalid", error.to_string()))?
+                .into_iter()
+                .map(|rule| rule.id)
+                .collect();
+            keys.iter()
+                .filter_map(|key| self.current.get(key))
+                .map(|row| row.candidate.rule_id.clone())
+                .filter(|rule| platform_ids.contains(rule))
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect()
+        } else {
+            self.request.platform_rule_ids.clone()
         })
     }
 
@@ -786,10 +811,23 @@ impl Worker {
             (PlatformJunkSetup::default(), Vec::new())
         };
         let mut partial = platform.evidence.discovery_incomplete();
-        if partial {
+        if let Some(reason) = platform.evidence.layout_failure() {
             writer.failure(JunkSessionFailure::new(
-                "discovery_incomplete",
-                "current platform layout or tool discovery is incomplete",
+                "layout_discovery_incomplete",
+                reason.code(),
+            ));
+        }
+        if let Some(reason) = platform.evidence.tool_discovery_failure() {
+            writer.failure(JunkSessionFailure::new(
+                "npm_discovery_incomplete",
+                format!(
+                    "{}: {}",
+                    reason.code(),
+                    platform
+                        .evidence
+                        .tool_discovery_detail()
+                        .unwrap_or("npm installation discovery could not complete")
+                ),
             ));
         }
         if job.cancel.is_cancelled() {
