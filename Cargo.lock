@@ -1413,6 +1413,8 @@ dependencies = [
  "sweepx-i18n",
  "sweepx-model",
  "sweepx-protocol",
+ "terminput",
+ "terminput-crossterm",
  "thiserror",
  "unicode-width 0.2.0",
 ]
@@ -1459,6 +1461,25 @@ dependencies = [
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "terminput"
+version = "0.5.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "33fe296cb813b5bad99a8eb911e6a08e48f0854ee1e8b427073e657a509a7097"
+dependencies = [
+ "bitflags",
+]
+
+[[package]]
+name = "terminput-crossterm"
+version = "0.4.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "513aa30d046c9f1c2e31f119513bc058ad075c6b2266422372594bf900788738"
+dependencies = [
+ "crossterm",
+ "terminput",
 ]
 
 [[package]]

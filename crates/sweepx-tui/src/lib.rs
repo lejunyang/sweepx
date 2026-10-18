@@ -22,6 +22,9 @@ use thiserror::Error;
 
 pub mod junk;
 mod live;
+mod terminal_input;
+
+pub use terminal_input::TerminalEventSource;
 
 pub use live::{
     BrowserAction, BrowserControl, BrowserError, BrowserEventSource, BrowserExit, BrowserKeyMapper,

@@ -3581,7 +3581,7 @@ where
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
 
-    let mut events = CrosstermEventSource;
+    let mut events = crate::TerminalEventSource::default();
     let mapper = DefaultBrowserKeyMapper;
     let reducer =
         DetailRescanBrowserReducer::try_new_with_deadline(provider, DETAIL_RESCAN_QUERY_DEADLINE)?;

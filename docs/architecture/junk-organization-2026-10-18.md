@@ -230,3 +230,73 @@ Follow-up validation on 2026-10-18, macOS arm64, pinned Rust 1.98.0:
   expectation was corrected to the new inspection contract, retaining mutation refusal checks.
   Host/Linux/Windows all-target, all-feature workspace Clippy and documentation checks are
   recorded with this change. Cross-target checks are compile evidence, not native runtime tests.
+
+
+## Terminal input follow-up
+
+The user clarified that the original all-keys-unresponsive observation was in iTerm2 before
+`2d0ad63`; this is not a report of a reproduced failure after that update. Native iTerm2 UI
+control is unavailable in the current environment, so the following is a controlled PTY
+acceptance result, not a claim to have reproduced the user's exact terminal session.
+
+A separate input-layer defect was independently reproduced against that binary. After a
+DECRPM reply (`ESC [ ? 2026 ; 2 $ y`), its Unix input parser retained the completed reply as
+incomplete and swallowed subsequent arrow, Enter, Space and q input. Normal legacy, SS3 and
+CSI-u keys worked before the reply. This matches the upstream
+[crossterm parser issue #1104](https://github.com/crossterm-rs/crossterm/issues/1104), but does
+not establish which bytes caused the user's earlier incident.
+
+The CLI's Unix views now use a shared `TerminalEventSource`. It frames complete control
+sequences before decoding keys through `terminput` and its crossterm adapter. Unknown complete
+frames are consumed regardless of whether the decoder recognizes them. The two small registry
+dependencies avoid maintaining a second key-protocol decoder or a private crossterm fork.
+Windows retains the native crossterm console reader. The existing explicitly exported
+`CrosstermEventSource` remains available for callers that choose that upstream source.
+
+Input reads at most one 1,024-byte chunk per poll after processing its preceding chunk;
+zero-timeout calls still check ready input. The single UI reader does not change shared file
+flags or launch a background input worker. Raw-mode readiness permits one read, not an
+unbounded drain. Frame retention is limited to 1,024 bytes; oversized CSI frames discard until
+their final byte. A lone Escape resolves after 30 ms without another byte; incomplete key
+frames expire after 250 ms without progress. A control string/paste unfinished for one second
+ends the view with an input error and terminal restoration, so its delayed tail cannot become actions.
+These are input-fragment recovery limits, not scan deadlines. OSC/DCS metadata and bracketed
+paste contents never become actions. Paste is discarded rather than replayed as cleanup
+confirmation. Redraw ticks continue to detect terminal resizing without a second input reader.
+Native cleanup validation, selection and separate preview/confirmation remain unchanged.
+
+Regression coverage includes complete and byte-fragmented terminal replies followed by real
+key bytes, legacy/SS3/CSI-u equivalence, UTF-8/modifiers/repeat/release, bounded malformed input,
+paste/control-string isolation, zero-timeout readiness, queued key retention and EOF.
+The first decoder test exposed cursor-position replies being interpreted as modified F3;
+numbered cursor reports are now explicitly consumed as metadata, matching the previous
+crossterm source's treatment. No function-key actions are assigned by these views.
+
+Validation on 2026-10-18, macOS arm64, Rust 1.98.0, optimized local build:
+
+- Before/after PTY fixtures with a controlling terminal used the same read-only pip cache and
+  key bytes. Before the change, legacy/SS3/CSI-u cases passed but the DECRPM case could not
+  open the reasons panel, navigate, select or quit. After the change all four cases passed.
+  No cleanup confirmation was sent.
+- A separate ordinary-scan PTY fixture verified navigation after a byte-fragmented reply,
+  Escape/back, a 150-to-100-column resize, q/exit, restored canonical terminal mode and unchanged
+  fixture payloads. This exercises the shared source outside the cleanup view.
+- The real regular-scan interaction passed file inspection during scanning and after partial
+  completion, stable finished results, reasons, targeted Go recheck/selection, cleanup preview
+  and Esc cancellation. The run took 52.8 seconds including navigation and deliberate waits;
+  it is an acceptance run, not a scan-performance benchmark. User data was not cleaned.
+- TUI passed 137 tests (7 input regressions plus the unchanged 130). CLI passed 77 unit and
+  3 browser tests. Its initial sandboxed CLI-contract run passed 77 and failed only the native
+  Trash fixture due to an OS permission denial; the same single contract passed outside the
+  sandbox. Elevation passed 1; pnpm passed 7 with 4 existing opt-in cases ignored. The first
+  attempted follow-up command used nonexistent test-target names and ran neither target;
+  the corrected `elevation_relay` and `pnpm_project` commands produced these final results.
+- Formatting, diff checks, the 72-file documentation lint and host/Linux GNU/Windows GNU
+  all-target, all-feature workspace Clippy passed. Linux/Windows checks are static cross-target
+  evidence; their native terminal runtimes were not exercised. Core/native scanner tests from
+  `2d0ad63` are reused because no scanning, filesystem authority or cleanup code changed.
+
+Detailed local evidence is in `/private/tmp/sweepx-iterm-input`: `baseline.log`, `fixed.log`,
+`ordinary-scan.log`, `real-regular.log`, `tui-final-tests.log`, `cli-tests.log`, `trash-native.log`,
+`cli-remaining-final.log` and the three workspace Clippy logs. The private scripts/fixtures are
+repeatable local diagnostics, not a new runtime dependency or a requirement to operate iTerm2.

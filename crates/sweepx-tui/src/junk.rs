@@ -1,8 +1,6 @@
 //! Live junk presentation. Native scanning and mutation remain provider-owned worker operations.
 
-use crate::{
-    BrowserError, BrowserEventSource, CrosstermEventSource, TerminalGuard, TerminationFlag,
-};
+use crate::{BrowserError, BrowserEventSource, TerminalGuard, TerminationFlag};
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::layout::{Constraint, Layout};
@@ -1206,7 +1204,7 @@ pub fn run_junk_browser<P: JunkProvider>(
         let result = run_junk_loop(
             &mut terminal,
             &mut model,
-            &mut CrosstermEventSource,
+            &mut crate::TerminalEventSource::default(),
             &mut provider,
             &termination,
         );

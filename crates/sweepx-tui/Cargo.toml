@@ -29,3 +29,5 @@ sweepx-protocol = { version = "0.0.1", path = "../sweepx-protocol" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.189"
+terminput = "0.5.15"
+terminput-crossterm = { version = "0.4.11", default-features = false, features = ["crossterm_0_28"] }
