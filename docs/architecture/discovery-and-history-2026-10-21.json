@@ -1,0 +1,73 @@
+{
+  "date": "2026-10-21",
+  "host": {
+    "os": "macOS 26.5.2",
+    "build": "25F84",
+    "arch": "arm64",
+    "rust": "1.98.0"
+  },
+  "kind": "acceptance_observations_not_performance_benchmark",
+  "repetitions": 1,
+  "osCachePurged": false,
+  "slowDiscovery": {
+    "elapsedSeconds": 20.10209737502737,
+    "fixtureInstallations": 6,
+    "npmDiscovery": {
+      "complete": true,
+      "incompleteReason": null,
+      "detail": null
+    },
+    "exit": 0
+  },
+  "partialHistory": {
+    "progressingDiscovery": {
+      "elapsedSeconds": 20.10209737502737,
+      "fixtureInstallations": 6,
+      "npmDiscovery": {
+        "complete": true,
+        "incompleteReason": null,
+        "detail": null
+      },
+      "exit": 0
+    },
+    "coldPartialTui": {
+      "elapsedSeconds": 4.568760082998779,
+      "firstHistoricalSeconds": null,
+      "exit": 4,
+      "interactiveDuringDiscovery": null
+    },
+    "warmPartialTui": {
+      "elapsedSeconds": 4.501865750004072,
+      "firstHistoricalSeconds": 0.09850266698049381,
+      "exit": 4,
+      "interactiveDuringDiscovery": true
+    },
+    "independentBrewBytes": 16384
+  },
+  "realWarmHistory": {
+    "firstHistoricalSeconds": 0.18977833300596103,
+    "cancelPreservedCacheRecords": 79,
+    "exit": 4
+  },
+  "realHistory": {
+    "roots": 79,
+    "rows": 782,
+    "encodedBytes": 6897065,
+    "currentCandidates": 1087,
+    "projectionWarnings": 0
+  },
+  "realAcceptance": {
+    "secondsIncludingInteraction": 55.25930433295434,
+    "passed": true,
+    "scanMode": "regular",
+    "cleanupConfirmed": false,
+    "renderer": "native PTY; not an iTerm2 UI run",
+    "runtimeBinarySha256": "0e7494fcc6d8408ac72ff31fb372f1355d2f18cd32b349be7db1a0f5ce89078c"
+  },
+  "bounds": {
+    "wholeSubtreeSkipping": false,
+    "wholeDiskCompletenessVerified": false,
+    "linuxWindowsRuntimeVerified": false,
+    "ignoredWorkspaceTests": 9
+  }
+}

@@ -274,8 +274,9 @@ enum Commands {
         #[arg(long, conflicts_with_all = ["trash", "clean_temp"])]
         details: bool,
         /// Scan conservative platform cache roots; conflicts with explicit roots.
-        /// Tool discovery has a 10s batch budget, a 2s probe timeout and a 64 KiB answer limit.
-        /// npm inventory also bounds filesystem observations and reports incomplete discovery.
+        /// Each tool family has an independent discovery budget. Individual queries stop after
+        /// 10s; completed attempts renew a 30s inactivity budget. Answers are bounded to 64 KiB.
+        /// Progressing discovery and the disk walk have no absolute elapsed-time cutoff.
         #[arg(long, visible_alias = "regular", conflicts_with = "deep")]
         system: bool,
         /// Deep cleanup scan: traverse the system disk with project and platform cache rules.
@@ -1397,19 +1398,26 @@ fn run_junk_scan(
     } = platform.unwrap_or_default();
     let layout_failure = evidence.layout_failure();
     let tool_failure = evidence.tool_discovery_failure();
+    if format == OutputFormat::Human {
+        for (rule, detail) in evidence.cache_query_failures() {
+            eprintln!("{rule}: {detail}");
+        }
+    }
     if let Some(failure) = tool_failure
         && format == OutputFormat::Human
     {
         eprintln!(
             "{} ({})",
             match context.locale() {
-                sweepx_i18n::Locale::ZhCn =>
-                    "npm 安装发现不完整：可能遗漏安装或缓存，缺失活动信息不代表未使用",
+                sweepx_i18n::Locale::ZhCn => "部分 npm 安装或缓存配置未能检查",
                 sweepx_i18n::Locale::EnUs =>
-                    "npm installation discovery is incomplete: installations or caches may be missing; unknown activity does not mean unused",
+                    "Some npm installations or cache settings could not be checked",
             },
             failure.code()
         );
+        if let Some(detail) = evidence.tool_discovery_detail() {
+            eprintln!("  {detail}");
+        }
     }
     if let Some(failure) = layout_failure
         && format == OutputFormat::Human
@@ -2001,6 +2009,7 @@ fn run_junk_scan(
                     "incompleteReason": tool_failure.map(|failure| failure.code()),
                     "detail": evidence.tool_discovery_detail(),
                 })),
+                "toolQueryFailures": evidence.cache_query_failures().map(|(rule, detail)| json!({"ruleId": rule, "detail": detail})).collect::<Vec<_>>(),
                 "candidateCount": candidates.len(),
                 "knownReclaimableBytes": known_reclaimable.map(|value| value.to_string()),
                 "incompleteSizeCount": incomplete_size_count,

@@ -652,3 +652,44 @@ fn npm_cache_probe_uses_its_sibling_node_instead_of_the_ambient_runtime() {
     assert_eq!(answer.as_deref(), Some("/fixture-matching-node-cache"));
     assert_eq!(discovery.failure, None);
 }
+
+#[cfg(unix)]
+#[test]
+fn one_cache_query_timeout_preserves_its_command_and_allows_the_next_query() {
+    let fixture = tempfile::tempdir().unwrap();
+    let stalled = fixture.path().join("stalled-npm");
+    std::fs::write(&stalled, "#!/bin/sh\nexec /bin/sleep 5\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&stalled, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut runner = ProbeRunner::new(
+        super::super::ProbeLimits {
+            total_timeout: Duration::from_secs(10),
+            probe_timeout: Duration::from_millis(300),
+            ..super::super::ProbeLimits::default()
+        },
+        crate::CancellationToken::new(),
+    );
+    let mut discovery = Discovery::new(ToolDiscoveryLimits::default());
+    assert!(
+        discovery
+            .answer(&mut runner, &stalled, &["config", "get", "cache"], true)
+            .is_none()
+    );
+    assert_eq!(discovery.failure, Some(ToolDiscoveryFailure::ProbeTimeout));
+    let detail = discovery.failure_detail.as_deref().unwrap();
+    assert!(detail.contains("stalled-npm config get cache"), "{detail}");
+    assert!(detail.contains("300ms"), "{detail}");
+    assert!(!discovery.stopped);
+    assert_eq!(
+        discovery
+            .answer(
+                &mut runner,
+                Path::new("/bin/echo"),
+                &["/independent-cache"],
+                true
+            )
+            .as_deref(),
+        Some("/independent-cache")
+    );
+    assert_eq!(discovery.failure, Some(ToolDiscoveryFailure::ProbeTimeout));
+}

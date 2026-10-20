@@ -32,6 +32,7 @@ struct Node {
     label: String,
     keys: Vec<String>,
     bytes: ByteValue,
+    past_bytes: Option<ByteValue>,
     next: Location,
     candidate: Option<String>,
 }
@@ -99,6 +100,15 @@ fn effectively_selected(model: &JunkModel, view: &GroupedView, key: &str) -> boo
 }
 
 fn total(model: &JunkModel, keys: &[String], parents: &BTreeMap<String, String>) -> ByteValue {
+    sum_rows(model, keys, parents, false)
+}
+
+fn sum_rows(
+    model: &JunkModel,
+    keys: &[String],
+    parents: &BTreeMap<String, String>,
+    historical: bool,
+) -> ByteValue {
     let mut sum = 0u128;
     let mut incomplete = false;
     let mut known = false;
@@ -108,11 +118,11 @@ fn total(model: &JunkModel, keys: &[String], parents: &BTreeMap<String, String>)
             continue;
         };
         // A historical amount is useful in row details but cannot become a current group total.
-        if (row.historical || !row.current) && !row.observed_partial {
+        if !historical && (row.historical || !row.current) && !row.observed_partial {
             incomplete = true;
             continue;
         }
-        incomplete |= row.historical || !row.current || !row.row.complete();
+        incomplete |= (!historical && (row.historical || !row.current)) || !row.row.complete();
         let value = match row.row.logical_bytes() {
             EvidenceValue::Known { value } => value.0,
             EvidenceValue::LowerBound { value, .. } => {
@@ -303,19 +313,26 @@ impl JunkModel {
                         bytes: EvidenceValue::Unknown {
                             reason: ReasonCode::NotRevalidated,
                         },
+                        past_bytes: None,
                         next,
                         candidate,
                     })
                     .keys
                     .push(key.clone());
             }
-            view.nodes = nodes
-                .into_values()
-                .map(|mut node| {
-                    node.bytes = total(self, &node.keys, &view.parents);
-                    node
-                })
-                .collect();
+            view.nodes =
+                nodes
+                    .into_values()
+                    .map(|mut node| {
+                        node.bytes = total(self, &node.keys, &view.parents);
+                        if node.keys.iter().all(|key| {
+                            self.rows[key].historical && !self.rows[key].observed_partial
+                        }) {
+                            node.past_bytes = Some(sum_rows(self, &node.keys, &view.parents, true));
+                        }
+                        node
+                    })
+                    .collect();
             if !view.nodes.is_empty() || matches!(view.location, Location::Categories) {
                 break;
             }
@@ -330,7 +347,7 @@ impl JunkModel {
             }
         }
         view.nodes.sort_by(|a, b| {
-            let value = |node: &Node| match node.bytes {
+            let value = |node: &Node| match node.past_bytes.as_ref().unwrap_or(&node.bytes) {
                 EvidenceValue::Known { value } | EvidenceValue::LowerBound { value, .. } => {
                     Some(value.0)
                 }
@@ -696,7 +713,12 @@ pub(super) fn render(frame: &mut Frame<'_>, model: &JunkModel) {
             {
                 model.text("所选项目检查完成", "Selected items checked")
             } else if !model.busy && model.outcome == Some(JunkOutcome::Partial) {
-                if model.has_unchecked_locations() {
+                if model.discovery_pending() {
+                    model.text(
+                        "文件扫描已结束（应用位置待检查）",
+                        "File scan finished; application locations need checking",
+                    )
+                } else if model.has_unchecked_locations() {
                     model.text("扫描完成（有未检查项）", "Finished with omissions")
                 } else {
                     model.text("扫描完成（有跳过项）", "Finished with exclusions")
@@ -709,7 +731,7 @@ pub(super) fn render(frame: &mut Frame<'_>, model: &JunkModel) {
             model.text("已选", "selected"),
             model.marked.len(),
             model.text("未检查原因", "reasons"),
-            model.issues.len(),
+            model.unchecked_kind_count(),
             crate::live::sanitize_terminal_text(breadcrumb),
             model.text("已观察", "observed"),
             model.progress.map_or_else(|| "—".into(), |v| v.to_string()),
@@ -743,7 +765,15 @@ pub(super) fn render(frame: &mut Frame<'_>, model: &JunkModel) {
         Row::new(vec![
             Cell::from(check),
             Cell::from(crate::live::sanitize_terminal_text(&node.label)),
-            Cell::from(crate::byte_value_label_with_unit(&node.bytes, model.unit)),
+            Cell::from(if let Some(bytes) = &node.past_bytes {
+                format!(
+                    "{} {}",
+                    model.text("上次", "Previous"),
+                    crate::byte_value_label_with_unit(bytes, model.unit)
+                )
+            } else {
+                crate::byte_value_label_with_unit(&node.bytes, model.unit)
+            }),
             Cell::from(format!("{} / {eligible} / {selected}", node.keys.len())),
         ])
     });
@@ -904,6 +934,7 @@ mod tests {
         path: String,
         bytes: ByteValue,
         allowed: bool,
+        complete: bool,
     }
     impl JunkRow for Item {
         fn key(&self) -> &str {
@@ -925,7 +956,7 @@ mod tests {
             &self.bytes
         }
         fn complete(&self) -> bool {
-            true
+            self.complete
         }
         fn report_allows_trash(&self) -> bool {
             self.allowed
@@ -980,6 +1011,7 @@ mod tests {
                 path: format!("/{owner}/target/{key}"),
                 bytes,
                 allowed,
+                complete: true,
             }),
         });
         model.reorder();
@@ -1097,6 +1129,23 @@ mod tests {
             EvidenceValue::Unknown { .. }
         ));
     }
+
+    #[test]
+    fn prior_group_size_is_available_only_as_explicit_history_without_selection_authority() {
+        let mut model = model();
+        add(&mut model, "a", &[], "a", known(10), true);
+        model.apply(JunkEvent::Started {
+            revision: 1,
+            keys: None,
+        });
+        model.reorder();
+        let node = &model.grouped.as_ref().unwrap().nodes[0];
+        assert!(matches!(node.bytes, EvidenceValue::Unknown { .. }));
+        assert_eq!(node.past_bytes, Some(known(10)));
+        assert!(!model.eligible("a"));
+        model.group_select(vec!["a".into()]);
+        assert!(model.marked.is_empty());
+    }
     #[test]
     fn fresh_partial_amounts_are_lower_bounds_without_cleanup_authority() {
         let mut model = model();
@@ -1114,6 +1163,52 @@ mod tests {
         model.apply(JunkEvent::TrashResult {
             key: "a".into(),
             error: Some("uncertain outcome".into()),
+        });
+        model.reorder();
+        assert!(matches!(
+            model.grouped.as_ref().unwrap().nodes[0].bytes,
+            EvidenceValue::Unknown { .. }
+        ));
+    }
+
+    #[test]
+    fn fresh_incomplete_subtrees_keep_their_measured_lower_bound_until_refresh() {
+        let mut model = model();
+        add(&mut model, "sibling", &[], "a", known(19), true);
+        model.apply(JunkEvent::Candidate {
+            revision: 0,
+            current: false,
+            historical: false,
+            row: Arc::new(Item {
+                key: "partial".into(),
+                ancestors: Vec::new(),
+                owner: "a".into(),
+                path: "/a/partial".into(),
+                bytes: EvidenceValue::LowerBound {
+                    value: DecimalU128::new(8192),
+                    reason: ReasonCode::NotRevalidated,
+                },
+                allowed: true,
+                complete: false,
+            }),
+        });
+        model.apply(JunkEvent::Completed {
+            revision: 0,
+            outcome: JunkOutcome::Partial,
+            replaced: false,
+        });
+        model.reorder();
+        assert!(matches!(model.grouped.as_ref().unwrap().nodes[0].bytes,
+            EvidenceValue::LowerBound { value, .. } if value.0 == 8211));
+        assert!(!model.eligible("partial"));
+        assert!(
+            model.grouped.as_ref().unwrap().nodes[0]
+                .past_bytes
+                .is_none()
+        );
+        model.apply(JunkEvent::Started {
+            revision: 1,
+            keys: None,
         });
         model.reorder();
         assert!(matches!(
@@ -1186,6 +1281,7 @@ mod tests {
                     path: format!("/{key}/target"),
                     bytes: known(17),
                     allowed: true,
+                    complete: true,
                 }),
             });
         }
@@ -1270,6 +1366,7 @@ mod tests {
                     path: "/app/target".into(),
                     bytes: known(10),
                     allowed: true,
+                    complete: true,
                 }),
             });
             model.apply(JunkEvent::Completed {

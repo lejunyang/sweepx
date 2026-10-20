@@ -139,7 +139,8 @@ pub struct ToolDiscoveryLimits {
     pub max_observations: usize,
     /// Maximum distinct npm installations admitted, including the provisional PATH inventory.
     pub max_installations: usize,
-    /// Cumulative admission estimate for paths, strings and collection nodes; not an RSS ceiling.
+    /// Cumulative inventory admission estimate for paths, strings and collection nodes.
+    /// Excludes at most 4 KiB of fixed diagnostic context; neither bound is an RSS ceiling.
     pub max_retained_bytes: usize,
     /// Maximum bytes in any input path or environment value, before further expansion.
     pub max_path_bytes: usize,
@@ -167,6 +168,8 @@ pub enum ToolDiscoveryFailure {
     ProbeBudget,
     /// A cache-location probe failed or returned an unusable answer.
     ProbeUnavailable,
+    /// One required cache-location query exceeded its own execution deadline.
+    ProbeTimeout,
     /// Enumeration or metadata was unavailable for a present location.
     ObservationUnavailable,
 }
@@ -179,6 +182,7 @@ impl ToolDiscoveryFailure {
             Self::Cancelled => "cancelled",
             Self::ProbeBudget => "probe_budget",
             Self::ProbeUnavailable => "probe_unavailable",
+            Self::ProbeTimeout => "probe_timeout",
             Self::ObservationUnavailable => "observation_unavailable",
         }
     }
@@ -208,6 +212,8 @@ struct Discovery {
     stopped: bool,
     executable_identities: std::collections::BTreeMap<PathBuf, Option<PathBuf>>,
     cache_activity: std::collections::BTreeMap<PathBuf, Option<SystemTime>>,
+    // Bounded diagnostic context only, never a cached executable or filesystem authority.
+    location: String,
 }
 
 impl Discovery {
@@ -221,6 +227,7 @@ impl Discovery {
             stopped: false,
             executable_identities: std::collections::BTreeMap::new(),
             cache_activity: std::collections::BTreeMap::new(),
+            location: String::new(),
         }
     }
 
@@ -238,6 +245,13 @@ impl Discovery {
 
     fn available(&mut self, runner: &ProbeRunner) -> bool {
         if let Err(error) = runner.check_budget() {
+            if !matches!(error, super::ProbeError::Cancelled) {
+                self.retain_failure_detail(format!(
+                    "{}; {}",
+                    runner.budget_detail(),
+                    self.location
+                ));
+            }
             self.fail(match error {
                 super::ProbeError::Cancelled => ToolDiscoveryFailure::Cancelled,
                 _ => ToolDiscoveryFailure::ProbeBudget,
@@ -305,7 +319,8 @@ impl Discovery {
             while !detail.is_char_boundary(end) {
                 end -= 1;
             }
-            detail.truncate(end);
+            // Copy the admitted prefix: truncate alone would retain the original allocation.
+            detail = detail[..end].to_owned();
         }
         self.failure_detail = Some(detail);
     }
@@ -350,6 +365,7 @@ impl Discovery {
     }
 
     fn executable_identity(&mut self, runner: &ProbeRunner, path: &Path) -> Option<PathBuf> {
+        self.location = path.to_string_lossy().chars().take(512).collect();
         if !self.available(runner) {
             return None;
         }
@@ -396,6 +412,10 @@ impl Discovery {
         arguments: &[&str],
         required: bool,
     ) -> Option<String> {
+        self.location = format!("{} {}", executable.display(), arguments.join(" "))
+            .chars()
+            .take(512)
+            .collect();
         if !self.available(runner) {
             return None;
         }
@@ -446,11 +466,32 @@ impl Discovery {
         let output = match result {
             Ok(output) if output.status.success() => output,
             Err(super::ProbeError::Cancelled) => {
+                self.retain_failure_detail(format!(
+                    "{} {}: query cancelled",
+                    executable.display(),
+                    arguments.join(" ")
+                ));
                 self.fail(ToolDiscoveryFailure::Cancelled);
                 return None;
             }
             Err(super::ProbeError::BudgetExhausted) => {
+                self.retain_failure_detail(format!(
+                    "{} {}: {}",
+                    executable.display(),
+                    arguments.join(" "),
+                    runner.budget_detail()
+                ));
                 self.fail(ToolDiscoveryFailure::ProbeBudget);
+                return None;
+            }
+            Err(super::ProbeError::TimedOut) if required => {
+                self.retain_failure_detail(format!(
+                    "{} {}: query timed out after {:?}",
+                    executable.display(),
+                    arguments.join(" "),
+                    runner.probe_timeout()
+                ));
+                self.fail(ToolDiscoveryFailure::ProbeTimeout);
                 return None;
             }
             rejected => {

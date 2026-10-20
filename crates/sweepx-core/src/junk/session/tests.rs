@@ -687,7 +687,7 @@ fn discovered_root_admission_is_bounded_and_preserves_link_sensitive_spelling() 
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 #[test]
-fn system_refresh_rediscovers_scope_and_restores_only_newly_discovered_history() {
+fn system_refresh_rediscovers_scope_and_previews_only_the_latest_prior_generation() {
     let _serial = SESSION_TESTS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -784,13 +784,13 @@ fn system_refresh_rediscovers_scope_and_restores_only_newly_discovered_history()
     assert!(
         position(|kind| matches!(
             kind,
-            JunkSessionEventKind::Phase(JunkSessionPhase::Discovery)
-        )) < position(|kind| matches!(
-            kind,
             JunkSessionEventKind::Candidate {
                 state: JunkSessionCandidateState::Historical,
                 ..
             }
+        )) < position(|kind| matches!(
+            kind,
+            JunkSessionEventKind::Phase(JunkSessionPhase::Discovery)
         ))
     );
     assert!(matches!(

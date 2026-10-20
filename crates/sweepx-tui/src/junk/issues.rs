@@ -20,9 +20,18 @@ pub enum JunkIssueKind {
     Unavailable,
     /// Automatic change notification is unavailable.
     Watch,
+    /// Optional history could not be loaded or published; current file observations survive.
+    Cache,
 }
 
 impl JunkIssueKind {
+    fn section(self) -> usize {
+        match self {
+            Self::NpmDiscovery | Self::AppDiscovery => 1,
+            Self::OtherVolume | Self::SkippedEntry | Self::Watch | Self::Cache => 2,
+            _ => 0,
+        }
+    }
     fn label(self, locale: Locale) -> &'static str {
         let (zh, en) = match self {
             Self::Permission => (
@@ -57,6 +66,10 @@ impl JunkIssueKind {
                 "无法自动检测文件变化",
                 "Automatic change detection is unavailable",
             ),
+            Self::Cache => (
+                "上次结果暂时不可用或未能保存",
+                "Previous results could not be loaded or saved",
+            ),
         };
         if locale == Locale::ZhCn { zh } else { en }
     }
@@ -89,9 +102,17 @@ fn discovery_detail(kind: JunkIssueKind, detail: String, locale: Locale) -> Stri
     }
     let (code, rest) = detail.split_once(": ").unwrap_or((&detail, ""));
     let labels = match code {
-        "probe_budget" | "deadline" => (
-            "查询用时过长，部分位置未能检查",
-            "Location lookup timed out before all locations were checked",
+        "probe_budget" => (
+            "安装位置检查预算已用尽",
+            "Installation lookup budget was exhausted",
+        ),
+        "deadline" => (
+            "位置检查长时间没有进展",
+            "Location lookup stopped making progress",
+        ),
+        "probe_timeout" => (
+            "单次工具查询超时，可重新检查",
+            "One tool query timed out; it can be checked again",
         ),
         "resource_limit" => (
             "位置或安装数量较多，本轮未全部检查",
@@ -118,14 +139,20 @@ fn discovery_detail(kind: JunkIssueKind, detail: String, locale: Locale) -> Stri
 }
 
 impl JunkModel {
+    pub(super) fn discovery_pending(&self) -> bool {
+        !self.rejected
+            && self.issues.keys().any(|kind| kind.section() == 1)
+            && !self.issues.keys().any(|kind| kind.section() == 0)
+    }
+
+    pub(super) fn unchecked_kind_count(&self) -> usize {
+        self.issues
+            .keys()
+            .filter(|kind| kind.section() != 2)
+            .count()
+    }
     pub(super) fn has_unchecked_locations(&self) -> bool {
-        self.issues.is_empty()
-            || self.issues.keys().any(|kind| {
-                !matches!(
-                    kind,
-                    JunkIssueKind::OtherVolume | JunkIssueKind::SkippedEntry | JunkIssueKind::Watch
-                )
-            })
+        self.issues.is_empty() || self.issues.keys().any(|kind| kind.section() != 2)
     }
     pub(super) fn record_issue(&mut self, kind: JunkIssueKind, detail: String) {
         self.issue_count = self.issue_count.saturating_add(1);
@@ -167,17 +194,34 @@ impl JunkModel {
             };
         }
         let mut text = String::new();
-        for (kind, summary) in &self.issues {
-            text.push_str(&format!(
-                "{} ({})\n",
-                kind.label(self.locale),
-                summary.count
-            ));
-            for example in &summary.examples {
-                text.push_str(example);
+        for section in 0..3 {
+            if !self.issues.keys().any(|kind| kind.section() == section) {
+                continue;
+            }
+            text.push_str(match (self.locale, section) {
+                (Locale::ZhCn, 0) => "文件读取未完成\n",
+                (Locale::ZhCn, 1) => "应用与工具位置待检查\n",
+                (Locale::ZhCn, _) => "正常排除与可选通知\n",
+                (_, 0) => "File reads not completed\n",
+                (_, 1) => "Application and tool locations to check\n",
+                (_, _) => "Exclusions and optional notifications\n",
+            });
+            for (kind, summary) in self
+                .issues
+                .iter()
+                .filter(|(kind, _)| kind.section() == section)
+            {
+                text.push_str(&format!(
+                    "{} ({})\n",
+                    kind.label(self.locale),
+                    summary.count
+                ));
+                for example in &summary.examples {
+                    text.push_str(example);
+                    text.push('\n');
+                }
                 text.push('\n');
             }
-            text.push('\n');
         }
         text
     }
@@ -186,6 +230,31 @@ impl JunkModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exclusions_and_optional_cache_errors_are_separate_from_unchecked_tool_locations() {
+        let mut model = JunkModel::new(Locale::ZhCn, HumanSizeUnit::Bytes);
+        model.record_issue(JunkIssueKind::SkippedEntry, "/app/socket".into());
+        model.record_issue(JunkIssueKind::Cache, "cache write refused".into());
+        assert_eq!(model.unchecked_kind_count(), 0);
+        assert!(!model.has_unchecked_locations());
+        model.record_issue(
+            JunkIssueKind::NpmDiscovery,
+            "probe_timeout: /tools/npm config get cache: query timed out after 10s".into(),
+        );
+        assert_eq!(model.unchecked_kind_count(), 1);
+        assert!(model.discovery_pending());
+        let text = model.coverage_details();
+        assert!(text.contains("正常排除") && text.contains("应用与工具位置待检查"));
+        assert!(
+            text.contains("/tools/npm")
+                && text.contains("10s")
+                && text.contains("单次工具查询超时")
+        );
+        model.record_issue(JunkIssueKind::Permission, "/private".into());
+        assert!(!model.discovery_pending());
+        assert!(model.coverage_details().contains("文件读取未完成"));
+    }
     #[test]
     fn missing_diagnostics_do_not_turn_partial_coverage_into_a_success_message() {
         let mut model = JunkModel::new(Locale::EnUs, HumanSizeUnit::Bytes);

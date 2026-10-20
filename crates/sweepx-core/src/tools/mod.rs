@@ -120,6 +120,9 @@ pub struct ProbeRunner {
     remaining: usize,
     cancel: CancellationToken,
     last_diagnostics: Option<ProbeDiagnostics>,
+    // Discovery advances through a bounded number of individually contained queries. Its
+    // idle deadline is renewed between queries; other users retain an absolute batch limit.
+    progress_deadline: bool,
 }
 
 impl ProbeRunner {
@@ -143,7 +146,48 @@ impl ProbeRunner {
             limits,
             cancel,
             last_diagnostics: None,
+            progress_deadline: false,
         }
+    }
+
+    /// Creates an independent cache-location discovery budget for one tool family.
+    /// Each query has a ten-second execution limit. Completed attempts renew a thirty-second
+    /// inactivity budget; cancellation, launch/output and filesystem-discovery bounds remain.
+    /// No absolute elapsed-time limit truncates a progressing multi-installation inventory.
+    pub(crate) fn for_discovery(cancel: CancellationToken) -> Self {
+        let mut runner = Self::new(
+            ProbeLimits {
+                total_timeout: Duration::from_secs(30),
+                probe_timeout: Duration::from_secs(10),
+                ..ProbeLimits::default()
+            },
+            cancel,
+        );
+        runner.progress_deadline = true;
+        runner
+    }
+
+    pub(super) fn budget_detail(&self) -> String {
+        if self.remaining == 0 {
+            format!(
+                "probe_count: query count reached {}",
+                self.limits.max_processes
+            )
+        } else {
+            format!(
+                "deadline: installation lookup exceeded {}s {} budget",
+                self.limits.total_timeout.as_secs(),
+                if self.progress_deadline {
+                    "inactivity"
+                } else {
+                    "batch"
+                }
+            )
+        }
+    }
+
+    pub(super) fn probe_timeout(&self) -> Duration {
+        self.limits.probe_timeout
     }
 
     /// Returns fixed-size facts from the last attempt, or `None` before any attempt.
@@ -160,12 +204,27 @@ impl ProbeRunner {
     // Filesystem discovery uses the same invocation deadline and cancellation as subprocesses.
     // It must not keep enumerating installations or caches after probe admission is exhausted.
     pub(super) fn check_budget(&self) -> Result<(), ProbeError> {
+        self.check_budget_at(Instant::now())
+    }
+
+    fn check_budget_at(&self, observed: Instant) -> Result<(), ProbeError> {
         if self.cancel.is_cancelled() {
             Err(ProbeError::Cancelled)
-        } else if self.remaining == 0 || Instant::now() >= self.deadline {
+        } else if self.remaining == 0 || observed >= self.deadline {
             Err(ProbeError::BudgetExhausted)
         } else {
             Ok(())
+        }
+    }
+
+    fn record_progress(&mut self, previous_remaining: usize, observed: Instant) {
+        if self.progress_deadline
+            && self.remaining < previous_remaining
+            && !self.cancel.is_cancelled()
+        {
+            self.deadline = observed
+                .checked_add(self.limits.total_timeout)
+                .unwrap_or(observed);
         }
     }
 
@@ -188,7 +247,9 @@ impl ProbeRunner {
             stdout_eof: false,
             exit_status: None,
         };
+        let remaining = self.remaining;
         let result = self.run_observed(command, started, &mut diagnostics);
+        self.record_progress(remaining, Instant::now());
         // run_observed has released its process guard before this measurement. Keeping only the
         // most recent fixed-size record avoids an unbounded transcript or retained failed output.
         diagnostics.elapsed = started.elapsed();
@@ -764,6 +825,65 @@ mod windows {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discovery_renews_progress_without_borrowing_another_tools_budget() {
+        let start = Instant::now();
+        let token = CancellationToken::new();
+        let mut first = ProbeRunner::for_discovery(token.clone());
+        let second = ProbeRunner::for_discovery(token.clone());
+        first.limits.total_timeout = Duration::from_millis(30);
+        first.deadline = start + Duration::from_millis(30);
+        for tick in 1..=4 {
+            let previous = first.remaining;
+            first.remaining -= 1;
+            first.record_progress(previous, start + Duration::from_millis(tick * 20));
+            assert!(
+                first
+                    .check_budget_at(start + Duration::from_millis(tick * 20 + 10))
+                    .is_ok()
+            );
+        }
+        assert_eq!(second.remaining, 64);
+        assert_eq!(second.probe_timeout(), Duration::from_secs(10));
+        assert!(matches!(
+            first.check_budget_at(start + Duration::from_millis(111)),
+            Err(ProbeError::BudgetExhausted)
+        ));
+        let deadline = first.deadline;
+        first.record_progress(first.remaining, start + Duration::from_secs(1));
+        assert_eq!(
+            first.deadline, deadline,
+            "refused admission is not progress"
+        );
+        first.remaining = 0;
+        assert!(first.budget_detail().starts_with("probe_count:"));
+        token.cancel();
+        assert!(matches!(
+            second.check_budget_at(start),
+            Err(ProbeError::Cancelled)
+        ));
+    }
+
+    #[test]
+    fn ordinary_probe_runners_keep_absolute_deadlines() {
+        let start = Instant::now();
+        let mut runner = ProbeRunner::new(
+            ProbeLimits {
+                total_timeout: Duration::from_millis(30),
+                ..ProbeLimits::default()
+            },
+            CancellationToken::new(),
+        );
+        runner.deadline = start + Duration::from_millis(30);
+        let previous = runner.remaining;
+        runner.remaining -= 1;
+        runner.record_progress(previous, start + Duration::from_millis(20));
+        assert!(matches!(
+            runner.check_budget_at(start + Duration::from_millis(40)),
+            Err(ProbeError::BudgetExhausted)
+        ));
+    }
 
     #[cfg(target_os = "macos")]
     #[test]

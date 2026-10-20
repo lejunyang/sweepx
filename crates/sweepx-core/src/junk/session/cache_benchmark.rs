@@ -217,7 +217,15 @@ fn grouped_candidates(roots: &[PathBuf], rows: &Rows) -> Vec<Vec<StoredJunkCandi
     let groups =
         group_candidates(&scope, rows, None, &mut budget, &CancellationToken::new()).unwrap();
     (0..scope.len())
-        .map(|index| stored_candidates(groups.get(index), &CancellationToken::new()).unwrap())
+        .map(|index| {
+            let projection =
+                stored_candidates(groups.get(index), &CancellationToken::new()).unwrap();
+            assert!(
+                !projection.sparse,
+                "benchmark must compare complete projections"
+            );
+            projection.candidates
+        })
         .collect()
 }
 

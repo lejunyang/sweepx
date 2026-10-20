@@ -710,6 +710,23 @@ struct Worker {
 }
 
 impl Worker {
+    fn history_scope(&self) -> String {
+        let mut hash = Sha256::new();
+        hash.update(b"sweepx-junk-session-history/v1");
+        hash.update([
+            u8::from(self.request.system),
+            u8::from(self.request.include_platform_rules),
+        ]);
+        hash.update(&self.request.project_rule_bytes);
+        let mut ids = self.request.platform_rule_ids.clone();
+        ids.sort();
+        ids.dedup();
+        for id in ids {
+            hash.update((id.len() as u64).to_le_bytes());
+            hash.update(id.as_bytes());
+        }
+        format!("{:x}", hash.finalize())
+    }
     fn run(&mut self, job: &Job, writer: &mut Writer) -> Result<(), JunkSessionFailure> {
         let system = self.request.system;
         let selected = job.selected.is_some();
@@ -792,8 +809,12 @@ impl Worker {
                 &self.request.project_rule_bytes,
                 super::platform::PLATFORM_JUNK_RULES_JSON.as_bytes(),
             );
-            if job.revision.0 == 1 && !self.request.system {
-                self.restore_history(&mut reader, &service, rules_digest, job, writer)?;
+            if job.revision.0 == 1 {
+                if self.request.system {
+                    self.restore_regular_history(&mut reader, &service, rules_digest, job, writer)?;
+                } else {
+                    self.restore_history(&mut reader, &service, rules_digest, job, writer)?;
+                }
             }
             Some((directory, reader))
         } else {
@@ -811,6 +832,12 @@ impl Worker {
             (PlatformJunkSetup::default(), Vec::new())
         };
         let mut partial = platform.evidence.discovery_incomplete();
+        for (rule, detail) in platform.evidence.cache_query_failures() {
+            writer.failure(JunkSessionFailure::new(
+                "tool_query_failed",
+                format!("{detail} ({rule})"),
+            ));
+        }
         if let Some(reason) = platform.evidence.layout_failure() {
             writer.failure(JunkSessionFailure::new(
                 "layout_discovery_incomplete",
@@ -847,6 +874,7 @@ impl Worker {
         #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
         if self.request.system
             && job.revision.0 == 1
+            && self.presentations.is_empty()
             && let Some((_, reader)) = &mut cache
         {
             writer.phase(JunkSessionPhase::Cache)?;

@@ -23,7 +23,7 @@ pub struct LayoutDiscoveryLimits {
     pub max_roots: usize,
     /// Estimated retained bytes for paths, facts and enumeration indexes; not an RSS ceiling.
     pub max_retained_bytes: usize,
-    /// Cooperative deadline checked between filesystem calls, not a hard OS I/O deadline.
+    /// Maximum inactivity between discovery checkpoints, not a total scan or hard OS I/O limit.
     pub deadline: Duration,
 }
 
@@ -192,16 +192,20 @@ impl LayoutDiscovery {
 
     /// Check shared cancellation/deadline before any additional native work.
     pub fn available(&mut self) -> bool {
+        self.available_at(Instant::now())
+    }
+
+    fn available_at(&mut self, observed: Instant) -> bool {
         if self.cancel.is_cancelled() {
             self.fail(LayoutDiscoveryFailure::Cancelled);
             return false;
         }
-        if self
-            .deadline
-            .is_none_or(|deadline| Instant::now() >= deadline)
-        {
+        if self.deadline.is_none_or(|deadline| observed >= deadline) {
             self.fail(LayoutDiscoveryFailure::Deadline);
             return false;
+        }
+        if !self.exhausted {
+            self.deadline = observed.checked_add(self.limits.deadline);
         }
         !self.exhausted
     }
@@ -673,6 +677,19 @@ fn is_named_profile(name: &sweepx_model::NativeName) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn progressing_layout_work_outlives_the_original_deadline() {
+        let start = Instant::now();
+        let mut discovery =
+            LayoutDiscovery::new(LayoutDiscoveryLimits::default(), CancellationToken::new());
+        discovery.deadline = Some(start + Duration::from_secs(5));
+        for tick in 1..=20 {
+            assert!(discovery.available_at(start + Duration::from_secs(tick * 4)));
+        }
+        assert!(!discovery.available_at(start + Duration::from_secs(90)));
+        assert_eq!(discovery.failure, Some(LayoutDiscoveryFailure::Deadline));
+    }
     use std::collections::BTreeSet;
 
     fn fixture() -> (tempfile::TempDir, PathBuf) {

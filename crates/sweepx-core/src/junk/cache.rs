@@ -93,6 +93,12 @@ pub struct StoredJunkRoot {
     candidates: Vec<StoredJunkCandidate>,
     /// Nested requested roots own their candidates; a different request scope must rescan.
     excluded_root_keys: Vec<String>,
+    /// Optional request-family binding for historical first paint before tool discovery.
+    /// It never establishes current roots, file facts or classification authority.
+    #[serde(default)]
+    session_scope: Option<String>,
+    #[serde(default)]
+    session_generation: Option<String>,
 }
 
 /// Original filesystem and rule-match facts, excluding transient tool and Git interpretations.
@@ -244,6 +250,8 @@ impl StoredJunkRoot {
             preview_only: false,
             candidates,
             excluded_root_keys: Vec::new(),
+            session_scope: None,
+            session_generation: None,
         })
     }
 
@@ -278,6 +286,8 @@ impl StoredJunkRoot {
             preview_only: true,
             candidates,
             excluded_root_keys: Vec::new(),
+            session_scope: None,
+            session_generation: None,
         };
         if !record.matches_root_with_rules(&root, &record.rules_digest) {
             return Err(io::Error::other(
@@ -290,6 +300,17 @@ impl StoredJunkRoot {
     /// Binds candidate attribution to the current set of nested requested roots.
     pub fn bind_scope(&mut self, roots: &[PathBuf]) {
         self.excluded_root_keys = excluded_root_keys(Path::new(&self.root), roots);
+    }
+
+    pub(crate) fn bind_session_scope(&mut self, scope: &str, generation: &str, replace: bool) {
+        self.session_scope = Some(scope.to_owned());
+        if replace || self.session_generation.is_none() {
+            self.session_generation = Some(generation.to_owned());
+        }
+    }
+
+    pub(crate) fn root_path(&self) -> PathBuf {
+        PathBuf::from(&self.root)
     }
 
     /// Original pre-scan cursor; this alone cannot qualify current tree coverage.
@@ -330,6 +351,20 @@ impl StoredJunkRoot {
             .zip(cursor)
             .map(|(old, new)| old.min(new));
         self.preview_only = true;
+        self
+    }
+
+    pub(crate) fn merge_observed_preview(mut self, candidates: Vec<StoredJunkCandidate>) -> Self {
+        // A partial scan can replace positive observations, never erase unseen older rows.
+        let observed: BTreeSet<_> = candidates
+            .iter()
+            .map(|row| (row.path.as_str(), row.rule_id.as_str()))
+            .collect();
+        self.candidates
+            .retain(|row| !observed.contains(&(row.path.as_str(), row.rule_id.as_str())));
+        self.candidates.extend(candidates);
+        self.preview_only = true;
+        self.since_event_id = None;
         self
     }
 
@@ -403,6 +438,76 @@ pub struct CacheReader {
 }
 
 impl CacheReader {
+    /// Finds bounded presentation-only records for the previous regular scan, before current
+    /// tool configuration is known. Native root/rule bindings still have to match. New discovery
+    /// replaces this scope; these records must never be promoted into current scan facts.
+    pub(crate) fn historical_session(
+        &mut self,
+        scope: &str,
+        cancel: &sweepx_platform::CancellationToken,
+    ) -> Vec<StoredJunkRoot> {
+        let Some(directory) = self.directory.as_ref() else {
+            return Vec::new();
+        };
+        let mut names = Vec::new();
+        if directory
+            .entries(|name| {
+                if cancel.is_cancelled() {
+                    return Err(io::Error::other("history cancelled"));
+                }
+                if name.starts_with("r-")
+                    && group_key(name).is_some()
+                    && names.len() < self.limits.roots
+                {
+                    names.push(name.to_owned());
+                }
+                Ok(())
+            })
+            .is_err()
+        {
+            return Vec::new();
+        }
+        names.sort();
+        let mut records = Vec::new();
+        for name in names {
+            if cancel.is_cancelled() {
+                break;
+            }
+            let Some(record) = self.budget.read::<StoredJunkRoot>(
+                directory,
+                &name,
+                self.limits,
+                root_retained_bytes,
+            ) else {
+                continue;
+            };
+            let root = Path::new(&record.root);
+            if record.session_scope.as_deref() == Some(scope)
+                && name == record_file_name(root)
+                && record.matches_root_with_rules_and_cancel(root, &self.expected_rules, cancel)
+            {
+                records.push(record);
+            }
+        }
+        // A previous regular scan may have discovered a different root set. Do not mix all
+        // older scopes into its first paint. Selected updates retain their original generation.
+        let generation = records
+            .iter()
+            .filter_map(|record| record.session_generation.as_ref())
+            .max()
+            .cloned();
+        records.retain(|record| record.session_generation == generation);
+        records
+    }
+
+    pub(crate) fn has_root_record(&self, root: &Path) -> bool {
+        self.directory.as_ref().is_some_and(|directory| {
+            match directory.metadata(&record_file_name(root)) {
+                Ok(_) => true,
+                Err(error) => error.kind() != io::ErrorKind::NotFound,
+            }
+        })
+    }
     /// Both cache layers share encoded-input and retained-data limits within an invocation.
     pub fn new(cache_dir: &Path) -> Self {
         Self::with_rule_bytes(
@@ -856,6 +961,8 @@ fn root_retained_bytes(root: &StoredJunkRoot) -> usize {
         + root.root_device.capacity()
         + root.root_inode.capacity()
         + root.root_mount.capacity()
+        + root.session_scope.as_ref().map_or(0, String::capacity)
+        + root.session_generation.as_ref().map_or(0, String::capacity)
         + root.candidates.capacity() * std::mem::size_of::<StoredJunkCandidate>();
     bytes = bytes.saturating_add(
         root.excluded_root_keys

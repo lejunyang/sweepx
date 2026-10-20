@@ -33,13 +33,21 @@ macOS 显式 `/` 根统一准入 System 与 `/System/Volumes/Data` 的原生挂�
 
 普通 `junk` 报告和垃圾 TUI 使用当前 `getattrlistbulk` 批量枚举给出的普通文件类型、设备和逻辑长度，避免为每个文件重复检查父目录及构造完整文件条目。只有本批原生、no-follow、父名称绑定成立、同设备且长度非负的文件可以走 `observe_file_length`；缺失或旧批次事实回到完整检查。`.git` 继续完整观察，普通 scan、大文件、重复内容及要求文件事实的 observer 沿用原生文件身份与元数据路径。逻辑长度 payload 不提供分配大小、硬链接唯一性、可释放空间或执行授权。
 
-默认 macOS 垃圾入口关闭可选文件索引保留，不再读写该索引或为它查询 FSEvents 历史；它仍重新遍历全部进入的目录、规则 marker 和候选。逻辑累计沿已有目录状态更新，不再为每文件复制祖先路径列表。候选历史仍可先展示，选中子树完整刷新后只将新候选片段合入原范围历史记录；未刷新兄弟与祖先统计保持历史，不取得本代事实资格。取消、partial 和缓存准入失败保留旧记录。
+默认 macOS 垃圾入口关闭可选文件索引保留，不再读写该索引或为它查询 FSEvents 历史；它仍重新遍历全部进入的目录、规则 marker 和候选。逻辑累计沿已有目录状态更新，不再为每文件复制祖先路径列表。候选历史仍可先展示，选中子树完整刷新后只将新候选片段合入原范围历史记录；未刷新兄弟与祖先统计保持历史，不取得本代事实资格。取消和缓存准入失败保留旧记录；partial 可以合并已观察的正向候选，未观察兄弟保留为历史。
 
 独立 library `SubtreeCacheProvider` 继续提供兼容的有界文件索引验证：观察前捕获游标、集中查询历史并对每个复用文件确认当前原生类型和长度。该兼容接口仍使用一次性 FSEvents 历史查询；交互会话另有持续监听与变更触发局部扫描，见下节。[Apple 的 FSEvents 指南](https://developer.apple.com/library/archive/documentation/Darwin/Conceptual/FSEvents_ProgGuide/UsingtheFSEventsFramework/UsingtheFSEventsFramework.html)将事件列表视为辅助信息，并说明通知存在不确定延迟。HistoryDone 只结束已投递历史，不能将空列表升级为当前整树未变化的证明；固定等待或 flush 不提供额外的递归元数据覆盖合同。
 
 本次也检查了 APFS 的 `ATTR_CMNEXT_RECURSIVE_GENCOUNT`。[Apple 的 getattrlist 手册](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/man/man2/getattrlist.2)将其限定为已标记 maintain-dir-stats 的目录，未标记返回零。2026-10-07 本机只读探针在现有根均返回零；仅在自建临时夹具启用标记后，嵌套写入、改长和名称变化使计数变化，但 chmod/xattr 与未 flush 的 mmap 写入没有立即改变根计数。[原生探针记录](macos-change-evidence-2026-10-07.json)保留方法、操作序列及环境对照。这是局部观测，不能证明所有权限、内容、挂载与 provider 字段；生产代码不改变用户目录的 APFS 标记，也不据此跳过树。
 
 稳定诊断字段 `rootCacheValidation`、`subtreeCacheValidation` 保留为接近零的阶段边界，`rootCacheHits` 保持 0；这反映默认入口移除索引工作，不代表获得整根命中。完整流程性能需在同构建、同负载下核对事实等价后测量，见[当前设计复审](design-review-2026-10-01.md)。
+
+## 2026-10-21 补充：工具查询与历史首屏
+
+工具家族独立拥有查询预算；单次查询 10 秒、stdout 64 KiB、每家族 64 次启动，完成已启动的查询后续期 30 秒无进展窗口。npm 不再消耗前面工具剩下的总预算；位置布局的 5 秒期限也改为检查点之间的无进展限制，数量/内存/取消边界保留。进展中的文件遍历没有 90 秒总期限。单次外部进程仍可超时，退出失败、次数耗尽与无进展期限保留不同原因及具体命令。
+
+常规 TUI 在当前工具发现前恢复最近一代、相同请求族的历史行，并标出“上次”。原生根、规则字节和有界读取合同仍成立；这些根不扩大当前发现范围。partial 可合并正向候选，未知或未观察的旧兄弟保持历史；取消不发布。超过每根投影预算时，优先保存上层候选及较大的已知/下限大小；单条候选过大仍保留旧记录。稀疏历史不能推导候选消失或整根覆盖。文件遗漏、位置查询、正常排除与可选历史/通知分别呈现；新鲜但不完整的目录大小继续作为本轮下限显示。
+
+这改善首屏而非目录遍历次数，没有恢复整树跳过。[实现、原生验收与验证边界](discovery-and-history-2026-10-21.md)。
 
 ## 2026-10-07 补充：Linux/Windows 当前文件长度观测 {#portable-live-file-length}
 

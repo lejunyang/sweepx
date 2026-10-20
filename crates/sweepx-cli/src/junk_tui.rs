@@ -530,8 +530,10 @@ impl Provider {
                 return Some(JunkEvent::Issue {
                     revision,
                     kind: match error.code {
+                        code if code.starts_with("cache_") => JunkIssueKind::Cache,
                         "npm_discovery_incomplete" => JunkIssueKind::NpmDiscovery,
                         "layout_discovery_incomplete" => JunkIssueKind::AppDiscovery,
+                        "tool_query_failed" => JunkIssueKind::AppDiscovery,
                         "resource_limit" => JunkIssueKind::Capacity,
                         "watch_unavailable" => JunkIssueKind::Watch,
                         _ => JunkIssueKind::Unavailable,

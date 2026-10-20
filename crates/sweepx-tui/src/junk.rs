@@ -213,7 +213,7 @@ pub trait JunkProvider {
 }
 
 struct ViewRow {
-    // Freshly measured base rows and complete observations from an incomplete revision
+    // Fresh observations, including incomplete subtrees, from this revision
     // contribute only a lower bound. This flag never authorizes selection or Trash.
     observed_partial: bool,
     row: Arc<dyn JunkRow>,
@@ -447,7 +447,7 @@ impl JunkModel {
                 self.rows.insert(
                     key.to_owned(),
                     ViewRow {
-                        observed_partial: !historical && !current && row.complete(),
+                        observed_partial: !historical && !current,
                         row,
                         revision,
                         historical,
@@ -515,7 +515,6 @@ impl JunkModel {
                         {
                             row.observed_partial = row.revision == revision
                                 && (!row.historical || row.observed_partial)
-                                && row.row.complete()
                                 && matches!(outcome, JunkOutcome::Partial | JunkOutcome::Cancelled);
                             row.historical = true;
                         }

@@ -9,7 +9,7 @@ use super::{
     JunkService, native_rule_name as native_name_for_rule,
     normalize_rule_name as normalized_rule_name,
 };
-use crate::tools::{self as tool_installations, ProbeLimits, ProbeRunner};
+use crate::tools::{self as tool_installations, ProbeRunner};
 use crate::{CancellationToken, JunkClassifier};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -47,6 +47,7 @@ pub struct PlatformJunkEvidence {
     layout_failure: Option<LayoutDiscoveryFailure>,
     tool_discovery_failure: Option<tool_installations::ToolDiscoveryFailure>,
     tool_discovery_detail: Option<String>,
+    query_failures: BTreeMap<String, String>,
 }
 
 // Current invocation interpretation, bound to the same native root as layout classification.
@@ -66,22 +67,35 @@ impl PlatformJunkEvidence {
     /// Uses the caller's cancellation token for all tool probes in this invocation.
     /// Filesystem discovery remains read-only and is subject to host filesystem call latency.
     pub fn precompute_with_cancel(rules: &[PlatformJunkRule], cancel: CancellationToken) -> Self {
-        let mut runner = ProbeRunner::new(ProbeLimits::default(), cancel.clone());
         let mut reported = BTreeMap::new();
-        // Resolve non-npm roots first. npm's multi-installation inventory consumes the rest of
-        // the same budget, and supplies both its cache candidates and the PATH default answer.
+        let mut query_failures = BTreeMap::new();
+        let mut queries = BTreeMap::new();
+        // Each family owns its budget: a slow Python/OSDK query cannot exhaust npm's inventory.
+        // Discovery is memoized within this invocation, never reused as configuration authority.
         for rule in rules
             .iter()
             .filter(|rule| rule.root_kind != "npm_reported_cache")
         {
             if let Some(tool) = tool_reported_root_for(&rule.root_kind) {
-                reported.insert(rule.id.clone(), tool.resolve(&mut runner));
+                let (root, failure) = queries
+                    .entry((tool.program, tool.arguments))
+                    .or_insert_with(|| {
+                        let mut runner = ProbeRunner::for_discovery(cancel.clone());
+                        let mut failure = None;
+                        let root = tool.resolve_with_failure(&mut runner, &mut failure);
+                        (root, failure)
+                    });
+                reported.insert(rule.id.clone(), root.clone());
+                if let Some(failure) = failure {
+                    query_failures.insert(rule.id.clone(), failure.clone());
+                }
             }
         }
         let npm_discovery = if rules
             .iter()
             .any(|rule| rule.root_kind == "npm_reported_cache")
         {
+            let mut runner = ProbeRunner::for_discovery(cancel.clone());
             Some(tool_installations::discover_npm_installations_with_limits(
                 &mut runner,
                 tool_installations::ToolDiscoveryLimits::default(),
@@ -118,6 +132,7 @@ impl PlatformJunkEvidence {
         );
         evidence.tool_discovery_failure = tool_discovery_failure;
         evidence.tool_discovery_detail = tool_discovery_detail;
+        evidence.query_failures = query_failures;
         evidence
     }
 
@@ -254,6 +269,7 @@ impl PlatformJunkEvidence {
             layout_failure: discovery.failure,
             tool_discovery_failure: None,
             tool_discovery_detail: None,
+            query_failures: BTreeMap::new(),
         }
     }
 
@@ -274,7 +290,17 @@ impl PlatformJunkEvidence {
 
     /// Missing layout or tool discovery cannot prove an empty scope or justify candidate reuse.
     pub fn discovery_incomplete(&self) -> bool {
-        self.layout_failure.is_some() || self.tool_discovery_failure.is_some()
+        self.layout_failure.is_some()
+            || self.tool_discovery_failure.is_some()
+            || !self.query_failures.is_empty()
+    }
+
+    /// Failed queries for present tools, excluding ordinary absent executables. Values are
+    /// bounded command/reason descriptions; no tool stdout/stderr or configuration is retained.
+    pub fn cache_query_failures(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.query_failures
+            .iter()
+            .map(|(rule, detail)| (rule.as_str(), detail.as_str()))
     }
 
     /// Whether a known/browser root matches this invocation's native discovery facts.
@@ -952,6 +978,14 @@ impl ToolReportedRoot {
     /// is discovery, so an unusable answer must drop the rule rather than fall back to a guess.
     /// Only the first line is used, because a tool may add warnings after it.
     pub fn resolve(&self, runner: &mut ProbeRunner) -> Option<PathBuf> {
+        self.resolve_with_failure(runner, &mut None)
+    }
+
+    fn resolve_with_failure(
+        &self,
+        runner: &mut ProbeRunner,
+        failure: &mut Option<String>,
+    ) -> Option<PathBuf> {
         // On Windows many of these tools ship only as a `.cmd`/`.bat` shim, and `Command::new` does
         // not apply `PATHEXT`, so the bare name fails even though the shell finds it. Measured: npm
         // on this host is `npm.ps1` plus `npm.cmd`, and without this the live npm cache was reported
@@ -969,13 +1003,45 @@ impl ToolReportedRoot {
 
         for spelling in spellings {
             let mut command = std::process::Command::new(&spelling);
-            let Ok(output) = runner.run(command.args(self.arguments)) else {
-                continue;
+            let output = match runner.run(command.args(self.arguments)) {
+                Ok(output) => output,
+                Err(crate::tools::ProbeError::Io(error))
+                    if error.kind() == std::io::ErrorKind::NotFound =>
+                {
+                    continue;
+                }
+                Err(error) => {
+                    let code = if matches!(error, crate::tools::ProbeError::TimedOut) {
+                        "probe_timeout"
+                    } else {
+                        "probe_unavailable"
+                    };
+                    failure.get_or_insert_with(|| {
+                        format!("{code}: {spelling} {}: {error}", self.arguments.join(" "))
+                    });
+                    continue;
+                }
             };
             if !output.status.success() {
+                failure.get_or_insert_with(|| {
+                    format!(
+                        "probe_unavailable: {spelling} {}: query exited with {}",
+                        self.arguments.join(" "),
+                        output.status
+                    )
+                });
                 continue;
             }
+            // A present tool with an unusable answer is a discovery gap, unlike an absent
+            // executable. Never silently treat a failed cache-location query as empty coverage.
+            let unusable = || {
+                format!(
+                    "probe_unavailable: {spelling} {}: query returned no usable absolute location",
+                    self.arguments.join(" ")
+                )
+            };
             let Ok(text) = String::from_utf8(output.stdout) else {
+                failure.get_or_insert_with(unusable);
                 continue;
             };
             let line = if self.program == "osdk" {
@@ -988,14 +1054,17 @@ impl ToolReportedRoot {
                 text.lines().next()
             };
             let Some(line) = line else {
+                failure.get_or_insert_with(unusable);
                 continue;
             };
             let path = PathBuf::from(line.trim());
             // A relative path cannot be admitted as a scan root, and resolving one here against the
             // current directory would invent a location the tool never reported.
             if path.is_absolute() {
+                *failure = None;
                 return Some(path);
             }
+            failure.get_or_insert_with(unusable);
         }
         None
     }
@@ -1403,6 +1472,46 @@ mod tests {
     use super::super::candidate::junk_size_for;
     use super::*;
     use sweepx_model::{ByteValue, ReasonCode};
+
+    #[cfg(unix)]
+    #[test]
+    fn present_tools_with_unusable_answers_report_a_location_gap() {
+        for arguments in [
+            &["-c", "exit 7"][..],
+            &["-c", "exit 0"][..],
+            &["-c", "printf relative/path"][..],
+        ] {
+            let tool = ToolReportedRoot {
+                program: "/bin/sh",
+                arguments,
+            };
+            let mut failure = None;
+            assert!(
+                tool.resolve_with_failure(
+                    &mut ProbeRunner::for_discovery(CancellationToken::new()),
+                    &mut failure,
+                )
+                .is_none()
+            );
+            assert!(failure.unwrap().starts_with("probe_unavailable: /bin/sh"));
+        }
+        let mut failure = None;
+        assert!(
+            ToolReportedRoot {
+                program: "/nonexistent/sweepx-tool-fixture",
+                arguments: &[],
+            }
+            .resolve_with_failure(
+                &mut ProbeRunner::for_discovery(CancellationToken::new()),
+                &mut failure,
+            )
+            .is_none()
+        );
+        assert!(
+            failure.is_none(),
+            "an absent optional tool is not a failed query"
+        );
+    }
 
     #[test]
     fn selected_rules_are_validated_and_deduplicated_before_discovery() {
