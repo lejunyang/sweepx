@@ -399,6 +399,26 @@ pub trait JunkClassifier {
         true
     }
 
+    /// Whether an ordinary directory basename is needed as a typed structural marker.
+    /// Directory observations are kept separately from file markers: a linked object or a
+    /// same-named ordinary file cannot satisfy this evidence. Defaults retain no extra names.
+    fn needs_directory_marker(&self, _name: &NativeName) -> bool {
+        false
+    }
+
+    /// Classifies with typed, identity-keyed ordinary directory markers in addition to files.
+    /// Local classifiers may inspect only this directory and its parent's direct marker sets;
+    /// completed child sets can already have been released. The default preserves the original
+    /// file-only evaluator. Missing or truncated evidence cannot imply an absent child.
+    fn classify_with_directory_markers(
+        &self,
+        entry: &ScannedEntry,
+        files: &BTreeMap<ScanEntryId, BTreeSet<String>>,
+        _directories: &BTreeMap<ScanEntryId, BTreeMap<String, ScanEntryId>>,
+    ) -> Option<String> {
+        self.classify(entry, files)
+    }
+
     /// Returns the stable id of the rule that makes this directory a junk candidate, or
     /// `None` when no rule matches.
     ///
@@ -778,7 +798,11 @@ impl<'a> CollectingScanSink<'a> {
         } else {
             self.classifier
                 .expect("classified sink carries a classifier")
-                .classify(&entry, &self.file_markers)
+                .classify_with_directory_markers(
+                    &entry,
+                    &self.file_markers,
+                    &self.directory_markers,
+                )
         };
         let Some(rule_id) = decision
             .filter(|rule| self.admit_metadata(128usize.saturating_add(rule.capacity()), true))
@@ -921,7 +945,10 @@ impl ScanSink for CollectingScanSink<'_> {
                     let Some(identity) = entry.identity.as_ref() else {
                         return Ok(());
                     };
-                    if self.retain_directory_index
+                    if (self.retain_directory_index
+                        || self.classifier.is_some_and(|classifier| {
+                            classifier.needs_directory_marker(&entry.native_basename)
+                        }))
                         && let Some(parent_id) = identity.parent_id.as_ref()
                         && let Some(name) = native_basename_marker(&entry.native_basename)
                         && self.admit_metadata(
@@ -1080,6 +1107,15 @@ impl ScanSink for CollectingScanSink<'_> {
                 if let Some(markers) = self.file_markers.remove(&id) {
                     let bytes = markers.iter().fold(0usize, |sum, marker| {
                         sum.saturating_add(256 + marker.capacity() + id.as_str().len())
+                    });
+                    self.metadata_bytes -= bytes;
+                    self.root_metadata_bytes -= bytes;
+                }
+                if let Some(markers) = self.directory_markers.remove(&id) {
+                    let bytes = markers.iter().fold(0usize, |sum, (name, child)| {
+                        sum.saturating_add(
+                            384 + name.capacity() + child.as_str().len() + id.as_str().len(),
+                        )
                     });
                     self.metadata_bytes -= bytes;
                     self.root_metadata_bytes -= bytes;

@@ -148,7 +148,7 @@ sweepx --format ndjson scan /absolute/path/to/root
 
 Dart 与 SvelteKit 候选使用有界原生内容观察，JSON 的 `projectFormat` 包含 `profile`、`status`、`reason`；状态为 `not_checked`、`recognized`、`invalid` 或 `unknown`，跨语言稳定。无内容 profile 的行该字段为 `null`。缓存命中也重新观察，TUI 显示格式阶段和结果。Dart 识别 pub v2 自声明格式及父根引用；SvelteKit 检查 legacy JSON 配置和生成声明签名，读取后再复验两个文件，仍明确非原子。它不解析完整 TypeScript、不求值 JS 配置或证明工具版本、独占归属与无活动。两类 profile 均仅报告，`junk --trash`、TUI 与后台回收拒绝。默认单文件 256 KiB、累计最坏请求 32 MiB、最多 128 项、合作期限 5 秒；SvelteKit 每项预留四次完整读取（最多 1 MiB），因此纯 SvelteKit 批次最多 32 项。`junk --timings` 的 `projectFormats` 单独计时；无新命令选项。
 
-系统扫描中的 npm 安装发现共享 4,096 次文件系统观察、64 个安装、4 MiB 累计准入估算、单路径/环境值 64 KiB，以及独立的 npm 查询预算和共享取消。相同缓存路径只观察一次直接子项修改时间；这不是精确最后使用时间，截断不返回部分最大值。JSON 的 `npmDiscovery.complete` 与 `incompleteReason` 跨语言稳定；发现缺口使报告为 partial、退出码 4，并拒绝整根候选缓存复用，保留已确认的安装/候选及未知字段；显式项目根未请求发现时，该对象为 `null`。边界在同步原生调用之间检查，不能强制中断阻塞内核操作。
+系统扫描中的 npm 安装发现共享 4,096 次文件系统观察、64 个安装、4 MiB 累计准入估算、单路径/环境值 64 KiB，以及独立的 npm 查询预算和共享取消。相同缓存路径只观察一次直接子项修改时间；这不是精确最后使用时间，截断不返回部分最大值。JSON 的 `npmDiscovery.complete` 与 `incompleteReason` 跨语言稳定；工具查询或安装清单缺口只保留补充警告，拒绝为旧缓存签发完整发现上下文，但不改变已完成文件扫描的状态或阻断已识别缓存的清理；真实文件读取和布局缺口仍为 partial、退出码 4；显式项目根未请求发现时，该对象为 `null`。边界在同步原生调用之间检查，不能强制中断阻塞内核操作。
 
 ## 状态快照与取消
 
@@ -332,7 +332,7 @@ blockfile 后端的着色器缓存体积包含固定骨架 —— 即使缓存�
 因此空缓存仍占约 0.5 MB。
 ### 工具缓存：识别每一份副本，而不只是在用的那份
 
-`junk --system --rule RULE_ID` 只扫描一个类别，可重复指定并结合 `--tui`。未知或其他平台的 ID 在发现前拒绝；未选类别不在本次扫描范围内。不传 `--rule` 仍执行完整系统发现，受保护目录的原生调用仍可能等待系统响应。Unix npm 默认目录为 `~/.npm`，Windows 为 `%LOCALAPPDATA%/npm-cache`；只报告有 `content-v2` 和 `index-v5` 目录的 `_cacache`，保留 `_npx` 工具及自定义同级文件。工具回答缺失时保持 `activity: unknown`。pnpm 的 256 分片目录允许额外的普通 `.DS_Store` 文件，但仍拒绝未知额外条目及该名称的目录或链接。
+`junk --system --rule RULE_ID` 只扫描一个类别，可重复指定并结合 `--tui`。未知或其他平台的 ID 在发现前拒绝；未选类别不在本次扫描范围内。不传 `--rule` 仍执行完整系统发现，受保护目录的原生调用仍可能等待系统响应。Unix npm 默认目录为 `~/.npm`，Windows 为 `%LOCALAPPDATA%/npm-cache`；下载缓存 `_cacache` 需有 `content-v2` 和 `index-v5` 目录；日志、npx 安装和其他待确认数据分开列出。工具回答缺失时保持 `activity: unknown`。pnpm 的 256 分片目录允许额外的普通 `.DS_Store` 文件，但仍拒绝未知额外条目及该名称的目录或链接。
 
 npm、pnpm、pip 的规则不依赖单一位置。发现阶段会枚举工具报告的路径、工具自身的环境变量覆盖，以及
 文档记载的平台默认位置；随后只有目录**自身内容**符合该缓存的结构特征时才纳入 —— 对 pnpm store 来说，
@@ -472,7 +472,7 @@ sweepx npx-cache --entry 0123456789abcdef --trash
 sweepx --format json npx-cache --root /absolute/npm-cache/_npx
 ```
 
-默认位置为 `~/.npm/_npx`；重定向缓存请指定 `--root`。没有 `--trash` 时只预览。`--older-versions` 保留每个包的最高已安装语义版本（不访问注册表），同版本及仅 build metadata 不同的版本都保留；未知版本、多包槽、覆盖不完整不进入自动计划；有未知或多包成员的版本组整体排除，已识别的其他工具组可独立计划。包过滤只选择直接依赖；回收单位是整个槽，不拆除共享依赖。执行前重新读取绑定原生身份的 manifest，macOS/Linux 检查当前用户的进程参数与打开文件；Windows 活动适配尚不支持回收。拒绝、部分失败和未完成分别返回结果；始终使用 OS 回收站。活动观察不是排他锁，新的启动与最终路径替换窗口仍存在。JSON `inventory` 保留完整根报告，`selection` 是本次计划，字段不随语言变化。
+默认使用绝对路径 `NPM_CONFIG_CACHE/_npx`，否则 Unix 为 `~/.npm/_npx`、Windows 为 `%LOCALAPPDATA%/npm-cache/_npx`；也可指定 `--root`，无需启动 npm。没有 `--trash` 时只预览。`--older-versions` 保留每个包的最高已安装语义版本（不访问注册表），同版本及仅 build metadata 不同的版本都保留；未知版本、多包槽、覆盖不完整不进入自动计划；有未知或多包成员的版本组整体排除，已识别的其他工具组可独立计划。包过滤只选择直接依赖；回收单位是整个槽，不拆除共享依赖。执行前重新读取绑定原生身份的 manifest，macOS/Linux 检查当前用户的进程参数与打开文件；Windows 活动适配尚不支持回收。拒绝、部分失败和未完成分别返回结果；始终使用 OS 回收站。活动观察不是排他锁，新的启动与最终路径替换窗口仍存在。JSON `inventory` 保留完整根报告，`selection` 是本次计划，字段不随语言变化。
 
 ## `browser-model`
 
@@ -594,7 +594,11 @@ Linux/macOS/Windows 的普通 `junk` 报告与垃圾 TUI 使用当前原生文�
 历史候选记录绑定规则字节、平台、根身份和嵌套根范围，不接受为当前整根命中。每次报告重新发现所需上下文并现场分类；兼容 library 文件索引仍独立验证，默认垃圾入口不使用该索引。
 
 
-常规清理扫描再次打开时，先显示同类扫描的最近一代结果，大小标为“上次”，后台重新检查当前文件与工具配置。文件读取遗漏、应用与工具位置待检查、正常排除及可选通知分栏显示；应用通信 socket 属于正常排除。历史仅用于首屏展示，不跳过目录遍历；partial 结果也可保留已发现候选，不再因一项配置查询失败而丢失全部首屏历史；候选较多时在容量内优先保存上层和较大条目。文件扫描没有 90 秒或其他总时长截止，持续有进展时继续；外部工具的单次查询保留超时和取消。JSON 新增 `toolQueryFailures`（`ruleId`、`detail`），`npmDiscovery.incompleteReason` 新增 `probe_timeout`，`detail` 保留具体命令及原因，`probe_budget` 细分次数耗尽与无进展期限。
+常规清理扫描再次打开时，先显示同类扫描的最近一代结果，大小标为“上次”，后台重新检查当前文件与工具配置。文件读取遗漏、应用位置待检查、正常排除及可选通知分栏显示；工具配置查询失败放在可选通知中；应用通信 socket 属于正常排除。历史仅用于首屏展示，不跳过目录遍历；partial 结果也可保留已发现候选，不再因一项配置查询失败而丢失全部首屏历史；候选较多时在容量内优先保存上层和较大条目。文件扫描没有 90 秒或其他总时长截止，持续有进展时继续；外部工具的单次查询保留超时和取消。JSON 新增 `toolQueryFailures`（`ruleId`、`detail`），`npmDiscovery.incompleteReason` 新增 `probe_timeout`，`detail` 保留具体命令及原因，`probe_budget` 细分次数耗尽与无进展期限。
+
+npm、pnpm、pip 的命令查询只补充当前配置与安装信息，OSDK 未选版本不会阻断已有缓存的识别、复查或符合规则的清理。JSON 新增 `toolQueriesRequiredForScan: false`；`npmDiscovery.complete` 仍表示安装发现自身是否完整，不能单独用来判断文件扫描状态。默认位置和绝对环境配置参与常规扫描；深度扫描还按本轮原生目录结构识别旧位置的受支持缓存，不能仅凭目录名推断无用。所有成功 npm 安装的配置均参与解释，未被当前配置引用只标为 unknown，不据此认定闲置。
+
+npm 分为 `tool.npm-cache`（下载缓存）、`tool.npm-logs`（日志）、`tool.npm-npx`（安装槽）和 `tool.npm-other-data`（待确认）。日志需逐文件检查 npm 文件名与内容，混有其他内容时只供查看；回收前重复内容与当前用户进程/打开文件检查。单次验证最多 2,048 文件、8 MiB 请求读取量；单目录最多 1,024 项，调试日志与依赖冲突报告读 4 KiB 前缀，timing JSON 完整读取最多 64 KiB。超限保留结果并停止目录清理。npx 继续使用 `npx-cache --root /absolute/cache/_npx` 按版本或槽选择；pnpm 继续使用独立 store 清理，复查索引、项目引用和链接。未知旧目录及第三方二进制下载只供查看，不整体回收。
 
 `junk --system` 的根发现、分类和工具安装清单共用本次调用的探测快照，扫描结束后不会重新启动一轮探测。每类工具使用独立预算，单次查询最多 10 秒、stdout 最多 64 KiB，每类最多尝试启动 64 个进程；每次已启动的查询结束后续期 30 秒无进展窗口，不再按整批总耗时截断持续推进的安装发现；超时、取消、输出过量或工具不可用时保留 unknown，安装信息的缺失字段为 null。显式项目根扫描不探测无关的 npm 安装。
 

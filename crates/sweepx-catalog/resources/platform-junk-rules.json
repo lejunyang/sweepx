@@ -867,5 +867,46 @@
     "references": [
       "repo:docs/architecture/managed-cache-inventory.md"
     ]
+  },
+  {
+    "id": "tool.npm-logs",
+    "platform": "any",
+    "rootKind": "npm_logs",
+    "matchKind": "verified_tool_layout",
+    "names": [],
+    "requiredMarkers": [],
+    "depth": 0,
+    "risk": "R2",
+    "evidence": "npm debug logs are separate from downloaded packages and npx installations. Native cache context and timestamped log names identify a report candidate; every child must pass independent native file and npm-header checks before directory Trash is admitted. Unexpected contents remain report-only.",
+    "sourceReviewedAt": "2026-10-21",
+    "references": ["https://docs.npmjs.com/cli/v11/using-npm/logging/"]
+  },
+  {
+    "id": "tool.npm-npx",
+    "platform": "any",
+    "rootKind": "npm_npx",
+    "itemInventory": "npx",
+    "matchKind": "verified_tool_layout",
+    "names": [],
+    "requiredMarkers": [],
+    "depth": 0,
+    "risk": "R2",
+    "evidence": "npx installation slots are identified independently of an npm executable by native slot lineage, ordinary package manifests and node_modules. They remain separate from download caches. The existing npx-cache inventory validates requested and installed package versions and checks current process/open-file references before selected whole-slot Trash; version age alone is not disuse.",
+    "sourceReviewedAt": "2026-10-21",
+    "references": ["https://docs.npmjs.com/cli/v11/commands/npm-exec/", "https://docs.npmjs.com/cli/v11/commands/npm-cache/"]
+  },
+  {
+    "id": "tool.npm-other-data",
+    "platform": "any",
+    "rootKind": "npm_other",
+    "matchKind": "verified_tool_layout",
+    "names": [],
+    "requiredMarkers": [],
+    "depth": 0,
+    "risk": "R3",
+    "evidence": "Other directories under a native npm cache context can include legacy layouts, third-party binary downloads and unexplained user data. They are displayed for separate review, never inferred to be unused and never admitted to automatic directory Trash. Recognized download caches, logs and npx slots have independent rules.",
+    "sourceReviewedAt": "2026-10-21",
+    "references": ["https://docs.npmjs.com/cli/v11/commands/npm-cache/"]
   }
+
 ]

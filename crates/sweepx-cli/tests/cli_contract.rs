@@ -2182,7 +2182,7 @@ fn junk_project_layout_corpus_keeps_machine_rules_and_source_payloads() {
 
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
 #[test]
-fn selected_npm_rule_finds_only_content_cache_and_keeps_unknown_activity() {
+fn selected_npm_rule_finds_only_content_cache_and_keeps_unconfigured_activity_unknown() {
     let (_owner, root) = duplicate_fixture();
     let home = root.join("home");
     let local = root.join("local");
@@ -2204,7 +2204,9 @@ fn selected_npm_rule_finds_only_content_cache_and_keeps_unknown_activity() {
         .env("USERPROFILE", &home)
         .env("LOCALAPPDATA", &local)
         .env("PATH", &empty_path)
-        .env_remove("NPM_CONFIG_CACHE")
+        // A concrete installation outside PATH can still answer. Its different configured
+        // cache is not evidence that the independently recognized default is abandoned.
+        .env("NPM_CONFIG_CACHE", root.join("other-configured-cache"))
         .args(["--format", "json", "--state-dir"])
         .arg(root.join("state"))
         .args(["junk", "--system", "--rule", "tool.npm-cache"]);
@@ -4803,11 +4805,12 @@ fn junk_system_reports_bounded_tool_discovery_in_both_locales() {
             .arg(root.join(format!("state-{locale}")))
             .args(["junk", "--system"])
             .assert()
-            .code(4)
+            .success()
             .get_output()
             .clone();
         let report: Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(report["status"], "partial");
+        assert_eq!(report["status"], "ok");
+        assert_eq!(report["toolQueriesRequiredForScan"], false);
         assert_eq!(
             report["npmDiscovery"],
             json!({"complete": false, "incompleteReason": "resource_limit", "detail": null})
@@ -4902,4 +4905,146 @@ fn browser_model_policy_export_is_explicit_and_does_not_overwrite() {
         .assert()
         .code(3);
     assert_eq!(fs::read(path).unwrap(), bytes);
+}
+
+#[cfg(unix)]
+#[test]
+fn optional_tool_failures_keep_native_npm_pnpm_and_pip_results_current() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = TempDir::new().unwrap();
+    let root = resolved_fixture_root(&fixture);
+    let home = root.join("home");
+    let bin = root.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let marker = root.join("npm-query-marker");
+    for program in ["npm", "pnpm", "pip"] {
+        let script = bin.join(program);
+        let body = if program == "npm" {
+            format!(
+                "#!/bin/sh\n/bin/echo called >> '{}'\nexit 1\n",
+                marker.display()
+            )
+        } else {
+            "#!/bin/sh\nexit 1\n".into()
+        };
+        fs::write(&script, body).unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let cache = home.join(".npm");
+    fs::create_dir_all(cache.join("_cacache/content-v2")).unwrap();
+    fs::create_dir(cache.join("_cacache/index-v5")).unwrap();
+    fs::write(
+        cache.join("_cacache/content-v2/payload"),
+        b"native download cache",
+    )
+    .unwrap();
+    fs::create_dir(cache.join("_logs")).unwrap();
+    fs::write(
+        cache.join("_logs/2026-10-21T01_02_03_004Z-debug-0.log"),
+        b"0 verbose cli /node /npm\n1 info using npm@11\n2 info using node@v24\n",
+    )
+    .unwrap();
+    let slot = cache.join("_npx/0123456789abcdef");
+    fs::create_dir_all(slot.join("node_modules/tool")).unwrap();
+    fs::write(
+        slot.join("package.json"),
+        br#"{"dependencies":{"tool":"1.0.0"}}"#,
+    )
+    .unwrap();
+    fs::write(slot.join("package-lock.json"), b"{}").unwrap();
+    fs::write(
+        slot.join("node_modules/tool/package.json"),
+        br#"{"name":"tool","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    let pip = home.join("pip/cache");
+    fs::create_dir_all(pip.join("wheels")).unwrap();
+    fs::create_dir(pip.join("http-v2")).unwrap();
+    let store = home.join(".pnpm-store/v3");
+    for shard in 0..256 {
+        fs::create_dir_all(store.join(format!("files/{shard:02x}"))).unwrap();
+    }
+    for locale in ["en-US", "zh-CN"] {
+        let output = cli_command()
+            .timeout(std::time::Duration::from_secs(30))
+            .env("HOME", &home)
+            .env("PATH", &bin)
+            .env("NPM_CONFIG_CACHE", &cache)
+            .args(["--locale", locale, "--format", "json", "--state-dir"])
+            .arg(root.join(format!("state-{locale}")))
+            .args([
+                "junk",
+                "--system",
+                "--details",
+                "--rule",
+                "tool.npm-cache",
+                "--rule",
+                "tool.npm-logs",
+                "--rule",
+                "tool.npm-npx",
+                "--rule",
+                "tool.pnpm-store",
+                "--rule",
+                "tool.pip-cache",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .clone();
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["status"], "ok");
+        assert_eq!(report["toolQueriesRequiredForScan"], false);
+        assert_eq!(report["npmDiscovery"]["complete"], false);
+        assert_eq!(report["layoutDiscovery"]["complete"], true);
+        assert_eq!(report["toolQueryFailures"].as_array().unwrap().len(), 2);
+        for rule in [
+            "tool.npm-cache",
+            "tool.npm-logs",
+            "tool.npm-npx",
+            "tool.pnpm-store",
+            "tool.pip-cache",
+        ] {
+            assert!(
+                report["candidates"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|r| r["ruleId"] == rule),
+                "missing {rule}: {}",
+                output.stdout.escape_ascii()
+            );
+        }
+        let logs = report["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["ruleId"] == "tool.npm-logs")
+            .unwrap();
+        assert_eq!(logs["executionPolicy"], "native_revalidation_required");
+    }
+    let before = fs::read(&marker).unwrap();
+    let report = cli_command()
+        .env("HOME", root.join("unrelated-home"))
+        .env("PATH", &bin)
+        .env("NPM_CONFIG_CACHE", &cache)
+        .args(["--format", "json", "npx-cache"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let report: Value = serde_json::from_slice(&report).unwrap();
+    assert_eq!(
+        report["inventory"]["entries"][0]["packages"][0]["version"],
+        "1.0.0"
+    );
+    assert_eq!(
+        fs::read(marker).unwrap(),
+        before,
+        "npx inventory must not execute npm"
+    );
+    assert_eq!(
+        fs::read(cache.join("_cacache/content-v2/payload")).unwrap(),
+        b"native download cache"
+    );
 }

@@ -91,10 +91,12 @@ impl PlatformJunkEvidence {
                 }
             }
         }
-        let npm_discovery = if rules
-            .iter()
-            .any(|rule| rule.root_kind == "npm_reported_cache")
-        {
+        let npm_discovery = if rules.iter().any(|rule| {
+            matches!(
+                rule.root_kind.as_str(),
+                "npm_reported_cache" | "npm_logs" | "npm_npx" | "npm_other"
+            )
+        }) {
             let mut runner = ProbeRunner::for_discovery(cancel.clone());
             Some(tool_installations::discover_npm_installations_with_limits(
                 &mut runner,
@@ -114,7 +116,12 @@ impl PlatformJunkEvidence {
             .unwrap_or_default();
         let npm_root = npm_installations
             .iter()
-            .find(|installation| installation.is_path_default)
+            .find(|installation| installation.is_path_default && installation.cache.is_some())
+            .or_else(|| {
+                npm_installations
+                    .iter()
+                    .find(|installation| installation.cache.is_some())
+            })
             .and_then(|installation| installation.cache.clone());
         let mut evidence = Self::precompute_with_layout(
             rules,
@@ -197,6 +204,41 @@ impl PlatformJunkEvidence {
                     discovery.push_root(&path, &mut roots);
                 } else {
                     discovery.unavailable_anchor();
+                }
+                layout_roots.insert(rule.id.clone(), roots);
+                continue;
+            }
+            if matches!(
+                rule.root_kind.as_str(),
+                "npm_logs" | "npm_npx" | "npm_other"
+            ) {
+                let mut roots = Vec::new();
+                let mut parents = Vec::new();
+                if let Some(base) = resolve_base(if cfg!(windows) {
+                    "local_app_data"
+                } else {
+                    "home"
+                }) {
+                    parents.push(base.join(if cfg!(windows) { "npm-cache" } else { ".npm" }));
+                }
+                if let Some(path) = std::env::var_os("NPM_CONFIG_CACHE")
+                    .map(PathBuf::from)
+                    .filter(|path| path.is_absolute())
+                {
+                    parents.push(path);
+                }
+                parents.extend(
+                    npm_installations
+                        .iter()
+                        .filter_map(|installation| installation.cache.clone()),
+                );
+                let child = match rule.root_kind.as_str() {
+                    "npm_logs" => "_logs",
+                    "npm_npx" => "_npx",
+                    _ => "",
+                };
+                for parent in parents {
+                    discovery.push_root(&parent.join(child), &mut roots);
                 }
                 layout_roots.insert(rule.id.clone(), roots);
                 continue;
@@ -288,11 +330,11 @@ impl PlatformJunkEvidence {
         self.tool_discovery_detail.as_deref()
     }
 
-    /// Missing layout or tool discovery cannot prove an empty scope or justify candidate reuse.
+    /// Whether required native location observations are incomplete. Tool configuration and
+    /// installation inventory are supplementary: their failures do not invalidate filesystem
+    /// facts, independent classification or an explicitly selected candidate's cleanup checks.
     pub fn discovery_incomplete(&self) -> bool {
         self.layout_failure.is_some()
-            || self.tool_discovery_failure.is_some()
-            || !self.query_failures.is_empty()
     }
 
     /// Failed queries for present tools, excluding ordinary absent executables. Values are
@@ -387,7 +429,12 @@ impl CombinedJunkClassifier<'_> {
     /// Serialization streams at most 1 MiB into fixed hash state. Sorting retains at most 1,024
     /// references per rule; tool paths larger than 64 KiB decline reuse before native conversion.
     pub fn classification_context_digest(&self) -> Option<[u8; 32]> {
-        if self.evidence.discovery_incomplete() {
+        if self.evidence.discovery_incomplete()
+            || self.evidence.tool_discovery_failure.is_some()
+            || !self.evidence.query_failures.is_empty()
+        {
+            // Optional tool failures do not invalidate current filesystem classification, but
+            // still cannot certify a complete discovery context for a legacy cache consumer.
             return None;
         }
         let mut hash = super::context::ContextHash::new(&self.project.rule_bytes_digest);
@@ -430,6 +477,7 @@ impl CombinedJunkClassifier<'_> {
                 "verified_browser_cache"
                 | "verified_cache_root"
                 | "verified_known_root"
+                | "verified_tool_layout"
                 | "direct_children"
                 | "named_descendant" => {
                     let facts = self.evidence.layout_roots.get(&rule.id)?;
@@ -459,12 +507,26 @@ impl JunkClassifier for CombinedJunkClassifier<'_> {
 
     fn needs_file_marker(&self, name: &sweepx_model::NativeName) -> bool {
         self.project.needs_project_marker(name)
+            || super::tool_cache::needs_file_marker(self.platform_rules, name)
+    }
+
+    fn needs_directory_marker(&self, name: &sweepx_model::NativeName) -> bool {
+        super::tool_cache::needs_directory_marker(self.platform_rules, name)
     }
 
     fn classify(
         &self,
         entry: &sweepx_model::ScannedEntry,
         markers: &BTreeMap<ScanEntryId, BTreeSet<String>>,
+    ) -> Option<String> {
+        self.classify_with_directory_markers(entry, markers, &BTreeMap::new())
+    }
+
+    fn classify_with_directory_markers(
+        &self,
+        entry: &sweepx_model::ScannedEntry,
+        markers: &BTreeMap<ScanEntryId, BTreeSet<String>>,
+        directories: &BTreeMap<ScanEntryId, BTreeMap<String, ScanEntryId>>,
     ) -> Option<String> {
         if entry.object_type != sweepx_model::ObjectType::Directory
             || entry.validated_native_locator().ok().flatten().is_none()
@@ -484,7 +546,17 @@ impl JunkClassifier for CombinedJunkClassifier<'_> {
             .iter()
             .filter(|rule| rule_applies_to_host(rule))
         {
-            if platform_rule_classifies(rule, entry, self.evidence) {
+            if platform_rule_classifies(rule, entry, self.evidence)
+                || (super::tool_cache::classifies(rule, entry, markers, directories)
+                    && !super::git::native_path(entry).is_some_and(|path| {
+                        self.evidence
+                            .layout_roots
+                            .get(&rule.id)
+                            .into_iter()
+                            .flatten()
+                            .any(|root| root.path == path)
+                    }))
+            {
                 let rank = platform_rule_specificity(rule);
                 if best.is_none_or(|(best_rank, _)| rank < best_rank) {
                     best = Some((rank, rule));
@@ -548,6 +620,9 @@ fn platform_rule_classifies(
         "verified_cache_root" => evidence.matches_layout_root(rule, entry),
         "verified_browser_cache" => evidence.matches_layout_root(rule, entry),
         "verified_known_root" => evidence.matches_layout_root(rule, entry),
+        "verified_tool_layout" if rule.root_kind == "npm_logs" => {
+            evidence.matches_layout_root(rule, entry)
+        }
         #[cfg(target_os = "linux")]
         "stale_inactive_direct_child" => false,
         _ => false,
@@ -580,7 +655,8 @@ fn tool_reported_root_matches(
 pub enum ToolRootActivity {
     /// The tool itself named this path.
     Live,
-    /// A verified cache path differing from the tool's current answer; it may still be in use.
+    /// Legacy machine value retained for compatibility. A different configuration answer
+    /// alone no longer emits this value: it cannot establish abandonment or inactivity.
     Stale,
     /// A real cache of this tool, but the tool could not be asked which copy it uses.
     ///
@@ -1168,7 +1244,13 @@ fn tool_cache_profile(root_kind: &str) -> Option<ToolCacheProfile> {
         "pip_reported_cache" => Some(ToolCacheProfile {
             sources: CandidateSources {
                 env_overrides: &["PIP_CACHE_DIR"],
-                relative_defaults: &["pip/Cache", "pip/cache"],
+                relative_defaults: if cfg!(windows) {
+                    &["pip/Cache", "pip/cache"]
+                } else if cfg!(target_os = "macos") {
+                    &["Library/Caches/pip", ".cache/pip", "pip/Cache", "pip/cache"]
+                } else {
+                    &[".cache/pip", "pip/Cache", "pip/cache"]
+                },
                 versioned_child_prefix: None,
             },
             // The root itself has no shard layout; the generations below carry the evidence.
@@ -1263,7 +1345,24 @@ fn tool_cache_candidates_with_root(
     resolve_base: &mut impl FnMut(&str) -> Option<PathBuf>,
     discovery: &mut LayoutDiscovery,
 ) -> Vec<ToolRootSnapshot> {
-    let reported = reported_root.and_then(|path| discovery.directory(path));
+    // Every successful installation answer is configuration evidence. A PATH shim does not
+    // override another concrete installation, and a different answer never proves abandonment.
+    let mut configured = Vec::new();
+    for path in reported_root.into_iter().chain(
+        installations
+            .iter()
+            .filter(|_| rule.root_kind == "npm_reported_cache")
+            .filter_map(|installation| installation.cache.as_deref()),
+    ) {
+        if let Some(root) = discovery.directory(path)
+            && !configured
+                .iter()
+                .any(|existing: &Arc<LayoutRoot>| existing.same_object(&root))
+            && discovery.charge(64)
+        {
+            configured.push(root);
+        }
+    }
     let profile = tool_cache_profile(&rule.root_kind);
     let mut candidates = Vec::new();
     let mut snapshots = Vec::new();
@@ -1284,10 +1383,10 @@ fn tool_cache_candidates_with_root(
             }
             // Activity describes the tool's configured parent. npm's content cache is a child:
             // `_npx` can contain running tools and custom siblings have no disposability evidence.
-            let activity = match &reported {
-                Some(reported) if root.same_object(reported) => ToolRootActivity::Live,
-                Some(_) => ToolRootActivity::Stale,
-                None => ToolRootActivity::Unknown,
+            let activity = if configured.iter().any(|current| root.same_object(current)) {
+                ToolRootActivity::Live
+            } else {
+                ToolRootActivity::Unknown
             };
             let root = if let Some(child) = profile.as_ref().and_then(|p| p.candidate_child) {
                 let Some(child) = discovery.directory(&root.path.join(child)) else {
@@ -1337,6 +1436,13 @@ fn tool_cache_candidates_with_root(
             push(Path::new(&value), &mut candidates, discovery);
         }
     }
+    if rule.root_kind == "pip_reported_cache"
+        && let Some(base) = std::env::var_os("XDG_CACHE_HOME")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+    {
+        push(&base.join("pip"), &mut candidates, discovery);
+    }
     if rule.root_kind == "npm_reported_cache" {
         for installation in installations {
             if !discovery.available() {
@@ -1350,34 +1456,41 @@ fn tool_cache_candidates_with_root(
     if !discovery.available() {
         return snapshots;
     }
-    let base = resolve_base(if cfg!(windows) {
-        "local_app_data"
+    let defaults = if rule.root_kind == "pnpm_reported_store" {
+        crate::tools::pnpm_store_hints(
+            resolve_base("home").as_deref(),
+            resolve_base("local_app_data").as_deref(),
+        )
     } else {
-        "home"
-    });
-    if let Some(base) = base
-        .filter(|path| path.is_absolute())
-        .and_then(|path| discovery.retain_path(&path))
-    {
-        for relative in profile.sources.relative_defaults {
-            if !discovery.available() {
-                break;
-            }
-            let mut path = base.clone();
-            for component in relative.split('/') {
-                path.push(component);
-            }
-            match profile.sources.versioned_child_prefix {
-                Some(prefix) => {
-                    for path in discovery.versions(&path, prefix).iter() {
-                        if !discovery.available() {
-                            break;
-                        }
-                        push(path, &mut candidates, discovery);
+        resolve_base(if cfg!(windows) {
+            "local_app_data"
+        } else {
+            "home"
+        })
+        .into_iter()
+        .flat_map(|base| {
+            profile
+                .sources
+                .relative_defaults
+                .iter()
+                .map(move |relative| base.join(relative))
+        })
+        .collect()
+    };
+    for path in defaults {
+        let Some(path) = discovery.retain_path(&path) else {
+            break;
+        };
+        match profile.sources.versioned_child_prefix {
+            Some(prefix) => {
+                for path in discovery.versions(&path, prefix).iter() {
+                    if !discovery.available() {
+                        break;
                     }
+                    push(path, &mut candidates, discovery);
                 }
-                None => push(&path, &mut candidates, discovery),
             }
+            None => push(&path, &mut candidates, discovery),
         }
     }
     snapshots
@@ -1510,6 +1623,77 @@ mod tests {
         assert!(
             failure.is_none(),
             "an absent optional tool is not a failed query"
+        );
+    }
+
+    #[test]
+    fn optional_queries_do_not_invalidate_native_scope_or_certify_cache_reuse() {
+        let project = JunkService::built_in().unwrap();
+        let mut evidence = PlatformJunkEvidence {
+            tool_discovery_failure: Some(
+                tool_installations::ToolDiscoveryFailure::ProbeUnavailable,
+            ),
+            ..Default::default()
+        };
+        evidence.query_failures.insert(
+            "tool.pnpm-store".into(),
+            "probe_unavailable: unconfigured shim".into(),
+        );
+        assert!(!evidence.discovery_incomplete());
+        assert!(
+            project
+                .with_platform(&[], &evidence)
+                .classification_context_digest()
+                .is_none()
+        );
+        evidence.layout_failure = Some(LayoutDiscoveryFailure::ObservationUnavailable);
+        assert!(
+            evidence.discovery_incomplete(),
+            "real filesystem gaps must still be partial"
+        );
+    }
+
+    #[test]
+    fn all_concrete_npm_answers_supply_configuration_evidence_without_a_path_default() {
+        let owner = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        let base = owner.path().canonicalize().unwrap();
+        #[cfg(windows)]
+        let base = owner.path().to_path_buf();
+        let caches = [base.join("a"), base.join("b")];
+        for cache in &caches {
+            std::fs::create_dir_all(cache.join("_cacache/content-v2")).unwrap();
+            std::fs::create_dir_all(cache.join("_cacache/index-v5")).unwrap();
+        }
+        let installs = caches
+            .iter()
+            .map(|cache| tool_installations::ToolInstallation {
+                tool: "npm".into(),
+                manager: "nvm".into(),
+                manager_label: None,
+                executable: base.join("not-executed"),
+                tool_version: None,
+                runtime_version: None,
+                cache: Some(cache.clone()),
+                cache_last_active_at: None,
+                is_path_default: false,
+            })
+            .collect();
+        let rules = select_platform_rules(&["tool.npm-cache".into()]).unwrap();
+        let evidence = PlatformJunkEvidence::precompute_with_layout(
+            &rules,
+            |_| None,
+            installs,
+            LayoutDiscoveryLimits::default(),
+            CancellationToken::new(),
+            |_| None,
+        );
+        assert!(!evidence.discovery_incomplete());
+        assert_eq!(evidence.tool_snapshots[&rules[0].id].len(), 2);
+        assert!(
+            evidence.tool_snapshots[&rules[0].id]
+                .iter()
+                .all(|snapshot| snapshot.activity == ToolRootActivity::Live)
         );
     }
 
@@ -2329,7 +2513,7 @@ mod tests {
     #[test]
     fn embedded_platform_junk_rules_are_narrow_and_evidence_bearing() {
         let rules = load_platform_junk_rules().unwrap();
-        assert_eq!(rules.len(), 27);
+        assert_eq!(rules.len(), 30);
         let osdk = rules
             .iter()
             .find(|rule| rule.id == "tool.osdk-data")

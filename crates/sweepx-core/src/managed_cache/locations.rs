@@ -89,29 +89,19 @@ pub fn pnpm_locations(
         if let Some(root) = std::env::var_os("PNPM_STORE_DIR") {
             hints.insert(root.into());
         }
-        if let Some(data) = std::env::var_os("XDG_DATA_HOME") {
-            hints.insert(PathBuf::from(data).join("pnpm/store"));
-        }
-        if let Some(home) = crate::junk::platform::user_home_dir() {
-            hints.extend([
-                home.join(".pnpm-store"),
-                home.join("Library/pnpm/store"),
-                home.join(".local/share/pnpm/store"),
-            ]);
-            if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-                hints.insert(PathBuf::from(local).join("pnpm/store"));
-            }
-        }
-        let mut runner =
-            crate::tools::ProbeRunner::new(crate::tools::ProbeLimits::default(), cancel.clone());
-        if let Ok(out) = runner.run(std::process::Command::new("pnpm").args(["store", "path"]))
-            && out.status.success()
-            && let Ok(text) = std::str::from_utf8(&out.stdout)
+        hints.extend(crate::tools::pnpm_store_hints(
+            crate::junk::platform::user_home_dir().as_deref(),
+            std::env::var_os("LOCALAPPDATA")
+                .map(PathBuf::from)
+                .as_deref(),
+        ));
+        // Use the same bounded, platform-aware optional resolver as ordinary junk scans.
+        // A missing/unconfigured shim cannot invalidate stores located from native declarations.
+        let mut runner = crate::tools::ProbeRunner::for_discovery(cancel.clone());
+        if let Some(tool) = crate::junk::platform::tool_reported_root_for("pnpm_reported_store")
+            && let Some(path) = tool.resolve(&mut runner)
         {
-            let path = PathBuf::from(text.trim());
-            if path.is_absolute() {
-                hints.insert(path);
-            }
+            hints.insert(path);
         }
     }
     for hint in hints {

@@ -19,6 +19,36 @@ use std::time::{Duration, Instant};
 
 use crate::CancellationToken;
 
+/// Conventional and legacy pnpm store containers; every consumer independently validates
+/// native layout/identity. These hints never prove ownership or unused content.
+pub(crate) fn pnpm_store_hints(
+    home: Option<&std::path::Path>,
+    local: Option<&std::path::Path>,
+) -> Vec<std::path::PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(home) = home {
+        paths.extend(
+            [
+                ".pnpm-store",
+                "Library/pnpm/store",
+                ".local/share/pnpm/store",
+                "pnpm/store",
+            ]
+            .map(|relative| home.join(relative)),
+        );
+    }
+    if let Some(local) = local {
+        paths.push(local.join("pnpm/store"));
+    }
+    if let Some(data) = std::env::var_os("XDG_DATA_HOME")
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_absolute())
+    {
+        paths.push(data.join("pnpm/store"));
+    }
+    paths
+}
+
 /// Resource limits for one complete batch of tool discovery.
 #[derive(Debug, Clone, Copy)]
 pub struct ProbeLimits {

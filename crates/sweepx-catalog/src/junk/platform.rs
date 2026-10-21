@@ -217,13 +217,27 @@ fn validate_platform_rules(rules: Vec<PlatformJunkRule>) -> Result<Vec<PlatformJ
                         | "pnpm_reported_store"
                         | "pip_reported_cache"
                         | "osdk_reported_data"
+                        | "npm_logs"
+                        | "npm_npx"
+                        | "npm_other"
                 ) {
                     return Err(format!(
                         "platform junk rule {} names an unresolvable root kind: {}",
                         rule.id, rule.root_kind
                     ));
                 }
-                (rule.root_kind.as_str(), "verified_tool_root", 0)
+                (
+                    rule.root_kind.as_str(),
+                    if matches!(
+                        rule.root_kind.as_str(),
+                        "npm_logs" | "npm_npx" | "npm_other"
+                    ) {
+                        "verified_tool_layout"
+                    } else {
+                        "verified_tool_root"
+                    },
+                    0,
+                )
             }
             _ => return Err(format!("invalid platform junk rule: {}", rule.id)),
         };
@@ -240,7 +254,7 @@ fn validate_platform_rules(rules: Vec<PlatformJunkRule>) -> Result<Vec<PlatformJ
                 rule.depth,
             ) != expected
             || !matches!(rule.risk.as_str(), "R1" | "R2" | "R3")
-            || rule.item_inventory.as_deref().is_some_and(|kind| !matches!((kind,rule.root_kind.as_str()),("pnpm","pnpm_reported_store")|("osdk","osdk_reported_data")))
+            || rule.item_inventory.as_deref().is_some_and(|kind| !matches!((kind,rule.root_kind.as_str()),("pnpm","pnpm_reported_store")|("osdk","osdk_reported_data")|("npx","npm_npx")))
             || rule.evidence.trim().is_empty()
             || !valid_verification_date(&rule.source_reviewed_at)
             || rule.references.is_empty()

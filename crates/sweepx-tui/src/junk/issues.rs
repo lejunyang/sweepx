@@ -20,6 +20,8 @@ pub enum JunkIssueKind {
     Unavailable,
     /// Automatic change notification is unavailable.
     Watch,
+    /// Supplementary tool configuration could not be queried; file coverage is unaffected.
+    ToolQuery,
     /// Optional history could not be loaded or published; current file observations survive.
     Cache,
 }
@@ -28,7 +30,11 @@ impl JunkIssueKind {
     fn section(self) -> usize {
         match self {
             Self::NpmDiscovery | Self::AppDiscovery => 1,
-            Self::OtherVolume | Self::SkippedEntry | Self::Watch | Self::Cache => 2,
+            Self::OtherVolume
+            | Self::SkippedEntry
+            | Self::Watch
+            | Self::Cache
+            | Self::ToolQuery => 2,
             _ => 0,
         }
     }
@@ -66,6 +72,10 @@ impl JunkIssueKind {
                 "无法自动检测文件变化",
                 "Automatic change detection is unavailable",
             ),
+            Self::ToolQuery => (
+                "部分工具配置查询不可用",
+                "Some optional tool settings could not be queried",
+            ),
             Self::Cache => (
                 "上次结果暂时不可用或未能保存",
                 "Previous results could not be loaded or saved",
@@ -96,7 +106,7 @@ fn bounded(mut text: String) -> String {
 fn discovery_detail(kind: JunkIssueKind, detail: String, locale: Locale) -> String {
     if !matches!(
         kind,
-        JunkIssueKind::NpmDiscovery | JunkIssueKind::AppDiscovery
+        JunkIssueKind::NpmDiscovery | JunkIssueKind::AppDiscovery | JunkIssueKind::ToolQuery
     ) {
         return detail;
     }
@@ -298,5 +308,17 @@ mod tests {
             details.contains("/tools/npm: permission denied") && details.contains("没有权限读取")
         );
         assert!(!details.contains("symlink"));
+    }
+    #[test]
+    fn supplementary_tool_warnings_are_not_unchecked_file_locations() {
+        let mut model = JunkModel::new(Locale::ZhCn, HumanSizeUnit::Bytes);
+        model.record_issue(
+            JunkIssueKind::ToolQuery,
+            "probe_unavailable: npm config get cache exited 1".into(),
+        );
+        assert!(!model.has_unchecked_locations());
+        assert!(!model.discovery_pending());
+        assert_eq!(model.unchecked_kind_count(), 0);
+        assert!(model.coverage_details().contains("部分工具配置查询不可用"));
     }
 }

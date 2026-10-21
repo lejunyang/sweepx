@@ -336,7 +336,7 @@ enum Commands {
     },
     /// List npx tool versions and whole-installation sizes; preview or Trash selected slots.
     NpxCache {
-        /// Explicit npm cache/_npx root. Defaults to ~/.npm/_npx; redirected caches require this.
+        /// Explicit _npx root. Otherwise use NPM_CONFIG_CACHE or the platform npm cache default.
         #[arg(long, value_name = "ABSOLUTE_DIRECTORY")]
         root: Option<PathBuf>,
         /// Show slots that directly request this exact package name.
@@ -1409,9 +1409,9 @@ fn run_junk_scan(
         eprintln!(
             "{} ({})",
             match context.locale() {
-                sweepx_i18n::Locale::ZhCn => "部分 npm 安装或缓存配置未能检查",
+                sweepx_i18n::Locale::ZhCn => "npm 安装与配置信息暂不可用",
                 sweepx_i18n::Locale::EnUs =>
-                    "Some npm installations or cache settings could not be checked",
+                    "Some npm installation or configuration information is unavailable",
             },
             failure.code()
         );
@@ -1611,8 +1611,11 @@ fn run_junk_scan(
         sweepx_core::junk::format::ProjectFormatLimits::default(),
         CancellationToken::new(),
     );
+    let mut tool_layouts =
+        sweepx_core::junk::tool_cache::ToolLayoutSession::new(CancellationToken::new());
     for candidate in &mut fresh_candidates {
         formats.refresh(candidate);
+        tool_layouts.refresh(candidate, &platform_rules);
     }
     timings.phase("projectFormats");
     git_session.refresh(&mut fresh_candidates);
@@ -2004,11 +2007,12 @@ fn run_junk_scan(
                     "complete": layout_failure.is_none(),
                     "incompleteReason": layout_failure.map(|failure| failure.code()),
                 },
-                "npmDiscovery": platform_rules.iter().any(|rule| rule.root_kind == "npm_reported_cache").then(|| json!({
+                "npmDiscovery": platform_rules.iter().any(|rule| matches!(rule.root_kind.as_str(), "npm_reported_cache" | "npm_logs" | "npm_npx" | "npm_other")).then(|| json!({
                     "complete": tool_failure.is_none(),
                     "incompleteReason": tool_failure.map(|failure| failure.code()),
                     "detail": evidence.tool_discovery_detail(),
                 })),
+                "toolQueriesRequiredForScan": false,
                 "toolQueryFailures": evidence.cache_query_failures().map(|(rule, detail)| json!({"ruleId": rule, "detail": detail})).collect::<Vec<_>>(),
                 "candidateCount": candidates.len(),
                 "knownReclaimableBytes": known_reclaimable.map(|value| value.to_string()),

@@ -5,7 +5,7 @@ mod json_index;
 mod msgpack;
 use content::ContentKey;
 mod locations;
-mod native;
+pub(crate) mod native;
 mod osdk;
 mod pnpm;
 mod project_cleanup;

@@ -88,6 +88,7 @@ pub(crate) fn trash_session_candidate(
     }
     row.revalidate_native_binding(cancel, sweepx_platform::ScanResourceLimits::default())
         .map_err(|failure| format!("{}: {}", failure.code, failure.detail))?;
+    sweepx_core::junk::tool_cache::revalidate_for_trash(&row.candidate.rule_id, entry, cancel)?;
     let candidate = TrashCandidate::from_scanned_entry(entry).map_err(|error| error.to_string())?;
     if candidate.requires_confirmation() {
         return Err(TrashError::ConfirmationRequired.to_string());
@@ -244,6 +245,16 @@ pub(crate) fn run_bulk_trash(locale: Locale, items: Vec<BulkTrashItem<'_>>) -> P
     let mut guarded = 0usize;
     let mut failures: Vec<(String, TrashError)> = Vec::new();
     for item in eligible {
+        let cancel = sweepx_core::CancellationToken::new();
+        let extra =
+            sweepx_core::junk::tool_cache::revalidate_for_trash(&item.rule_id, item.entry, &cancel);
+        if let Err(reason) = extra {
+            failures.push((
+                item.path.clone(),
+                TrashError::Inspect(io::Error::other(reason)),
+            ));
+            continue;
+        }
         // Capture and revalidate this exact row; submit re-checks identity a final time.
         match TrashCandidate::from_scanned_entry(item.entry) {
             Ok(candidate) => {
@@ -412,6 +423,24 @@ impl TrashCandidate {
             // A path that resolved a moment ago but has no readable identity is refused below
             // rather than treated as identifiable.
             .unwrap_or(None);
+        #[cfg(windows)]
+        if let Some(expected) = expected {
+            let observed = expected
+                .validated_identity()
+                .ok()
+                .flatten()
+                .and_then(|id| match &id.platform_file_identity {
+                    sweepx_model::IdentityEvidence::Known { value } => Some(value),
+                    _ => None,
+                })
+                .ok_or(TrashError::MissingLiveIdentity)?;
+            if !identity.as_ref().is_some_and(|current| {
+                observed.device.0 == u128::from(current.device())
+                    && observed.inode.0 == current.inode()
+            }) {
+                return Err(TrashError::Changed);
+            }
+        }
         Ok(Self {
             path,
             metadata,
@@ -737,14 +766,17 @@ pub(crate) fn path_from_live_locator(entry: &ScannedEntry) -> Result<PathBuf, Tr
         .executable_native_locator()
         .map_err(|_| TrashError::MissingLiveIdentity)?
         .ok_or(TrashError::MissingLiveIdentity)?;
-    if locator.entry == locator.scan_root {
-        return Err(TrashError::InvalidPath);
-    }
     let root = locator
         .scan_root_absolute_path
         .as_ref()
         .ok_or(TrashError::MissingLiveIdentity)?;
     let mut path = native_absolute_path(root)?;
+    // A configured cache is often itself the scan root. Its executable locator binds the
+    // absolute observation path; capture still refuses filesystem/home/state/Trash roots
+    // and compares this exact native identity. Appending its basename would target a child.
+    if locator.entry == locator.scan_root {
+        return Ok(path);
+    }
     for component in locator.parent_reopen_recipe.iter().skip(1) {
         path.push(native_name(&component.native_basename)?);
     }
@@ -949,6 +981,38 @@ fn print_cancelled(format: OutputFormat, locale: Locale, path: &Path) -> Process
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_selected_scan_root_uses_its_native_path_and_refuses_a_replacement() {
+        use sweepx_scanner::{HostPlatformScanner, Scanner, ScannerOptions};
+        #[cfg(target_os = "linux")]
+        let owner = tempfile::tempdir_in("/dev/shm").unwrap();
+        #[cfg(not(target_os = "linux"))]
+        let owner = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        let base = owner.path().canonicalize().unwrap();
+        #[cfg(windows)]
+        let base = owner.path().to_path_buf();
+        let path = base.join("selected-cache");
+        std::fs::create_dir(&path).unwrap();
+        let mut source = Scanner::new(HostPlatformScanner::new(), ScannerOptions::default())
+            .scan_roots_only(
+                &[sweepx_platform::ScanRoot::new(path.clone()).unwrap()],
+                &sweepx_core::CancellationToken::new(),
+            )
+            .unwrap()
+            .roots
+            .remove(0);
+        source.display_path = "untrusted display spelling".into();
+        let candidate = TrashCandidate::from_scanned_entry(&source).unwrap();
+        assert_eq!(candidate.path(), path);
+        assert!(!candidate.requires_confirmation());
+        std::fs::rename(&path, base.join("original-cache")).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(TrashCandidate::from_scanned_entry(&source).is_err());
+        assert!(path.is_dir());
+        assert!(base.join("original-cache").is_dir());
+    }
 
     #[cfg(windows)]
     #[test]

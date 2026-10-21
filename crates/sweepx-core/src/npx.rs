@@ -95,11 +95,25 @@ pub struct NpxInventory {
     pub issues: Vec<String>,
 }
 
-/// Conventional location only. Callers may supply npm's configured cache parent explicitly.
+/// Uses an explicit absolute npm-cache environment override or the documented platform default.
+/// Querying an npm executable is never required; other custom roots can be supplied explicitly.
 pub fn default_root() -> Option<PathBuf> {
+    if let Some(cache) = std::env::var_os("NPM_CONFIG_CACHE")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+    {
+        return Some(cache.join("_npx"));
+    }
+    #[cfg(windows)]
+    if let Some(local) = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+    {
+        return Some(local.join("npm-cache/_npx"));
+    }
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(|h| PathBuf::from(h).join(".npm").join("_npx"))
+        .map(|h| PathBuf::from(h).join(".npm/_npx"))
 }
 
 /// Scans the cache once with the same native totals used by browser reports, then reads bounded

@@ -10,7 +10,7 @@ use sweepx_scanner::{
     HostPlatformScanner, Scanner, ScannerOptions,
 };
 static INVOCATION: AtomicU64 = AtomicU64::new(1);
-pub(super) struct Native<'a> {
+pub(crate) struct Native<'a> {
     pub cancel: &'a CancellationToken,
     until: Instant,
     calls: usize,
@@ -73,16 +73,58 @@ impl<'a> Native<'a> {
             .ok_or("root_not_admitted".into())
     }
     pub fn children(&mut self, parent: &ScannedEntry) -> Result<Vec<ScannedEntry>, String> {
+        self.children_bounded(parent, 100_000, 64 * 1024 * 1024)
+    }
+    /// Shared no-follow direct enumeration with caller-specific retained-row/name bounds.
+    pub(crate) fn children_bounded(
+        &mut self,
+        parent: &ScannedEntry,
+        max_rows: usize,
+        max_bytes: usize,
+    ) -> Result<Vec<ScannedEntry>, String> {
         self.check()?;
         let ids = self.ids.entry(parent.scan_id.to_string()).or_insert(
             DetailEntryIdAllocator::new(parent.scan_id.clone()).map_err(|e| e.to_string())?,
         );
         reserve_lineage(ids, parent)?;
         let root = root_identity(parent)?;
-        let request = request(parent, &root)?;
-        DetailRescanner::new(HostPlatformScanner::new(), limits())
+        let mut request = request(parent, &root)?;
+        request.max_rows = max_rows;
+        let bounds = ScanResourceLimits {
+            max_directory_entries: max_rows,
+            max_directory_bytes: max_bytes,
+            max_retained_entries: max_rows,
+            ..limits()
+        };
+        DetailRescanner::new(HostPlatformScanner::new(), bounds)
             .observe_direct_children(request, ids, self.cancel)
             .map_err(|e| e.to_string())
+    }
+    /// Reads only a bounded prefix through the existing identity/change-bound native stream.
+    /// The prefix never claims complete file content or a parsed complete JSON document.
+    pub(crate) fn read_prefix(
+        &mut self,
+        file: &ScannedEntry,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, String> {
+        self.check()?;
+        let mut bytes = Vec::new();
+        DetailRescanner::new(HostPlatformScanner::new(), limits())
+            .stream_file(
+                FileContentRequest {
+                    entry: file,
+                    offset: 0,
+                    max_bytes: max_bytes as u64,
+                    previous: None,
+                },
+                self.cancel,
+                &mut |chunk| {
+                    bytes.extend_from_slice(chunk);
+                    Ok(())
+                },
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(bytes)
     }
     pub fn child(&mut self, parent: &ScannedEntry, name: &str) -> Result<ScannedEntry, String> {
         self.check()?;

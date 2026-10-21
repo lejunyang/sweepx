@@ -332,6 +332,7 @@ pub fn assemble_platform_candidate(
     let locator = entry.validated_native_locator().ok()??;
     let identity = entry.identity.as_ref()?;
     let activity = classify_tool_root(rule, entry, evidence)
+        .or_else(|| tool_reported_root_for(&rule.root_kind).map(|_| ToolRootActivity::Unknown))
         .map(|classification| classification.code().to_string());
     let stale_formats = superseded_format_generations(rule, entry, evidence);
     // Same allocation-versus-logical problem as the project rules, with one extra source: the
@@ -382,6 +383,9 @@ pub fn assemble_platform_candidate(
 
 // Interpret the admitted rule's purpose, not its risk label or a cache-looking path.
 fn platform_execution_policy(rule: &PlatformJunkRule) -> JunkExecutionPolicy {
+    if matches!(rule.root_kind.as_str(), "npm_logs" | "npm_other") {
+        return JunkExecutionPolicy::ReportOnly;
+    }
     if rule.root_kind == "macos_browser_state"
         || rule.root_kind == "pnpm_reported_store"
         || rule.root_kind == "osdk_reported_data"

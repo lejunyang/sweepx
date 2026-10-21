@@ -488,6 +488,7 @@ fn event_cost(kind: &JunkSessionEventKind) -> usize {
             .saturating_add(boundary.detail.capacity())
             .saturating_add(std::mem::size_of::<sweepx_platform::BoundaryRecord>()),
         JunkSessionEventKind::Error(failure)
+        | JunkSessionEventKind::ToolQueryWarning(failure)
         | JunkSessionEventKind::CacheWarning(failure)
         | JunkSessionEventKind::WatchWarning(failure) => failure.detail.capacity(),
         _ => 0,

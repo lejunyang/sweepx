@@ -129,6 +129,17 @@ impl JunkRow for Row {
     }
     fn context(&self) -> String {
         let candidate = &self.row.candidate;
+        if candidate.rule_id == "tool.npm-npx"
+            && let Some(root) = self
+                .row
+                .observed_native_path()
+                .and_then(|p| p.parent().map(|parent| parent.to_path_buf()))
+        {
+            let quoted = root.to_string_lossy().replace('\'', "'\\''");
+            return format!(
+                "sweepx npx-cache --root '{quoted}'\n--older-versions · --entry <ID> · --trash"
+            );
+        }
         format!(
             "risk={} · classification={} · confidence={} · activity={} · format={} · projectContext={} · blockers={}",
             candidate.risk,
@@ -523,6 +534,13 @@ impl Provider {
                         }
                     },
                 );
+            }
+            JunkSessionEventKind::ToolQueryWarning(error) => {
+                return Some(JunkEvent::Issue {
+                    revision,
+                    kind: JunkIssueKind::ToolQuery,
+                    detail: error.detail,
+                });
             }
             JunkSessionEventKind::Error(error)
             | JunkSessionEventKind::CacheWarning(error)

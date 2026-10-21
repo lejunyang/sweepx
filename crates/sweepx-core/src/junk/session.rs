@@ -292,6 +292,9 @@ pub enum JunkSessionEventKind {
     Boundary(Box<sweepx_platform::BoundaryRecord>),
     /// A reliable diagnostic; completion follows with an explicit outcome.
     Error(JunkSessionFailure),
+    /// Supplementary tool configuration/inventory is unavailable; native file observations,
+    /// current classification and independent cleanup validation remain usable.
+    ToolQueryWarning(JunkSessionFailure),
     /// Optional cache failure; fresh scan validity is unaffected.
     CacheWarning(JunkSessionFailure),
     /// Persistent notifications are unavailable; fresh scans and manual refresh remain usable.
@@ -833,10 +836,9 @@ impl Worker {
         };
         let mut partial = platform.evidence.discovery_incomplete();
         for (rule, detail) in platform.evidence.cache_query_failures() {
-            writer.failure(JunkSessionFailure::new(
-                "tool_query_failed",
-                format!("{detail} ({rule})"),
-            ));
+            writer.send(JunkSessionEventKind::ToolQueryWarning(
+                JunkSessionFailure::new("tool_query_failed", format!("{detail} ({rule})")),
+            ))?;
         }
         if let Some(reason) = platform.evidence.layout_failure() {
             writer.failure(JunkSessionFailure::new(
@@ -845,17 +847,19 @@ impl Worker {
             ));
         }
         if let Some(reason) = platform.evidence.tool_discovery_failure() {
-            writer.failure(JunkSessionFailure::new(
-                "npm_discovery_incomplete",
-                format!(
-                    "{}: {}",
-                    reason.code(),
-                    platform
-                        .evidence
-                        .tool_discovery_detail()
-                        .unwrap_or("npm installation discovery could not complete")
+            writer.send(JunkSessionEventKind::ToolQueryWarning(
+                JunkSessionFailure::new(
+                    "npm_discovery_incomplete",
+                    format!(
+                        "{}: {}",
+                        reason.code(),
+                        platform
+                            .evidence
+                            .tool_discovery_detail()
+                            .unwrap_or("npm installation discovery could not complete")
+                    ),
                 ),
-            ));
+            ))?;
         }
         if job.cancel.is_cancelled() {
             writer.finish(JunkSessionOutcome::Cancelled, false, 0);
@@ -1057,8 +1061,11 @@ impl Worker {
             self.request.limits.formats,
             job.cancel.clone(),
         );
+        let mut tool_layouts = super::tool_cache::ToolLayoutSession::new(job.cancel.clone());
         for row in pending.values_mut() {
-            formats.refresh(&mut Arc::make_mut(row).candidate);
+            let candidate = &mut Arc::make_mut(row).candidate;
+            formats.refresh(candidate);
+            tool_layouts.refresh(candidate, &platform.rules);
             if job.cancel.is_cancelled() {
                 writer.finish(JunkSessionOutcome::Cancelled, false, pending.len());
                 return Ok(());

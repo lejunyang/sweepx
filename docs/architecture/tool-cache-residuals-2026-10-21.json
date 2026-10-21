@@ -1,0 +1,59 @@
+{
+  "schema": "sweepx.tool-cache-residuals.acceptance/v1",
+  "date": "2026-10-21",
+  "host": "macOS arm64",
+  "rustToolchain": "1.98.0",
+  "releaseSha256": "f2e90fc373bd1580fa50449221a79a9d7b7178efc0b3d5108da828b2b2166b0f",
+  "tests": {
+    "workspace": "passed after correcting an environment-dependent CLI fixture and resuming unexecuted suites",
+    "coreUnitPassed": 438,
+    "coreNativeIntegrationPassed": 2,
+    "coreFinalJunkPassed": 224,
+    "cliUnitPassed": 78,
+    "cliIntegrationPassed": 90,
+    "scannerUnitPassed": 133,
+    "scannerNativeIntegrationPassed": 5,
+    "tuiPassed": 141,
+    "catalogPassed": 30,
+    "existingOptInBenchmarksIgnored": 5,
+    "existingNativePnpmCleanupTestsIgnored": 4
+  },
+  "lint": {
+    "workspaceAllTargetsAllFeatures": [
+      "aarch64-apple-darwin",
+      "x86_64-unknown-linux-gnu",
+      "x86_64-pc-windows-gnu"
+    ],
+    "result": "passed"
+  },
+  "docsBuild": "passed",
+  "nativeFixturePty": {
+    "completedWithOptionalQueryFailure": true,
+    "previewCancellationPreservedBoth": true,
+    "bothTaskOwnedDirectoriesMoved": true,
+    "unselectedNotesPreserved": true,
+    "nativeTrashIdentityAndPayloadVerified": true,
+    "exitCode": 0
+  },
+  "realHostReadOnlyPty": {
+    "completeDespiteOptionalQueryFailure": true,
+    "selectedWhileQueryUnavailable": true,
+    "independentSelectedRecheck": true,
+    "previewedBoth": true,
+    "cancelledPreview": true,
+    "exitCode": 0,
+    "userCachesPreserved": true
+  },
+  "notVerified": [
+    "native Linux runtime",
+    "native Windows runtime",
+    "iTerm2 renderer",
+    "whole-disk completeness"
+  ],
+  "boundaries": [
+    "No user cache was cleaned",
+    "Only task-owned temporary directories were submitted to native Trash",
+    "History remains display-only for default junk entry points",
+    "Unexplained legacy and third-party directories remain review-only"
+  ]
+}

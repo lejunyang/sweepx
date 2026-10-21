@@ -1,5 +1,7 @@
 # Discovery deadlines and useful history (2026-10-21)
 
+Tool-query coverage semantics are superseded by [tool cache residual recognition](tool-cache-residuals-2026-10-21.md): optional query failures remain diagnostics and do not invalidate completed filesystem scans.
+
 This change addresses a reported whole-disk scan that showed an expected Lark IPC socket and a generic npm timeout under the same incomplete label. The previous discovery runner shared ten seconds across unrelated tools, with two seconds per query. A later npm installation could be refused even while every preceding query was completing normally. Partial sessions also skipped historical publication; oversized root projections discarded every row for that root.
 
 ## Shipped behavior

@@ -909,6 +909,12 @@ fn rule_label(rule: &str, locale: Locale) -> &str {
         "macos.browser-state-diagnostics" | "tool.osdk-data" => {
             ("用户数据：待单独核验", "User data: separate review")
         }
+        "tool.npm-other-data" => (
+            "npm 旧版及其他数据：待确认",
+            "npm legacy/other data: review",
+        ),
+        "tool.npm-logs" => ("npm 日志", "npm logs"),
+        "tool.npm-npx" => ("npx 工具安装", "npx tool installation"),
         "tool.npm-cache"
         | "tool.pnpm-store"
         | "tool.pip-cache"

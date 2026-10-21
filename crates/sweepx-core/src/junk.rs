@@ -35,6 +35,8 @@ pub mod platform;
 mod quarantine_operation_tests;
 /// Worker-owned junk scans with bounded events and identity-bound refresh.
 pub mod session;
+/// Native tool-cache formats and independent log-content checks shared by all junk entry points.
+pub mod tool_cache;
 
 use std::collections::{BTreeMap, BTreeSet};
 use sweepx_catalog::schema::{Predicate, PredicateArg, PredicateOp};
