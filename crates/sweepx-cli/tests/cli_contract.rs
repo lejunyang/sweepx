@@ -4324,8 +4324,9 @@ fn corrupt_journal_does_not_fall_back_to_same_id_legacy_snapshot() {
     let operations = state_dir.join("operations");
     fs::create_dir(&operations).unwrap();
     fs::set_permissions(&operations, fs::Permissions::from_mode(0o700)).unwrap();
+    let legacy_path = operations.join(format!("{digest}.json"));
     fs::write(
-        operations.join(format!("{digest}.json")),
+        &legacy_path,
         serde_json::to_vec(&json!({
             "schema": "sweepx.operation-snapshot/v1",
             "operationId": operation_id,
@@ -4348,6 +4349,9 @@ fn corrupt_journal_does_not_fall_back_to_same_id_legacy_snapshot() {
         .unwrap(),
     )
     .unwrap();
+    // Keep the competing legacy snapshot admissible: a public file would make the state
+    // census fail before journal corruption is inspected, never testing fallback precedence.
+    fs::set_permissions(&legacy_path, fs::Permissions::from_mode(0o600)).unwrap();
     let journal = journal_dir.join("journal.db");
     let mut bytes = fs::read(&journal).unwrap();
     bytes[0] ^= 0xff;
@@ -4365,11 +4369,8 @@ fn corrupt_journal_does_not_fall_back_to_same_id_legacy_snapshot() {
         .arg(operation_id);
     let output = status.assert().code(11).get_output().clone();
     assert!(output.stdout.is_empty());
-    assert!(
-        String::from_utf8(output.stderr)
-            .unwrap()
-            .contains("event journal failed")
-    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("event journal failed"), "{stderr}");
 
     let mut watch = cli_command();
     watch
@@ -4384,10 +4385,10 @@ fn corrupt_journal_does_not_fall_back_to_same_id_legacy_snapshot() {
         .arg("--watch");
     let watch_output = watch.assert().code(11).get_output().clone();
     assert!(watch_output.stdout.is_empty());
+    let watch_stderr = String::from_utf8(watch_output.stderr).unwrap();
     assert!(
-        String::from_utf8(watch_output.stderr)
-            .unwrap()
-            .contains("event journal failed")
+        watch_stderr.contains("event journal failed"),
+        "{watch_stderr}"
     );
 }
 

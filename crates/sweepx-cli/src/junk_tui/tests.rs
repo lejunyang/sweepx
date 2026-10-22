@@ -133,7 +133,7 @@ fn directory_inspection_drills_native_children_without_promoting_project_trash()
     reducer.reduce(&mut model, BrowserAction::ReturnToParent);
     assert_eq!(
         model.current_directory(),
-        Some(root.join("target/debug").to_str().unwrap())
+        Some(root.join("target").join("debug").to_str().unwrap())
     );
     drop(reducer);
     assert!(
