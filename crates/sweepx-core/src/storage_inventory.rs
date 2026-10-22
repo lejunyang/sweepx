@@ -68,7 +68,11 @@ fn observe_directories_with_cancel(
     caller_cancel: &CancellationToken,
     deadline: Instant,
 ) -> Result<ScanSummary, String> {
-    let mut options = ScannerOptions::default();
+    let mut options = ScannerOptions {
+        // Inventories need native totals and ignore non-authoritative volume previews.
+        accelerated_preview: false,
+        ..ScannerOptions::default()
+    };
     options.resource_limits.max_visited_entries = 2_000_000;
     options.resource_limits.max_retained_aggregates = 16_384;
     options.resource_limits.max_classified_metadata_bytes = 64 * 1024 * 1024;

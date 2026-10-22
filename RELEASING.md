@@ -107,13 +107,16 @@ sweepx-executor
 The helper verifies that this list exactly covers the workspace, that every
 internal dependency appears earlier, and that every internal version requirement
 admits the current workspace dependency version. It packages the workspace
-locally and records each `.crate` SHA-256. During a real publish it packages
-each crate again in dependency order with Cargo's normal package verification;
-`--check` also runs that exact per-crate command for any version already present
-on crates.io before comparing it. An exact version already present on crates.io
-is skipped only when the checksum returned by the crates.io API equals the local
-archive checksum; any mismatch fails closed. New packages use the same locally
-verified packaging target, and the helper verifies that `cargo publish`
+locally and records each `.crate` SHA-256. `--check` validates this development
+packaging without per-crate verification builds or comparisons against published
+versions: ordinary commits may change sources before the next version bump.
+The workspace is built and tested by separate CI checks. During a real publish,
+each crate is packaged in dependency order with Cargo's normal verification
+against registry dependencies. An exact version already present on crates.io
+is skipped only when its archive checksum matches or its contents match apart
+from generated `.cargo_vcs_info.json`; source and package metadata differences
+fail closed. New packages use the same locally verified packaging target, and
+the helper verifies that `cargo publish`
 regenerated identical bytes before accepting the upload. Packaging and
 publication use bounded exponential retries for publication or index-propagation
 failures. This makes a pre-tag retry safe after a partial crates.io publication
@@ -130,7 +133,8 @@ the GitHub Release with the five archives and `SHA256SUMS`, using the scoped
   or GitHub Release has been created at that point.
 - If crate publication stops partway through without a source fix, rerun the
   failed workflow at the same commit. This preserves the `.crate` bytes; the
-  helper verifies and skips only byte-identical exact versions, then resumes in
+  helper verifies and skips only exact versions with matching package contents
+  (ignoring generated commit metadata), then resumes in
   dependency order. If any packaged source or release metadata must change, use
   a new version rather than trying to reuse partially published version numbers.
 - If the final GitHub Release step fails after the tag or release was created,

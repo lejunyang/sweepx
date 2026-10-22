@@ -1064,6 +1064,8 @@ impl Worker {
                     format!("{}:{}", self.session_id, job.revision.0)
                 }),
                 resource_limits: self.request.limits.scan,
+                // Candidate sessions never display the scanner's volume-wide preview.
+                accelerated_preview: false,
                 retain_directory_index: false,
                 retain_file_index:
                     !sweepx_platform::PlatformScanner::supports_file_length_observation(

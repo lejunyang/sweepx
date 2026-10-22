@@ -292,7 +292,7 @@ def main():
     def save():
         args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
-    with tempfile.TemporaryDirectory(prefix="sweepx-cargo-workspace-", dir="/private/tmp") as temporary:
+    with tempfile.TemporaryDirectory(prefix="sweepx-cargo-workspace-") as temporary:
         base = Path(temporary).resolve()
         version_home = base / "version-home"
         version_home.mkdir()

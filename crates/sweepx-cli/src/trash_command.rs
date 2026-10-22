@@ -985,9 +985,8 @@ mod tests {
     #[test]
     fn a_selected_scan_root_uses_its_native_path_and_refuses_a_replacement() {
         use sweepx_scanner::{HostPlatformScanner, Scanner, ScannerOptions};
-        #[cfg(target_os = "linux")]
-        let owner = tempfile::tempdir_in("/dev/shm").unwrap();
-        #[cfg(not(target_os = "linux"))]
+        // This checks identity capture, not content reads or a Trash submission. Keep the
+        // fixture outside /dev: that entire system tree is deliberately protected on Linux.
         let owner = tempfile::tempdir().unwrap();
         #[cfg(unix)]
         let base = owner.path().canonicalize().unwrap();

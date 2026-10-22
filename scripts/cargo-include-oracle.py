@@ -146,7 +146,7 @@ def main():
     def save():
         args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
-    with tempfile.TemporaryDirectory(prefix="sweepx-cargo-include-", dir="/private/tmp") as temporary:
+    with tempfile.TemporaryDirectory(prefix="sweepx-cargo-include-") as temporary:
         base = Path(temporary).resolve()
         env = {"HOME": str(base), "CARGO_HOME": str(base), "RUSTC": str(args.rustc),
                "PATH": str(args.cargo.parent) + ":/usr/bin:/bin", "CARGO_NET_OFFLINE": "true"}

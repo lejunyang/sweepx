@@ -566,6 +566,11 @@ mod tests {
         assert_eq!(work.scan.output.data, json!({}));
         assert!(work.scan.events.is_empty());
         assert!(!work.scan.summary.entries.is_empty());
+        assert!(work.scan.summary.progress.iter().all(|event| !matches!(
+            event,
+            ProgressEvent::AcceleratedPreview { .. }
+                | ProgressEvent::AccelerationUnavailable { .. }
+        )));
         assert!(!legacy.output.data["entries"].as_array().unwrap().is_empty());
         assert!(!legacy.events.is_empty());
         assert_eq!(work.analysis_incomplete_reasons, Some(Vec::new()));

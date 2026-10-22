@@ -1409,6 +1409,10 @@ fn scan_with_store_options<'a, S: SnapshotStore>(
             HostPlatformScanner::new(),
             ScannerOptions {
                 scan_id: scan_id.clone(),
+                // Completion-only file views discard scanner preview events. Preserve previews
+                // for materialized scan exports, but do not read a whole volume for an unused one.
+                accelerated_preview: !matches!(&projection, ScanProjection::AnalysisObserver)
+                    && scanner_options.accelerated_preview,
                 ..scanner_options
             },
         );

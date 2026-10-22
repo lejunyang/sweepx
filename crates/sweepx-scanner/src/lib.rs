@@ -69,6 +69,10 @@ pub struct ScannerOptions {
     pub resource_limits: ScanResourceLimits,
     /// Requested number of directory workers. Values above 32 are capped at 32.
     pub max_workers: usize,
+    /// Emit an optional non-authoritative NTFS preview before native traversal.
+    /// Disable when the consumer does not display these progress events: qualification and
+    /// preview read the whole volume even when the requested root is a tiny subtree.
+    pub accelerated_preview: bool,
     /// Retains optional ordinary-file names and lengths for a later file-cache generation.
     /// Directory coverage, native root observations and required classification markers remain
     /// available when disabled. Callers with current native length observations can avoid building
@@ -87,6 +91,7 @@ impl Default for ScannerOptions {
             scan_id: ScanId::new("scan-p1"),
             resource_limits: ScanResourceLimits::default(),
             max_workers: 4,
+            accelerated_preview: true,
             retain_file_index: true,
             retain_directory_index: true,
         }
@@ -2219,48 +2224,50 @@ where
             && !sink.wants_file_observations()
             && self.platform.supports_file_length_observation();
 
-        // Qualify the accelerated path before traversing.
-        //
-        // When it qualifies, a bulk NTFS read produces a *preview* of the root: totals in about a
-        // second where the handle-relative walk needs minutes. The walk still runs and still
-        // produces every authoritative record, because only a live handle yields the reopen
-        // recipe that a delete is allowed to act on. The preview is emitted first so a caller can
-        // show a provisional size immediately and replace it when the walk finishes.
-        let acceleration = qualify_acceleration(&root_path, cancel);
-        if let Some(refusal) = acceleration.refusal() {
-            // Reported as progress, not a boundary. A boundary means filesystem coverage was lost;
-            // declining an optimization loses nothing, and recording it as a boundary would make
-            // every ordinary unelevated scan look partial.
-            sink.push_progress(
-                &root_path,
-                ProgressEvent::AccelerationUnavailable {
-                    path: root_path.clone(),
-                    reason: refusal.code(),
-                    elevation_might_help: refusal.elevation_might_help(),
-                },
-            )?;
-        } else {
-            match read_accelerated_preview(&root_path, cancel) {
-                Ok(preview) => sink.push_progress(
-                    &root_path,
-                    ProgressEvent::AcceleratedPreview {
-                        path: root_path.clone(),
-                        entry_count: preview.entry_count,
-                        logical_bytes: preview.logical_bytes,
-                        complete: preview.complete,
-                        elapsed_micros: preview.elapsed.as_micros(),
-                    },
-                )?,
-                // A preview failure is never fatal: the authoritative walk below is unaffected,
-                // so this degrades to exactly the unaccelerated experience.
-                Err(refusal) => sink.push_progress(
+        if self.options.accelerated_preview {
+            // Qualify the accelerated path before traversing.
+            //
+            // When it qualifies, a bulk NTFS read produces a *preview* of the root: totals in about a
+            // second where the handle-relative walk needs minutes. The walk still runs and still
+            // produces every authoritative record, because only a live handle yields the reopen
+            // recipe that a delete is allowed to act on. The preview is emitted first so a caller can
+            // show a provisional size immediately and replace it when the walk finishes.
+            let acceleration = qualify_acceleration(&root_path, cancel);
+            if let Some(refusal) = acceleration.refusal() {
+                // Reported as progress, not a boundary. A boundary means filesystem coverage was lost;
+                // declining an optimization loses nothing, and recording it as a boundary would make
+                // every ordinary unelevated scan look partial.
+                sink.push_progress(
                     &root_path,
                     ProgressEvent::AccelerationUnavailable {
                         path: root_path.clone(),
                         reason: refusal.code(),
                         elevation_might_help: refusal.elevation_might_help(),
                     },
-                )?,
+                )?;
+            } else {
+                match read_accelerated_preview(&root_path, cancel) {
+                    Ok(preview) => sink.push_progress(
+                        &root_path,
+                        ProgressEvent::AcceleratedPreview {
+                            path: root_path.clone(),
+                            entry_count: preview.entry_count,
+                            logical_bytes: preview.logical_bytes,
+                            complete: preview.complete,
+                            elapsed_micros: preview.elapsed.as_micros(),
+                        },
+                    )?,
+                    // A preview failure is never fatal: the authoritative walk below is unaffected,
+                    // so this degrades to exactly the unaccelerated experience.
+                    Err(refusal) => sink.push_progress(
+                        &root_path,
+                        ProgressEvent::AccelerationUnavailable {
+                            path: root_path.clone(),
+                            reason: refusal.code(),
+                            elevation_might_help: refusal.elevation_might_help(),
+                        },
+                    )?,
+                }
             }
         }
 
@@ -3825,6 +3832,47 @@ mod tests {
             Err(ScanError::Platform(PlatformError::ResourceLimit(detail)))
                 if detail == "ordinary scan entry identity space exhausted"
         ));
+    }
+
+    #[test]
+    fn disabling_unused_accelerated_preview_keeps_authoritative_entries_and_totals() {
+        assert!(ScannerOptions::default().accelerated_preview);
+        let root = test_path("root");
+        let file = root.join("payload");
+        let mut metadata = test_metadata(file.clone(), "payload", EntryKind::File, Some(1));
+        metadata.logical_bytes = known_u128(37);
+        let platform = FakePlatform::new(
+            root.clone(),
+            vec![test_entry(&root, "payload")],
+            BTreeMap::from([(file.clone(), WalkEntry::File(metadata))]),
+        );
+        let inspections = Arc::clone(&platform.inspect_calls);
+        let summary = Scanner::new(
+            platform,
+            ScannerOptions {
+                accelerated_preview: false,
+                ..ScannerOptions::default()
+            },
+        )
+        .scan(
+            &[ScanRoot::new(root.clone()).unwrap()],
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        assert_eq!(inspections.load(Ordering::SeqCst), 1);
+        assert_eq!(summary.entries.len(), 1);
+        assert_eq!(summary.entries[0].display_path, file.to_string_lossy());
+        assert_eq!(summary.entries[0].logical_bytes, known_u128(37));
+        assert!(summary.entries[0].native_locator.is_some());
+        let aggregate = aggregate_for_path(&summary, &root);
+        assert_eq!(aggregate.apparent_logical_bytes, known_u128(37));
+        assert!(aggregate.coverage.complete);
+        assert!(summary.boundaries.is_empty());
+        assert!(summary.progress.iter().all(|event| !matches!(
+            event,
+            ProgressEvent::AcceleratedPreview { .. }
+                | ProgressEvent::AccelerationUnavailable { .. }
+        )));
     }
 
     #[test]
