@@ -205,6 +205,36 @@ mod tests {
     use sweepx_audit::retained_vfs::{Name, Storage};
 
     #[test]
+    fn replacement_binding_distinguishes_displaced_and_unlinked_retained_files() {
+        // Exercise native identity/metadata admission independently of the journal's stricter
+        // durable-filesystem qualification. No SQLite or journal is opened on this fixture.
+        for preserve_original_link in [true, false] {
+            let temp = tempfile::TempDir::new().unwrap();
+            let path = temp.path().canonicalize().unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let directory = Directory::open(&path, false).unwrap();
+            let held = directory.create_state_file("journal.db").unwrap();
+            if preserve_original_link {
+                std::fs::rename(path.join("journal.db"), path.join("displaced.db")).unwrap();
+            }
+            let replacement = directory.create_state_file("replacement.db").unwrap();
+            replacement.write_at(b"replacement", 0).unwrap();
+            std::fs::rename(path.join("replacement.db"), path.join("journal.db")).unwrap();
+            let result = directory.contains_file("journal.db", &held);
+            if preserve_original_link {
+                assert!(!result.unwrap());
+            } else {
+                let error = file_error(&path.join("journal.db"), result.unwrap_err());
+                assert!(matches!(error, JournalError::UnsafeStateFile(_)));
+            }
+            assert_eq!(
+                std::fs::read(path.join("journal.db")).unwrap(),
+                b"replacement"
+            );
+        }
+    }
+
+    #[test]
     fn exclusive_sidecar_creation_preserves_existing_native_bytes() {
         let temp = tempfile::TempDir::new().unwrap();
         let path = temp.path().canonicalize().unwrap();

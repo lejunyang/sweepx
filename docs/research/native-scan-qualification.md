@@ -310,8 +310,9 @@ emits an `AcceleratedPreview` before the traversal starts. The traversal still r
 still produces every authoritative record.
 
 `ScannerOptions::accelerated_preview` controls this optional work and defaults to enabled for
-ordinary scan exports. Completion-only file views, junk candidate sessions and storage inventories
-disable it because they do not display the preview. They still run the same authoritative native
+direct scanner and legacy materialized scan consumers. Completion-only CLI exports, file views,
+junk reports and candidate sessions, and storage inventories disable it because they cannot
+display the preview before traversal completes. They still run the same authoritative native
 traversal, without making a volume-wide NTFS read a prerequisite for a small directory scan.
 
 ### Why a preview rather than a replacement

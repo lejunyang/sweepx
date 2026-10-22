@@ -83,7 +83,7 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - name: Test full workspace
-        run: cargo test --workspace --all-features --locked
+        run: cargo test --workspace --all-features --locked --no-fail-fast
       # Rule packages ship unsigned and are meant to be editable. What still has to hold is that an
       # edit is never silent: `content_digest` binds a clean authorization to the rule bytes that
       # produced the scan. `editing_a_rule_changes_the_content_digest_but_still_loads` covers this
@@ -229,6 +229,7 @@ jobs:
           cargo check --locked --all-targets --target ${{ matrix.target }}
           --package sweepx-model
           --package sweepx-platform --features backend-windows
+          --package sweepx-cache
           --package sweepx-core
           --package sweepx-tui
           --package sweepx-cli
@@ -238,6 +239,7 @@ jobs:
           cargo clippy --locked --all-targets --target ${{ matrix.target }}
           --package sweepx-model
           --package sweepx-platform --features backend-windows
+          --package sweepx-cache
           --package sweepx-core
           --package sweepx-tui
           --package sweepx-cli
@@ -245,8 +247,9 @@ jobs:
       - name: Test Windows scan stack natively
         if: matrix.capability_os == 'windows'
         run: >-
-          cargo test --locked --target ${{ matrix.target }}
+          cargo test --locked --no-fail-fast --target ${{ matrix.target }}
           --package sweepx-platform --features backend-windows
+          --package sweepx-cache
           --package sweepx-scanner
           --package sweepx-core
           --package sweepx-tui

@@ -1468,12 +1468,12 @@ fn run_junk_scan(
     #[cfg(target_os = "macos")]
     let classification_context = classifier.classification_context_digest();
 
-    // Resolve every root to its canonical (symlink-free) path; FSEvents reports canonical paths
-    // and the per-root cache is keyed on them. A root that cannot be canonicalized is passed
-    // through unchanged so the scanner reports the real error for it.
+    // Unix cache keys use canonical paths (including those reported by FSEvents). Windows
+    // canonicalization produces verbatim paths, outside the scanner's accepted native namespace;
+    // preserve the requested spelling there and leave no-follow admission to the backend.
     let canonical_roots: Vec<PathBuf> = scan_roots
         .iter()
-        .map(|root| std::fs::canonicalize(root).unwrap_or_else(|_| root.clone()))
+        .map(|root| resolve_junk_scan_root(root))
         .collect();
 
     timings.phase("setup");
@@ -2353,6 +2353,17 @@ fn normalize_roots(raw_roots: &[OsString]) -> Result<Vec<PathBuf>, sweepx_core::
         .collect()
 }
 
+fn resolve_junk_scan_root(root: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        root.to_path_buf()
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf())
+    }
+}
+
 /// Expands only the CLI conveniences users expect. It deliberately does not canonicalize or
 /// resolve symlinks; the platform scanner still performs the authoritative no-follow admission.
 fn expand_scan_root(raw: &std::ffi::OsStr) -> PathBuf {
@@ -2655,6 +2666,22 @@ fn replay_error_exit_code(error: &sweepx_core::CoreError) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn junk_root_resolution_preserves_native_spelling_and_namespace_rejections() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = resolve_junk_scan_root(fixture.path());
+        assert_eq!(root, fixture.path());
+        assert!(sweepx_model::NativeAbsolutePath::from_path(&root).is_ok());
+
+        // Do not repair explicitly supplied verbatim paths into a different, accepted namespace.
+        let verbatim = fixture.path().canonicalize().unwrap();
+        let unchanged = resolve_junk_scan_root(&verbatim);
+        assert_eq!(unchanged, verbatim);
+        assert!(sweepx_model::NativeAbsolutePath::from_path(&unchanged).is_err());
+    }
+
     fn valid_verification_date(value: &str) -> bool {
         value.len() == 10
             && value.bytes().enumerate().all(|(index, byte)| {

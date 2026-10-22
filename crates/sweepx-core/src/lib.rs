@@ -1040,6 +1040,8 @@ pub fn scan_with_store<S: SnapshotStore>(
 /// typed facts for bounded human rendering or incremental machine export. Invalid analysis
 /// limits fail before filesystem IO. Cancellation preserves incomplete evidence; exporting
 /// results subsequently does not change the scan's terminal state or grant deletion authority.
+/// This completion-only export does not request a provisional whole-volume NTFS preview: no
+/// caller can display it before the authoritative traversal finishes.
 pub fn scan_for_output_with_store<S: SnapshotStore>(
     context: &CoreContext,
     request: &ScanRequest,
@@ -1061,7 +1063,10 @@ pub fn scan_for_output_with_store<S: SnapshotStore>(
         context,
         request,
         store,
-        ScannerOptions::default(),
+        ScannerOptions {
+            accelerated_preview: false,
+            ..ScannerOptions::default()
+        },
         None,
         None,
         None,
@@ -1080,6 +1085,8 @@ pub fn scan_for_output_with_store<S: SnapshotStore>(
 /// scanned tree's entry count.
 ///
 /// Returns the ordinary [`ScanSuccess`] plus the rule id chosen per retained entry id.
+/// Provisional NTFS totals cannot establish junk candidates and are not requested by this
+/// completion-only seam; candidates retain the authoritative native traversal and classification.
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub fn scan_junk_with_store<S: SnapshotStore>(
     context: &CoreContext,
@@ -1093,6 +1100,7 @@ pub fn scan_junk_with_store<S: SnapshotStore>(
         request,
         store,
         ScannerOptions {
+            accelerated_preview: false,
             resource_limits: junk::scan_limits(),
             retain_directory_index: false,
             retain_file_index: reuse.is_some()

@@ -1444,8 +1444,7 @@ fn cleaner_show_succeeds_for_the_chromium_builtin() {
 
 #[test]
 fn experimental_cargo_detect_scans_with_compatible_builtin() {
-    let fixture = TempDir::new().unwrap();
-    let base = fs::canonicalize(fixture.path()).unwrap();
+    let (_fixture, base) = duplicate_fixture();
     let root = base.join("workspace");
     fs::create_dir(&root).unwrap();
     fs::create_dir(root.join("target")).unwrap();

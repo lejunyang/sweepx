@@ -11,7 +11,10 @@ use std::time::{Duration, Instant};
 use sweepx_model::{
     Coverage, IdentityEvidence, NativeName, NativePathComponent, ObjectType, ScanEntryId,
 };
-use sweepx_platform::{CancellationToken, EntryMetadata, PlatformScanner, ScanRoot, WalkEntry};
+use sweepx_platform::{
+    CancellationToken, DirectoryEntryRecord, DirectoryReadLimits, EntryMetadata, PlatformScanner,
+    ScanRoot, WalkEntry,
+};
 use sweepx_scanner::HostPlatformScanner;
 
 /// Filesystem traversal facts, without Git configuration, ignore status or confidence.
@@ -28,7 +31,7 @@ pub struct GitScanFacts {
 pub struct GitEvidenceLimits {
     /// Cooperative filesystem deadline, checked between native calls.
     pub deadline: Duration,
-    /// Maximum native directory admissions, including revalidation around queries.
+    /// Maximum native directory admissions and marker enumeration records, including revalidation.
     pub max_observations: usize,
     /// Maximum directory lineage records considered for nested-repository evidence.
     pub max_lineage_records: usize,
@@ -63,6 +66,34 @@ enum Marker {
         git: Box<EntryMetadata>,
     },
     Unavailable,
+}
+
+/// Advance alias/uniqueness state while each exact token still belongs to the current batch.
+/// Only inspected metadata is retained across batches, never a token to reopen later.
+fn inspect_marker_batch(
+    entries: Vec<DirectoryEntryRecord>,
+    path: &Path,
+    name: &NativeName,
+    found: &mut Option<Marker>,
+    mut inspect: impl FnMut(&DirectoryEntryRecord) -> Result<Marker, ()>,
+) -> Result<(), ()> {
+    for child in entries {
+        child.validate_for_parent(path).map_err(|_| ())?;
+        if child.file_name == *name {
+            if found.is_some() {
+                return Err(());
+            }
+            *found = Some(inspect(&child)?);
+        } else if child
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case(".git"))
+        {
+            return Err(());
+        }
+    }
+    Ok(())
 }
 
 /// Invocation-local current Git queries. Use on a worker; native OS calls may block despite the
@@ -322,7 +353,7 @@ impl GitEvidenceSession {
     }
 
     fn observe_marker(&mut self, path: &Path) -> Marker {
-        let Some(root) = self.admit(path) else {
+        let Some(mut root) = self.admit(path) else {
             return Marker::Unavailable;
         };
         let name = if cfg!(windows) {
@@ -330,33 +361,101 @@ impl GitEvidenceSession {
         } else {
             NativeName::unix(b".git".to_vec())
         };
-        let Ok(child) = sweepx_platform::DirectoryEntryRecord::from_parent_and_name(path, name)
-        else {
+        if self.backend.child_inspection_requires_enumeration() {
+            return self
+                .find_git_child(&mut root, path, &name)
+                .unwrap_or(Marker::Unavailable);
+        }
+        let Ok(child) = DirectoryEntryRecord::from_parent_and_name(path, name) else {
             return Marker::Unavailable;
         };
+        self.inspect_git_marker(&root, path, &child, true)
+            .unwrap_or(Marker::Unavailable)
+    }
+
+    fn inspect_git_marker(
+        &self,
+        root: &sweepx_platform::RootAdmission<
+            <HostPlatformScanner as PlatformScanner>::DirectoryHandle,
+        >,
+        path: &Path,
+        child: &DirectoryEntryRecord,
+        direct_lookup: bool,
+    ) -> Result<Marker, ()> {
         match sweepx_platform::inspect_bound_child(
             &self.backend,
             &root.directory,
             path,
-            &child,
+            child,
             &self.cancel,
         ) {
-            Ok(WalkEntry::Error(error)) if error.kind == sweepx_platform::ErrorKind::NotFound => {
-                Marker::Absent
+            Ok(WalkEntry::Error(error))
+                if direct_lookup && error.kind == sweepx_platform::ErrorKind::NotFound =>
+            {
+                Ok(Marker::Absent)
             }
-            Ok(WalkEntry::File(_)) => Marker::Gitfile,
+            Ok(WalkEntry::File(_)) => Ok(Marker::Gitfile),
             Ok(WalkEntry::Directory(opened))
                 if self
                     .backend
                     .is_same_mount(&root.metadata, &opened.metadata)
                     .unwrap_or(false) =>
             {
-                Marker::Repository {
-                    directory: Box::new(root.metadata),
+                Ok(Marker::Repository {
+                    directory: Box::new(root.metadata.clone()),
                     git: Box::new(opened.metadata),
-                }
+                })
             }
-            _ => Marker::Unavailable,
+            _ => Err(()),
+        }
+    }
+
+    /// Obtain current-batch native evidence without treating a bounded prefix as marker absence.
+    fn find_git_child(
+        &mut self,
+        root: &mut sweepx_platform::RootAdmission<
+            <HostPlatformScanner as PlatformScanner>::DirectoryHandle,
+        >,
+        path: &Path,
+        name: &NativeName,
+    ) -> Result<Marker, ()> {
+        let mut found = None;
+        loop {
+            if !self.available() || self.observations >= self.limits.max_observations {
+                return Err(());
+            }
+            let limits = DirectoryReadLimits {
+                max_batch_entries: (self.limits.max_observations - self.observations).min(256),
+                max_batch_bytes: 64 * 1024,
+            };
+            let batch = self
+                .backend
+                .enumerate_children(&mut root.directory, &self.cancel, limits)
+                .map_err(|_| ())?;
+            if !self.available() {
+                return Err(());
+            }
+            let bytes = batch.entries.iter().try_fold(0usize, |total, child| {
+                total.checked_add(child.estimated_retained_bytes()?)
+            });
+            if batch.entries.len() > limits.max_batch_entries
+                || bytes.is_none_or(|bytes| bytes > limits.max_batch_bytes)
+                || (batch.entries.is_empty() && !batch.end_of_directory)
+            {
+                return Err(());
+            }
+            self.observations += batch.entries.len();
+            inspect_marker_batch(batch.entries, path, name, &mut found, |child| {
+                // A positive enumeration followed by NotFound is a race, not clean absence.
+                self.inspect_git_marker(root, path, child, false)
+            })?;
+            if !self.available() {
+                return Err(());
+            }
+            if batch.end_of_directory {
+                // Do not accept an exact match before later batches have excluded case aliases.
+                return Ok(found.unwrap_or(Marker::Absent));
+            }
         }
     }
 
@@ -770,6 +869,140 @@ fn component_at_path<'a>(
 mod tests {
     use super::*;
     use crate::junk::JunkService;
+
+    #[test]
+    fn marker_batch_state_rejects_later_aliases_and_duplicate_exact_names() {
+        let fixture = tempfile::tempdir().unwrap();
+        let path = fixture.path();
+        let record = |text: &str| {
+            let name = if cfg!(windows) {
+                NativeName::windows_utf16(text.encode_utf16().collect::<Vec<_>>())
+            } else {
+                NativeName::unix(text.as_bytes().to_vec())
+            };
+            DirectoryEntryRecord::from_parent_and_name(path, name).unwrap()
+        };
+        let exact = record(".git");
+        for later in [record(".GIT"), exact.clone()] {
+            let mut found = None;
+            let mut inspected = 0;
+            // Script two single-record batches, independently of host directory ordering.
+            inspect_marker_batch(
+                vec![exact.clone()],
+                path,
+                &exact.file_name,
+                &mut found,
+                |_| {
+                    inspected += 1;
+                    Ok(Marker::Gitfile)
+                },
+            )
+            .unwrap();
+            assert_eq!(inspected, 1, "inspect while the exact token is current");
+            assert!(matches!(found, Some(Marker::Gitfile)));
+            assert!(
+                inspect_marker_batch(vec![later], path, &exact.file_name, &mut found, |_| {
+                    panic!("aliases and duplicate names must not be inspected")
+                })
+                .is_err()
+            );
+        }
+        let mut found = None;
+        assert!(
+            inspect_marker_batch(
+                vec![exact.clone()],
+                path,
+                &exact.file_name,
+                &mut found,
+                |_| { Err(()) }
+            )
+            .is_err()
+        );
+        assert!(
+            found.is_none(),
+            "failed positive inspection is never absence"
+        );
+    }
+
+    #[test]
+    fn enumerated_git_markers_preserve_native_evidence_absence_and_bounds() {
+        let fixture = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        let path = fixture.path().canonicalize().unwrap();
+        #[cfg(not(unix))]
+        let path = fixture.path().to_path_buf();
+        let name = if cfg!(windows) {
+            NativeName::windows_utf16(".git".encode_utf16().collect::<Vec<_>>())
+        } else {
+            NativeName::unix(b".git".to_vec())
+        };
+        for child in ["one", "two"] {
+            std::fs::create_dir(path.join(child)).unwrap();
+        }
+        let mut missing = session();
+        let mut root = missing.admit(&path).unwrap();
+        assert!(matches!(
+            missing.find_git_child(&mut root, &path, &name).unwrap(),
+            Marker::Absent
+        ));
+        let mut bounded = GitEvidenceSession::new(
+            GitEvidenceLimits {
+                max_observations: 2,
+                ..GitEvidenceLimits::default()
+            },
+            CancellationToken::new(),
+        );
+        let mut root = bounded.admit(&path).unwrap();
+        assert!(bounded.find_git_child(&mut root, &path, &name).is_err());
+        assert_eq!(bounded.observations, 2);
+
+        std::fs::create_dir(path.join(".git")).unwrap();
+        let mut repository = session();
+        let mut root = repository.admit(&path).unwrap();
+        assert!(matches!(
+            repository.find_git_child(&mut root, &path, &name).unwrap(),
+            Marker::Repository { .. }
+        ));
+        assert!(matches!(
+            session().observe_marker(&path),
+            Marker::Repository { .. }
+        ));
+
+        std::fs::rename(path.join(".git"), path.join("saved-git")).unwrap();
+        std::fs::write(path.join(".git"), b"gitdir: saved-git\n").unwrap();
+        assert!(matches!(session().observe_marker(&path), Marker::Gitfile));
+        let mut raced = session();
+        let mut root = raced.admit(&path).unwrap();
+        let token = raced
+            .backend
+            .enumerate_children(
+                &mut root.directory,
+                &raced.cancel,
+                DirectoryReadLimits {
+                    max_batch_entries: 16,
+                    max_batch_bytes: 64 * 1024,
+                },
+            )
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|child| child.file_name == name)
+            .unwrap();
+        std::fs::remove_file(path.join(".git")).unwrap();
+        assert!(
+            raced
+                .inspect_git_marker(&root, &path, &token, false)
+                .is_err()
+        );
+        std::fs::create_dir(path.join(".GIT")).unwrap();
+        let mut alias = session();
+        let mut root = alias.admit(&path).unwrap();
+        assert!(alias.find_git_child(&mut root, &path, &name).is_err());
+        let mut cancelled = session();
+        let mut root = cancelled.admit(&path).unwrap();
+        cancelled.cancel.cancel();
+        assert!(cancelled.find_git_child(&mut root, &path, &name).is_err());
+    }
 
     fn git(root: &Path, args: &[&str]) {
         let mut command = Command::new("git");

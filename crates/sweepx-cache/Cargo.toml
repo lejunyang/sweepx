@@ -25,7 +25,7 @@ sweepx-platform = { version = "0.0.1", path = "../sweepx-platform", default-feat
 windows-sys = { version = "0.61.2", features = [
   "Wdk_Foundation", "Wdk_Storage_FileSystem", "Wdk_System_SystemServices",
   "Win32_Foundation", "Win32_Security", "Win32_Security_Authorization",
-  "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Threading",
+  "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Ioctl", "Win32_System_Threading",
   "Win32_System_WindowsProgramming",
 ] }
 
