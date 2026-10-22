@@ -5865,6 +5865,30 @@ fn current_euid() -> u32 {
 mod tests {
     use super::*;
 
+    // Persistence/history fixtures consume completed traversal facts, not provisional NTFS
+    // volume previews. Keep their cache-preview behavior intact without scanning the volume.
+    fn materialized_fixture_scan<S: SnapshotStore>(
+        context: &CoreContext,
+        request: &ScanRequest,
+        store: Option<&S>,
+    ) -> Result<ScanSuccess, CoreError> {
+        scan_with_store_options(
+            context,
+            request,
+            store,
+            ScannerOptions {
+                accelerated_preview: false,
+                ..ScannerOptions::default()
+            },
+            None,
+            None,
+            None,
+            None,
+            ScanProjection::Materialized,
+        )
+        .map(|work| work.scan)
+    }
+
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     #[test]
     fn scan_status_preserves_failures_and_cancellation_without_progress_detail() {
@@ -6688,7 +6712,7 @@ mod tests {
             Locale::EnUs,
             sweepx_i18n::LocaleSource::Explicit,
         ));
-        let first = scan_with_store::<MemorySnapshotStore>(
+        let first = materialized_fixture_scan::<MemorySnapshotStore>(
             &context,
             &ScanRequest {
                 roots: vec![first_root.clone()],
@@ -6711,7 +6735,7 @@ mod tests {
         legacy.generation = "legacy_partial_scope".into();
         store.write_generation(&legacy).unwrap();
         fs::write(first_root.join("first.bin"), b"changed contents").unwrap();
-        let current = scan_with_store::<MemorySnapshotStore>(
+        let current = materialized_fixture_scan::<MemorySnapshotStore>(
             &context,
             &ScanRequest {
                 roots: vec![first_root.clone(), new_root.clone()],
@@ -6931,7 +6955,8 @@ mod tests {
             roots: vec![root],
             state_dir: None,
         };
-        let first = scan_with_store::<MemorySnapshotStore>(&context, &request, None).unwrap();
+        let first =
+            materialized_fixture_scan::<MemorySnapshotStore>(&context, &request, None).unwrap();
         let initial = store_stale_preview(
             Some(&state),
             &first.summary.roots[0].scan_id,
@@ -6956,7 +6981,7 @@ mod tests {
         fs::write(&file, b"independent new live facts").unwrap();
         // Exercise the optional preview writer independently of the mandatory journal:
         // a durable scan must reject this unsafe state namespace, not silently succeed.
-        let current = scan_with_store::<MemorySnapshotStore>(
+        let current = materialized_fixture_scan::<MemorySnapshotStore>(
             &context,
             &ScanRequest {
                 roots: request.roots.clone(),

@@ -2559,8 +2559,11 @@ fn native_watch_refreshes_live_changes_and_releases_listeners_on_session_close()
     );
     let revision = settle_live_watch(&session, 1);
     let expected = vec![0; 4097];
+    // Flush assertions need writable handles on Windows (FlushFileBuffers).
     fs::write(a.join("payload"), &expected).unwrap();
-    fs::File::open(a.join("payload"))
+    fs::OpenOptions::new()
+        .write(true)
+        .open(a.join("payload"))
         .unwrap()
         .sync_all()
         .unwrap();
@@ -2586,7 +2589,9 @@ fn native_watch_refreshes_live_changes_and_releases_listeners_on_session_close()
                 // The aggregate has already been observed but this revision has not committed.
                 // A second write must remain pending, never hidden by a scan-end event drain.
                 fs::write(a.join("payload"), vec![0; 8193]).unwrap();
-                fs::File::open(a.join("payload"))
+                fs::OpenOptions::new()
+                    .write(true)
+                    .open(a.join("payload"))
                     .unwrap()
                     .sync_all()
                     .unwrap();

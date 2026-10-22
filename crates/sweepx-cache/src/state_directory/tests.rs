@@ -152,11 +152,25 @@ fn unknown_nested_directory_refuses_inventory_without_touching_it() {
 fn retained_root_accounts_and_writes_only_original_namespace_after_rename() {
     let (_temp, path, root) = fixture();
     file(&root, "existing", b"original");
-    let mut session = StateWriteSession::capture(&root).unwrap();
     let retained = path.with_file_name("retained");
+    #[cfg(unix)]
+    let mut session = StateWriteSession::capture(&root).unwrap();
+    #[cfg(windows)]
+    {
+        // A live share-none .lock prevents renaming its containing Windows directory. Keep
+        // that exclusion intact, then move the fixture before reacquiring the session from
+        // retained authority. Do not reopen the original display path after replacement.
+        let session = StateWriteSession::capture(&root).unwrap();
+        assert!(fs::rename(&path, &retained).is_err());
+        assert!(!retained.exists());
+        assert_eq!(fs::read(path.join("existing")).unwrap(), b"original");
+        drop(session);
+    }
     fs::rename(&path, &retained).unwrap();
     let replacement = Directory::open(&path, true).unwrap();
     file(&replacement, "existing", b"replacement");
+    #[cfg(windows)]
+    let mut session = StateWriteSession::capture(&root).unwrap();
     session.reserve(3, 1).unwrap();
     file(session.root(), "new", b"new");
     assert_eq!(session.usage().bytes, 8);

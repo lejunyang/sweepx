@@ -21,9 +21,16 @@ fn fixture() -> (tempfile::TempDir, PathBuf, ScannedEntry) {
     let root = fixture.path().to_path_buf();
     fs::create_dir(root.join("nested")).unwrap();
     fs::write(root.join("nested/file"), b"abcde").unwrap();
-    let summary = Scanner::new(HostPlatformScanner::new(), ScannerOptions::default())
-        .scan(&[ScanRoot::new(&root).unwrap()], &CancellationToken::new())
-        .unwrap();
+    let summary = Scanner::new(
+        HostPlatformScanner::new(),
+        ScannerOptions {
+            // Capture native lineage without an unrelated whole-volume NTFS preview.
+            accelerated_preview: false,
+            ..ScannerOptions::default()
+        },
+    )
+    .scan(&[ScanRoot::new(&root).unwrap()], &CancellationToken::new())
+    .unwrap();
     let entry = summary
         .entries
         .into_iter()

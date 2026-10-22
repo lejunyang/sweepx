@@ -4366,12 +4366,9 @@ mod tests {
                 entry: &ScannedEntry,
                 _markers: &BTreeMap<ScanEntryId, BTreeSet<String>>,
             ) -> Option<String> {
-                match &entry.native_basename {
-                    NativeName::UnixBytes(bytes) if bytes.starts_with(b"dir-") => {
-                        Some("rule:branch".to_string())
-                    }
-                    _ => None,
-                }
+                native_basename_marker(&entry.native_basename)
+                    .is_some_and(|name| name.starts_with("dir-"))
+                    .then(|| "rule:branch".to_string())
             }
         }
 
@@ -4404,19 +4401,18 @@ mod tests {
                 .all(|rule_id| rule_id == "rule:branch")
         );
         assert_eq!(result.summary.entries.len(), fan_out);
-        assert!(result.summary.entries.iter().all(|entry| {
-            matches!(&entry.native_basename,
-                NativeName::UnixBytes(bytes) if bytes.starts_with(b"dir-"))
-        }));
-        // Leaf directories must not have been retained as rows.
-        assert!(
-            !result
-                .summary
-                .entries
-                .iter()
-                .any(|entry| matches!(&entry.native_basename,
-                NativeName::UnixBytes(bytes) if bytes.as_slice() == b"leaf"))
-        );
+        // Compare every native fixture name rather than repeating the classifier's predicate.
+        // With the exact row count above, this also proves no root or leaf row was retained.
+        for index in 0..fan_out {
+            let expected = test_native_name(&format!("dir-{index:03}"));
+            assert!(
+                result
+                    .summary
+                    .entries
+                    .iter()
+                    .any(|entry| entry.native_basename == expected)
+            );
+        }
     }
 
     struct ObservedBranches;
@@ -4971,6 +4967,11 @@ mod tests {
 
     #[test]
     fn required_marker_evicts_optional_file_indexes_within_the_shared_budget() {
+        let expected_marker = if cfg!(windows) {
+            "cargo.toml"
+        } else {
+            "Cargo.toml"
+        };
         struct MarkerOnly;
         impl JunkClassifier for MarkerOnly {
             fn needs_file_marker(&self, name: &NativeName) -> bool {
@@ -5017,11 +5018,7 @@ mod tests {
                 logical_bytes: 123,
             },
         );
-        assert!(sink.file_markers[&parent].contains(if cfg!(windows) {
-            "cargo.toml"
-        } else {
-            "Cargo.toml"
-        }));
+        assert!(sink.file_markers[&parent].contains(expected_marker));
         assert!(
             !sink.metadata_lost,
             "optional cache pressure must not lose required evidence"
@@ -5032,7 +5029,7 @@ mod tests {
             sink.dir_listings
                 .values()
                 .flat_map(|listing| listing.files.keys())
-                .all(|name| name == "Cargo.toml")
+                .all(|name| name == expected_marker)
         );
     }
 
@@ -6080,6 +6077,11 @@ mod tests {
 
     #[test]
     fn cached_files_keep_markers_and_survive_the_next_generation() {
+        let expected_marker = if cfg!(windows) {
+            "cargo.toml"
+        } else {
+            "Cargo.toml"
+        };
         struct NoCandidates;
         impl JunkClassifier for NoCandidates {
             fn classify(
@@ -6100,13 +6102,10 @@ mod tests {
             logical_bytes: 123,
         };
         sink.note_cached_file(&parent, &file);
-        assert!(sink.file_markers[&parent].contains(if cfg!(windows) {
-            "cargo.toml"
-        } else {
-            "Cargo.toml"
-        }));
+        assert!(sink.file_markers[&parent].contains(expected_marker));
         assert_eq!(
-            sink.finish_classified().dir_listings[&root.display().to_string()].files["Cargo.toml"],
+            sink.finish_classified().dir_listings[&root.display().to_string()].files
+                [expected_marker],
             123
         );
     }

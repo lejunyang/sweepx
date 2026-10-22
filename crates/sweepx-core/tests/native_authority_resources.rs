@@ -398,6 +398,16 @@ fn run_scan_oracle() {
         .read_regular_file_relative(&roots[0].directory, &request, &cancel)
         .unwrap();
     assert_eq!(observed.bytes, b"kept bytes");
+    // This oracle runs alone in a child process. The default panic hook can initialize
+    // process-global Windows symbol/backtrace handles, which are not leaked content handles.
+    // Silence only the expected callback panic while preserving diagnostics for other panics.
+    let previous_hook = std::sync::Arc::new(std::panic::take_hook());
+    let unexpected_panic_hook = previous_hook.clone();
+    std::panic::set_hook(Box::new(move |info| {
+        if info.payload().downcast_ref::<&str>() != Some(&"controlled content callback panic") {
+            unexpected_panic_hook(info);
+        }
+    }));
     let before = observed_handles();
     let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let stream = sweepx_platform::RegularFileStreamRequest::new(
@@ -412,6 +422,10 @@ fn run_scan_oracle() {
             panic!("controlled content callback panic")
         })
     }));
+    drop(std::panic::take_hook());
+    std::panic::set_hook(
+        std::sync::Arc::try_unwrap(previous_hook).unwrap_or_else(|_| unreachable!()),
+    );
     let panic = panic.expect_err("the native content callback must be reached");
     assert_eq!(
         panic.downcast_ref::<&str>(),

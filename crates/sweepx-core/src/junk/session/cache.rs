@@ -474,14 +474,21 @@ mod tests {
 
     fn scan(root: &Path) -> (sweepx_scanner::ClassifiedScan, Rows) {
         let service = JunkService::built_in().unwrap();
-        let scanned = Scanner::new(HostPlatformScanner::new(), ScannerOptions::default())
-            .scan_classified(
-                &[ScanRoot::new(root.to_path_buf()).unwrap()],
-                &CancellationToken::new(),
-                &service,
-                None,
-            )
-            .unwrap();
+        let scanned = Scanner::new(
+            HostPlatformScanner::new(),
+            ScannerOptions {
+                // History fixtures need current traversal facts, not whole-volume previews.
+                accelerated_preview: false,
+                ..ScannerOptions::default()
+            },
+        )
+        .scan_classified(
+            &[ScanRoot::new(root.to_path_buf()).unwrap()],
+            &CancellationToken::new(),
+            &service,
+            None,
+        )
+        .unwrap();
         let aggregates = scanned
             .summary
             .aggregates
@@ -869,9 +876,16 @@ mod tests {
         let root = fixture.path().canonicalize().unwrap();
         #[cfg(windows)]
         let root = fixture.path().to_path_buf();
-        let scanned = Scanner::new(HostPlatformScanner::new(), ScannerOptions::default())
-            .scan(&[ScanRoot::new(root).unwrap()], &CancellationToken::new())
-            .unwrap();
+        let scanned = Scanner::new(
+            HostPlatformScanner::new(),
+            ScannerOptions {
+                // History fixtures need current traversal facts, not whole-volume previews.
+                accelerated_preview: false,
+                ..ScannerOptions::default()
+            },
+        )
+        .scan(&[ScanRoot::new(root).unwrap()], &CancellationToken::new())
+        .unwrap();
         let source = &scanned.roots[0];
         let stored = StoredJunkCandidate {
             path: source.display_path.clone(),

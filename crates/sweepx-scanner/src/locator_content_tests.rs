@@ -14,6 +14,14 @@ fn native(name: &str) -> NativeName {
     }
 }
 
+fn fixture_scanner_options() -> ScannerOptions {
+    ScannerOptions {
+        // These fixtures capture native lineage for content reads, not whole-volume previews.
+        accelerated_preview: false,
+        ..ScannerOptions::default()
+    }
+}
+
 fn fixture() -> (tempfile::TempDir, PathBuf, ScannedEntry) {
     // Explicit content reads reject unknown/FUSE/overlay providers on Linux.
     #[cfg(target_os = "linux")]
@@ -27,7 +35,7 @@ fn fixture() -> (tempfile::TempDir, PathBuf, ScannedEntry) {
     let directory = root.join("captured");
     std::fs::create_dir(&directory).unwrap();
     std::fs::write(directory.join("config.json"), b"{\"version\":2}").unwrap();
-    let summary = Scanner::new(HostPlatformScanner::new(), ScannerOptions::default())
+    let summary = Scanner::new(HostPlatformScanner::new(), fixture_scanner_options())
         .scan(
             &[ScanRoot::new(root.clone()).unwrap()],
             &CancellationToken::new(),
@@ -456,7 +464,7 @@ fn captured_ancestor_content_uses_full_lineage_and_never_display_parents() {
     std::fs::create_dir(&nested).unwrap();
     std::fs::write(root.join("manifest.toml"), b"root context").unwrap();
     std::fs::write(directory.join("manifest.toml"), b"parent context").unwrap();
-    let summary = Scanner::new(HostPlatformScanner::new(), ScannerOptions::default())
+    let summary = Scanner::new(HostPlatformScanner::new(), fixture_scanner_options())
         .scan(
             &[ScanRoot::new(root.to_path_buf()).unwrap()],
             &CancellationToken::new(),

@@ -39,6 +39,8 @@ fn scan(
         },
         Option::<&MemorySnapshotStore>::None,
         ScannerOptions {
+            // Duplicate fixtures consume authoritative file content, not volume previews.
+            accelerated_preview: false,
             resource_limits: limits,
             ..Default::default()
         },

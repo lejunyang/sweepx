@@ -97,8 +97,28 @@ fn run_oracle() {
     .unwrap();
     assert_eq!(successful_visits, 1);
     drop(survivor.try_clone().unwrap());
+    // This runs alone in the child process. Suppress only the intentional panic's hook:
+    // Windows backtrace symbolization can retain handles outside the storage I/O allowance.
+    // Unexpected panics still report normally, and restore the hook before checking outcomes.
+    struct ControlledVisitorUnwind;
+    let original_hook = Arc::new(std::panic::take_hook());
+    let report_unexpected = Arc::clone(&original_hook);
+    std::panic::set_hook(Box::new(move |info| {
+        if !info.payload().is::<ControlledVisitorUnwind>() {
+            report_unexpected(info);
+        }
+    }));
+    let unwind = std::panic::catch_unwind(|| {
+        root.entries(|_| std::panic::panic_any(ControlledVisitorUnwind))
+    });
+    drop(std::panic::take_hook());
+    std::panic::set_hook(
+        Arc::try_unwrap(original_hook)
+            .unwrap_or_else(|_| unreachable!("temporary panic hook has been removed")),
+    );
     assert!(
-        std::panic::catch_unwind(|| root.entries(|_| panic!("controlled visitor unwind"))).is_err()
+        matches!(unwind, Err(payload) if payload.is::<ControlledVisitorUnwind>()),
+        "enumeration must propagate the controlled visitor unwind"
     );
     drop(survivor.try_clone().unwrap());
     let error = root

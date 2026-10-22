@@ -811,6 +811,8 @@ mod tests {
             },
             Option::<&MemorySnapshotStore>::None,
             ScannerOptions {
+                // Ranking fixtures consume completed native file facts, not volume previews.
+                accelerated_preview: false,
                 resource_limits: limits,
                 ..Default::default()
             },
