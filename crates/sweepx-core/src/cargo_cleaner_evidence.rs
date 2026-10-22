@@ -47,7 +47,9 @@ const DEFAULT_TARGET_COMPONENT: &str = "target";
 
 pub(crate) const fn cargo_fixed_input_locator_limits() -> LocatorReadLimits {
     LocatorReadLimits {
-        max_requests: 3,
+        // The paired observation admits the .cargo directory plus probe/full reads for
+        // both config names. Three payload files alone do not cover those five operations.
+        max_requests: 5,
         max_components_per_request: 3,
         max_total_components: 8,
         max_file_bytes: MAX_CARGO_INPUT_FILE_BYTES,
@@ -2815,6 +2817,48 @@ mod linux_real_stack_tests {
             .map(|identity| identity.entry_id.clone())
             .expect("target entry");
         (temp, summary, manifest_id, target_id)
+    }
+
+    #[test]
+    fn fixed_input_budget_admits_config_pair_but_refuses_four_operations() {
+        let (_temp, summary, manifest_id, target_id) = workspace_layout("cargo-input-budget");
+        let root_id = &summary.roots[0].identity.as_ref().unwrap().entry_id;
+        let invocation = CargoInvocationContext::unavailable_for_sweepx_cli(
+            CargoConfigScopeRuntime::from_presence(false, false, false),
+        );
+        let collect = |reader: &LocatorReader<HostPlatformScanner>| {
+            collect_and_produce_cargo_typed_evidence(
+                reader,
+                &summary,
+                root_id,
+                &manifest_id,
+                &target_id,
+                &invocation,
+                &CancellationToken::new(),
+            )
+        };
+        let insufficient = LocatorReader::new(
+            HostPlatformScanner::new(),
+            LocatorReadLimits {
+                max_requests: 4,
+                ..cargo_fixed_input_locator_limits()
+            },
+        );
+        assert_unknown(
+            collect(&insufficient).workspace,
+            CargoEvidenceReason::ResourceLimit,
+        );
+        let admitted = collect(&reader());
+        assert!(matches!(admitted.workspace, CargoEvidence::Known { .. }));
+        // Successful input admission still cannot establish complete Cargo precedence.
+        assert!(matches!(
+            admitted.target_dir,
+            CargoEvidence::NotChecked {
+                reason: CargoEvidenceReason::ConfigScopeNotChecked
+            }
+        ));
+        assert!(!admitted.candidate_allowed());
+        assert!(!admitted.plan_allowed());
     }
 
     #[test]

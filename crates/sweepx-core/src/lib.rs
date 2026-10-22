@@ -6921,13 +6921,15 @@ mod tests {
         ));
         let request = ScanRequest {
             roots: vec![root],
-            state_dir: Some(state.clone()),
+            state_dir: None,
         };
         let first = scan_with_store::<MemorySnapshotStore>(&context, &request, None).unwrap();
-        assert_eq!(
-            first.output.summary["cachePreview"]["storeStatus"],
-            "written"
+        let initial = store_stale_preview(
+            Some(&state),
+            &first.summary.roots[0].scan_id,
+            &first.summary,
         );
+        assert_eq!(initial.status, CACHE_STORE_MODE_WRITTEN);
         let store = preview_generation_store(Some(&state)).unwrap().unwrap();
         let pointer = fs::read(store.root().join("current.json")).unwrap();
         let previous = match store.load_current().unwrap() {
@@ -6944,15 +6946,27 @@ mod tests {
             .create_child("unknown-directory")
             .unwrap();
         fs::write(&file, b"independent new live facts").unwrap();
-        let current = scan_with_store::<MemorySnapshotStore>(&context, &request, None).unwrap();
-        assert_eq!(
-            current.output.summary["cachePreview"]["storeStatus"],
-            "skipped"
+        // Exercise the optional preview writer independently of the mandatory journal:
+        // a durable scan must reject this unsafe state namespace, not silently succeed.
+        let current = scan_with_store::<MemorySnapshotStore>(
+            &context,
+            &ScanRequest {
+                roots: request.roots.clone(),
+                state_dir: None,
+            },
+            None,
+        )
+        .unwrap();
+        let before = current.summary.clone();
+        let refused = store_stale_preview(
+            Some(&state),
+            &current.summary.roots[0].scan_id,
+            &current.summary,
         );
-        assert_eq!(
-            current.output.summary["cachePreview"]["resourceLimit"],
-            true
-        );
+        assert_eq!(refused.status, CACHE_STORE_MODE_SKIPPED);
+        assert!(refused.resource_limit);
+        assert_eq!(refused.warnings, ["cache.preview.state_accounting_failed"]);
+        assert_eq!(current.summary, before);
         let entry = current
             .summary
             .entries
@@ -7128,15 +7142,17 @@ mod tests {
 
     #[cfg(target_family = "unix")]
     #[test]
-    fn scan_rejects_symlinked_preview_cache_subtree() {
+    fn preview_rejects_symlinked_subtree_without_changing_live_facts() {
         let temp = tempfile::tempdir().unwrap();
         let base = fs::canonicalize(temp.path()).unwrap();
+        let state = base.join("state");
+        sweepx_cache::native::Directory::open(&state, true).unwrap();
         let root = base.join("root");
         fs::create_dir(&root).unwrap();
         fs::write(root.join("file.txt"), b"content").unwrap();
         let real = base.join("real-preview");
-        fs::create_dir(&real).unwrap();
-        std::os::unix::fs::symlink(&real, base.join(PREVIEW_GENERATION_POINTER_DIR)).unwrap();
+        sweepx_cache::native::Directory::open(&real, true).unwrap();
+        std::os::unix::fs::symlink(&real, state.join(PREVIEW_GENERATION_POINTER_DIR)).unwrap();
 
         let context = CoreContext::new(LocaleResolution::new(
             Locale::EnUs,
@@ -7146,16 +7162,26 @@ mod tests {
             &context,
             &ScanRequest {
                 roots: vec![root],
-                state_dir: Some(base.clone()),
+                state_dir: None,
             },
             Option::<&MemorySnapshotStore>::None,
         )
         .unwrap();
 
-        assert_eq!(scan.output.summary["cachePreview"]["loadStatus"], "miss");
-        assert_eq!(
-            scan.output.summary["cachePreview"]["storeStatus"],
-            "skipped"
+        let before = scan.summary.clone();
+        let loaded = load_stale_preview(Some(&state));
+        let stored =
+            store_stale_preview(Some(&state), &scan.summary.roots[0].scan_id, &scan.summary);
+        assert_eq!(loaded.status, CACHE_LOAD_MODE_MISS);
+        assert!(loaded.preview.is_none());
+        assert_eq!(stored.status, CACHE_STORE_MODE_SKIPPED);
+        assert_eq!(scan.summary, before);
+        assert!(fs::read_dir(&real).unwrap().next().is_none());
+        assert!(
+            fs::symlink_metadata(state.join(PREVIEW_GENERATION_POINTER_DIR))
+                .unwrap()
+                .file_type()
+                .is_symlink()
         );
         assert!(scan.output.data.get("stalePreview").is_none());
         assert!(scan.output.data.get("cachePreview").is_none());
@@ -7532,7 +7558,11 @@ mod tests {
         .expect("compatible cleaner should scan");
 
         assert_eq!(result.output.data["builtinManifestCompatible"], true);
-        assert_eq!(result.output.summary["hintCount"], "0");
+        assert_eq!(result.output.summary["hintCount"], "1");
+        assert_eq!(result.output.summary["matchCount"], "0");
+        assert_eq!(result.output.data["hints"][0]["disposition"], "report_only");
+        assert_eq!(result.output.data["hints"][0]["executable"], false);
+        assert_eq!(result.output.data["candidateAllowed"], false);
         assert!(invoked.load(Ordering::SeqCst));
     }
 
@@ -7556,7 +7586,11 @@ mod tests {
 
         for result in [&legacy, &caller_owned] {
             assert_eq!(result.output.data["builtinManifestCompatible"], true);
-            assert_eq!(result.output.summary["hintCount"], "0");
+            assert_eq!(result.output.summary["hintCount"], "1");
+            assert_eq!(result.output.summary["matchCount"], "0");
+            assert_eq!(result.output.data["hints"][0]["disposition"], "report_only");
+            assert_eq!(result.output.data["hints"][0]["executable"], false);
+            assert_eq!(result.output.data["candidateAllowed"], false);
         }
     }
 
