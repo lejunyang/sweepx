@@ -213,6 +213,9 @@ jobs:
             capability_os: windows
             scan_state: degraded
     runs-on: ${{ matrix.os }}
+    # A step timeout leaves room to publish partial Windows diagnostics before the job limit.
+    # Keep the existing six-hour default for the other native matrix entries.
+    timeout-minutes: ${{ matrix.capability_os == 'windows' && 60 || 360 }}
     steps:
       - name: Check out repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -246,14 +249,37 @@ jobs:
           -- -D warnings
       - name: Test Windows scan stack natively
         if: matrix.capability_os == 'windows'
-        run: >-
-          cargo test --locked --no-fail-fast --target ${{ matrix.target }}
-          --package sweepx-platform --features backend-windows
-          --package sweepx-cache
-          --package sweepx-scanner
-          --package sweepx-core
-          --package sweepx-tui
-          --package sweepx-cli
+        timeout-minutes: 30
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $log = Join-Path $env:RUNNER_TEMP 'sweepx-windows-tests.log'
+          $testArgs = @(
+            'test', '--locked', '--no-fail-fast', '--target', '${{ matrix.target }}',
+            '--package', 'sweepx-platform', '--features', 'backend-windows',
+            '--package', 'sweepx-cache',
+            '--package', 'sweepx-scanner',
+            '--package', 'sweepx-core',
+            '--package', 'sweepx-tui',
+            '--package', 'sweepx-cli',
+            '--', '--nocapture'
+          )
+          # Stream panics immediately; a later stuck test must not hide earlier failure details.
+          # Tee-Object must not replace Cargo's exit status with a successful logging status.
+          & cargo @testArgs 2>&1 | Tee-Object -FilePath $log
+          $code = $LASTEXITCODE
+          exit $code
+      # Best effort after failure or step timeout; forced job cancellation can interrupt upload.
+      - name: Preserve Windows native test diagnostics
+        if: ${{ always() && matrix.capability_os == 'windows' }}
+        timeout-minutes: 5
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-native-tests-${{ matrix.target }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/sweepx-windows-tests.log
+          if-no-files-found: warn
+          retention-days: 7
       - name: Probe Windows NTFS acceleration read-only path
         if: matrix.capability_os == 'windows'
         shell: pwsh
