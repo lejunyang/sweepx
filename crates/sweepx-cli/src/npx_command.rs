@@ -106,18 +106,7 @@ pub(crate) fn run(
             for row in &plan {
                 // Process observations are time-local; validate selected native manifests and
                 // lineage again. Trash performs the final identity check; no permanent fallback.
-                let result = (|| {
-                    let scope = crate::trash_command::path_from_live_locator(row.source_entry())
-                        .map_err(|e| e.to_string())?;
-                    sweepx_core::tools::scoped_activity::check_scopes(&[scope.as_path()], &cancel)?;
-                    row.revalidate(&cancel)?;
-                    let candidate = TrashCandidate::from_scanned_entry(row.source_entry())
-                        .map_err(|e| e.to_string())?;
-                    if candidate.requires_confirmation() {
-                        return Err("important_path_refused".into());
-                    }
-                    candidate.submit().map_err(|e| e.to_string())
-                })();
+                let result = move_entry(row, &cancel);
                 results.push(json!({"id":row.id,"moved":result.is_ok(),"error":result.err()}));
             }
         }
@@ -155,4 +144,24 @@ pub(crate) fn run(
     } else {
         0
     })
+}
+
+/// Shared CLI/TUI execution; current activity, manifests and native identity remain mandatory.
+pub(crate) fn move_entry(
+    row: &sweepx_core::npx::NpxEntry,
+    cancel: &CancellationToken,
+) -> Result<(), String> {
+    if cancel.is_cancelled() {
+        return Err("cancelled".into());
+    }
+    let scope = crate::trash_command::path_from_live_locator(row.source_entry())
+        .map_err(|e| e.to_string())?;
+    sweepx_core::tools::scoped_activity::check_scopes(&[scope.as_path()], cancel)?;
+    row.revalidate(cancel)?;
+    let candidate =
+        TrashCandidate::from_scanned_entry(row.source_entry()).map_err(|e| e.to_string())?;
+    if candidate.requires_confirmation() {
+        return Err("important_path_refused".into());
+    }
+    candidate.submit().map(|_| ()).map_err(|e| e.to_string())
 }

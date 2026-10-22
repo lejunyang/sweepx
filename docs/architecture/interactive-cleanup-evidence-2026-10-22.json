@@ -1,0 +1,93 @@
+{
+  "schema": "sweepx.interactive-cleanup.acceptance/v1",
+  "date": "2026-10-22",
+  "host": {
+    "os": "macOS 26.5.2",
+    "build": "25F84",
+    "architecture": "arm64",
+    "rust": "1.98.0"
+  },
+  "baseCommit": "a975956",
+  "releaseBinarySha256": "8002be8fe04e48eb36127636fca4f26803ab72bb57e4b9f4fc6df83cb277018c",
+  "checks": {
+    "workspaceTests": "passed",
+    "finalFocusedRegressions": "passed",
+    "workspaceClippy": "passed",
+    "linuxGnuCrossClippy": "passed",
+    "windowsGnuCrossClippy": "passed",
+    "bilingualSiteBuild": "passed",
+    "nativePnpmIntegration": {
+      "passed": 4,
+      "failed": 0
+    },
+    "optInBenchmarks": "not_run"
+  },
+  "nativePtyFixtures": {
+    "npx": {
+      "knownRowsBeforeOptionalProbeCompleted": true,
+      "embeddedPackages": true,
+      "cancelledPreview": true,
+      "onlyOldFixtureMoved": true,
+      "nativeTrashIdentityMatched": true,
+      "parentRefreshed": true,
+      "locationRetry": true,
+      "manualChangedRefresh": true,
+      "exitCode": 0
+    },
+    "pnpm": {
+      "knownRowsBeforeOptionalProbeCompleted": true,
+      "embeddedPackages": true,
+      "cancelledPreview": true,
+      "parentRefreshed": true,
+      "locationRetry": true,
+      "manualChangedRefresh": true,
+      "exitCode": 0
+    }
+  },
+  "boundaries": {
+    "userCacheMutations": false,
+    "iTerm2Renderer": "not_verified",
+    "linuxWindowsRuntime": "not_verified",
+    "incrementalReuse": "session-local delivered native changes; absent or uncertain history falls back to full scan",
+    "restartCache": "historical preview, not subtree skip authority",
+    "performanceComparison": "not_claimed"
+  },
+  "rawEvidence": "/private/tmp/sweepx-interactive-20261022",
+  "wholeDisk": {
+    "build": "final optimized binary",
+    "seconds": 713.49,
+    "mainPassObservedEntries": 7956023,
+    "finalCandidates": 13470,
+    "outcome": "partial",
+    "fullCoverage": false,
+    "exitCode": 4,
+    "coverageAndKeysDuringScan": true,
+    "coverageAndReasonsAfterScan": true,
+    "normalQuit": true,
+    "stateCache": "fresh directory",
+    "osCache": "uncontrolled",
+    "capacityRecords": 3,
+    "capacityDetails": [
+      "retained boundary cap exceeded",
+      "native enumeration retention exceeded in repository target/debug/deps",
+      "classified metadata byte budget exhausted at root"
+    ],
+    "classifiedMetadataBudgetBytes": 268435456,
+    "observationFailuresReported": 310,
+    "retainedObservationFailureExamples": "StrictReadOnly",
+    "otherVolumeExclusionsReported": 8,
+    "specialFileExclusionsReported": 518,
+    "optionalQueryFailuresReported": 2,
+    "optionalQueryFailures": [
+      "pnpm store path exited 1",
+      "npm config get cache exited 1"
+    ],
+    "performanceBenchmark": false,
+    "rawCaptureSha256": {
+      "deep-result.json": "86049652d125edb238938f8e8e458e4de8eba0eb2881bbe3a30bc4d861cc6e3a",
+      "deep-complete.txt": "726ac38cdf31bbc3345a3d80f47c033560c9c509948776fb877effbdcfe123a7",
+      "deep-coverage.txt": "8a5442d96e74327ffec2d1d92b1f7284a5998c5cb2624a2504fe80dabd8f4ba4",
+      "deep-reasons.txt": "a4712638db14d29e7c8c0c0d4c2b072997536f44ad4b2eb09a13aa3d53eac5e5"
+    }
+  }
+}

@@ -1,5 +1,5 @@
 //! Cancellable single-worker inventories; presentation is prepared off the UI thread as well.
-use crate::managed_cache::{Config, details, execute, link_range};
+use crate::managed_cache::{Config, execute};
 use std::collections::{BTreeMap, VecDeque};
 use std::process::ExitCode;
 use std::sync::{
@@ -23,7 +23,6 @@ struct Row {
     eligible: bool,
     action: Action,
     text: String,
-    locale: Locale,
 }
 impl JunkRow for Row {
     fn key(&self) -> &str {
@@ -36,12 +35,9 @@ impl JunkRow for Row {
         &self.rule
     }
     fn evidence(&self) -> &str {
-        if self.locale == Locale::ZhCn {
-            "引用仅覆盖指定搜索范围；单链接不代表未使用，大小不代表可释放空间。"
-        } else {
-            "References cover the declared search scope; single links do not establish unused content or freed space."
-        }
+        ""
     }
+
     fn context(&self) -> String {
         self.text.clone()
     }
@@ -72,16 +68,54 @@ fn prepare(config: &Config, report: Inventory, unit: HumanSizeUnit, locale: Loca
     let mut retained = 0usize;
     let mut limited = false;
     for item in report.entries.iter().filter(|e| config.visible(e)) {
+        let zh = locale == Locale::ZhCn;
         let mut text = format!(
-            "{}@{}\nlinks={}, single={}, projects={}\n{}\nSearch roots: {}",
+            "{}@{}\n{}\n{}",
             item.name,
             item.version.as_deref().unwrap_or("?"),
-            link_range(item.min_links, item.max_links),
-            item.single_link_files,
-            item.projects.len(),
-            details(item, &report, unit, locale),
-            report.project_roots.join("\n")
+            item.path,
+            if item.eligible {
+                if zh {
+                    "可选择清理"
+                } else {
+                    "Available for cleanup"
+                }
+            } else if !item.projects.is_empty() {
+                if zh {
+                    "保留：有项目引用此包"
+                } else {
+                    "Retained: referenced by projects"
+                }
+            } else {
+                if zh {
+                    "保留：部分文件仍被共享，或尚未完成检查"
+                } else {
+                    "Retained: files are shared or checks are incomplete"
+                }
+            }
         );
+        if !item.projects.is_empty() {
+            text.push_str(if zh {
+                "\n引用项目："
+            } else {
+                "\nReferenced by:"
+            });
+            for index in &item.projects {
+                if let Some(project) = report.projects.get(*index) {
+                    text.push_str(&format!(
+                        "\n{} · {}",
+                        project.directory,
+                        crate::managed_cache::size(&project.logical_bytes, unit)
+                    ));
+                }
+            }
+        }
+        text.push_str(if zh {
+            "\n已检查的项目位置："
+        } else {
+            "\nProject locations checked:"
+        });
+        text.push_str(&report.project_roots.join("\n"));
         if text.len() > 64 * 1024 {
             let mut end = 64 * 1024;
             while !text.is_char_boundary(end) {
@@ -98,7 +132,6 @@ fn prepare(config: &Config, report: Inventory, unit: HumanSizeUnit, locale: Loca
             eligible: item.eligible,
             action: item.action,
             text,
-            locale,
         };
         retained = retained.saturating_add(row.retained_bytes());
         if rows.len() >= 16_384 || retained > 64 * 1024 * 1024 {
@@ -115,10 +148,14 @@ fn prepare(config: &Config, report: Inventory, unit: HumanSizeUnit, locale: Loca
 }
 enum ResultEvent {
     Scan(Box<Prepared>),
+    Failed(String),
     Trash(Vec<String>, Result<Vec<serde_json::Value>, String>),
 }
 struct Provider {
     config: Config,
+    binding: Option<Arc<sweepx_core::junk::session::JunkSessionCandidate>>,
+    pause: Option<sweepx_core::junk::session::JunkAutoRefreshPause>,
+    trash_keys: Vec<String>,
     locale: Locale,
     unit: HumanSizeUnit,
     cancel: CancellationToken,
@@ -146,14 +183,32 @@ impl Provider {
             revision: self.revision,
             phase: "scan",
         });
-        let config = self.config.clone();
+        let mut config = self.config.clone();
+        let binding = self.binding.clone();
         let cancel = self.cancel.clone();
         let (unit, locale) = (self.unit, self.locale);
+        let pause = self.pause.clone();
         let (tx, rx) = sync_channel(1);
         self.receiver = Some(rx);
         std::thread::Builder::new()
             .name("managed-cache-inventory".into())
             .spawn(move || {
+                let _pause = pause;
+                let ready = (|| {
+                    if let Some(binding) = binding {
+                        binding
+                            .revalidate_native_binding(&cancel, sweepx_core::junk::scan_limits())
+                            .map_err(|e| e.detail)?;
+                    }
+                    if config.projects.is_empty() && config.tool == "pnpm" {
+                        config.projects = crate::managed_cache::default_pnpm_scopes()?;
+                    }
+                    Ok::<(), String>(())
+                })();
+                if let Err(error) = ready {
+                    let _ = tx.send(ResultEvent::Failed(error));
+                    return;
+                }
                 let report = config.inventory(&cancel);
                 let prepared = prepare(&config, report, unit, locale);
                 let _ = tx.send(ResultEvent::Scan(Box::new(prepared)));
@@ -195,6 +250,13 @@ impl JunkProvider for Provider {
             Err(TryRecvError::Empty) => return None,
             Err(TryRecvError::Disconnected) => {
                 self.receiver = None;
+                self.report = None;
+                for key in std::mem::take(&mut self.trash_keys) {
+                    self.events.push_back(JunkEvent::TrashResult {
+                        key,
+                        error: Some("Cleanup stopped; refresh this package".into()),
+                    });
+                }
                 self.busy = false;
                 self.events.push_back(JunkEvent::Error {
                     revision: self.revision,
@@ -210,6 +272,18 @@ impl JunkProvider for Provider {
         };
         self.receiver = None;
         match result {
+            ResultEvent::Failed(message) => {
+                self.busy = false;
+                self.events.push_back(JunkEvent::Error {
+                    revision: self.revision,
+                    message,
+                });
+                self.events.push_back(JunkEvent::Completed {
+                    revision: self.revision,
+                    outcome: JunkOutcome::Failed,
+                    replaced: false,
+                });
+            }
             ResultEvent::Scan(prepared) => {
                 let Prepared {
                     report,
@@ -247,6 +321,7 @@ impl JunkProvider for Provider {
                 self.report = Some(Arc::new(report));
             }
             ResultEvent::Trash(keys, result) => {
+                self.trash_keys.clear();
                 self.busy = false;
                 let error = match result {
                     Err(e) => Some(e),
@@ -298,15 +373,18 @@ impl JunkProvider for Provider {
             return Err("select_eligible_cache_items_models_require_tool_removal".into());
         }
         let config = self.config.clone();
+        self.trash_keys = keys.to_vec();
         let keys = keys.to_vec();
         self.cancel = CancellationToken::new();
         let cancel = self.cancel.clone();
+        let pause = self.pause.clone();
         let (tx, rx) = sync_channel(1);
         self.receiver = Some(rx);
         self.busy = true;
         std::thread::Builder::new()
             .name("managed-cache-trash".into())
             .spawn(move || {
+                let _pause = pause;
                 let result = execute(&config, &report, &keys, false, &cancel);
                 let _ = tx.send(ResultEvent::Trash(keys, result));
             })
@@ -324,9 +402,18 @@ impl JunkProvider for Provider {
         self.receiver = None;
     }
 }
-pub(crate) fn run(config: Config, locale: Locale, unit: HumanSizeUnit, sort: ScanSort) -> ExitCode {
+pub(crate) fn provider(
+    config: Config,
+    locale: Locale,
+    unit: HumanSizeUnit,
+    binding: Option<Arc<sweepx_core::junk::session::JunkSessionCandidate>>,
+    pause: Option<sweepx_core::junk::session::JunkAutoRefreshPause>,
+) -> Result<impl JunkProvider + 'static, String> {
     let mut provider = Provider {
         config,
+        binding,
+        pause,
+        trash_keys: Vec::new(),
         locale,
         unit,
         cancel: CancellationToken::new(),
@@ -338,10 +425,17 @@ pub(crate) fn run(config: Config, locale: Locale, unit: HumanSizeUnit, sort: Sca
         revision: 0,
         busy: false,
     };
-    if let Err(e) = provider.scan() {
-        eprintln!("{e}");
-        return ExitCode::from(8);
-    }
+    provider.scan()?;
+    Ok(provider)
+}
+pub(crate) fn run(config: Config, locale: Locale, unit: HumanSizeUnit, sort: ScanSort) -> ExitCode {
+    let provider = match provider(config, locale, unit, None, None) {
+        Ok(provider) => provider,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::from(8);
+        }
+    };
     match run_junk_browser(locale, unit, sort, provider) {
         Ok(code) => ExitCode::from(code),
         Err(e) => {

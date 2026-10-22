@@ -416,8 +416,22 @@ struct Provider {
     keepers: Vec<String>,
     inspected: Vec<String>,
     detail_text: Option<String>,
+    child: Option<Box<dyn JunkProvider>>,
+    retried: Vec<String>,
 }
 impl JunkProvider for Provider {
+    fn retry_location(&mut self, key: &str) -> Result<(), String> {
+        self.retried.push(key.into());
+        Ok(())
+    }
+    fn open_items(
+        &mut self,
+        _: &str,
+        _: Locale,
+        _: HumanSizeUnit,
+    ) -> Result<Option<Box<dyn JunkProvider>>, String> {
+        Ok(self.child.take())
+    }
     fn inspect_text(&self, _: &str) -> Option<String> {
         self.detail_text.clone()
     }
@@ -1348,4 +1362,116 @@ fn enter_during_scanning_delegates_read_only_inspection_and_preserves_trash_guar
     assert_eq!(provider.inspected, ["a"]);
     assert!(provider.trashed.is_empty());
     assert!(!model.eligible("a"));
+}
+
+#[test]
+fn managed_cleanup_requires_confirmation_and_escape_preserves_selection() {
+    for (keys, expected) in [
+        (
+            vec![
+                KeyCode::Char(' '),
+                KeyCode::Char('d'),
+                KeyCode::Esc,
+                KeyCode::Char('q'),
+            ],
+            0,
+        ),
+        (
+            vec![
+                KeyCode::Char(' '),
+                KeyCode::Char('d'),
+                KeyCode::Enter,
+                KeyCode::Char('q'),
+            ],
+            1,
+        ),
+    ] {
+        let mut provider = Provider {
+            events: initial(),
+            ..Default::default()
+        };
+        let mut model = JunkModel::new(Locale::ZhCn, HumanSizeUnit::Bytes)
+            .with_presentation(ResultPresentation::ManagedCaches);
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        run_junk_loop(
+            &mut terminal,
+            &mut model,
+            &mut Events(keys.into()),
+            &mut provider,
+            &NeverTerminate,
+        )
+        .unwrap();
+        assert_eq!(provider.trashed.len(), expected);
+    }
+}
+
+#[test]
+fn embedded_items_return_to_parent_and_refresh_only_the_opened_item() {
+    let child = Provider {
+        events: initial(),
+        ..Default::default()
+    };
+    let mut provider = Provider {
+        events: initial(),
+        child: Some(Box::new(child)),
+        ..Default::default()
+    };
+    let mut model = JunkModel::new(Locale::EnUs, HumanSizeUnit::Bytes);
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    let mut events = Events(VecDeque::from([
+        KeyCode::Enter,
+        KeyCode::Char('q'),
+        KeyCode::Char('q'),
+    ]));
+    run_junk_loop(
+        &mut terminal,
+        &mut model,
+        &mut events,
+        &mut provider,
+        &NeverTerminate,
+    )
+    .unwrap();
+    assert!(provider.inspected.is_empty());
+    assert_eq!(provider.refreshed, vec![vec!["a".to_string()]]);
+}
+
+#[test]
+fn coverage_retries_opaque_location_keys_and_preserves_exclusions() {
+    for (status, expected) in [("partial", 1), ("excluded", 0)] {
+        let mut provider = Provider {
+            events: initial(),
+            ..Default::default()
+        };
+        provider.events.push_back(JunkEvent::Location {
+            revision: 1,
+            key: "opaque-0".into(),
+            path: "/display-only/location".into(),
+            status,
+            detail: "permission denied".into(),
+        });
+        let mut model = JunkModel::new(Locale::EnUs, HumanSizeUnit::Bytes);
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        let keys = if expected == 1 {
+            vec![KeyCode::Char('e'), KeyCode::Enter, KeyCode::Char('q')]
+        } else {
+            vec![
+                KeyCode::Char('e'),
+                KeyCode::Enter,
+                KeyCode::Esc,
+                KeyCode::Char('q'),
+            ]
+        };
+        run_junk_loop(
+            &mut terminal,
+            &mut model,
+            &mut Events(keys.into()),
+            &mut provider,
+            &NeverTerminate,
+        )
+        .unwrap();
+        assert_eq!(provider.retried.len(), expected);
+        if expected == 1 {
+            assert_eq!(provider.retried, vec!["opaque-0"]);
+        }
+    }
 }

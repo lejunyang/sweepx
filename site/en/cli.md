@@ -666,3 +666,9 @@ SweepX now embeds the extension and native host; see [`browser-extension`](#brow
 ## Nested project artifacts
 
 Use `sweepx junk --details ROOT` (or `--format json junk --details ROOT`) to include nested Rust outputs, Python environments and Vite dependency bundles. Parent/child rows overlap; summary bytes count outer candidates only. TUI shows the nested categories and Enter opens read-only detail. These new rules are report-only, and `--details` conflicts with cleanup flags. See [artifact detail contracts](https://github.com/lejunyang/sweepx/blob/main/docs/architecture/project-artifact-details-2026-10-07.md).
+
+### Interactive cleanup and incremental updates
+
+Junk scans check known folders while optional npm/pnpm/pip location queries run in the background; newly discovered locations are checked in the same scan. Open an npx or pnpm item to browse packages, versions and project references inside the current terminal. Select items, press `d` to preview, `Enter` to confirm Trash, or `Esc` to cancel. Returning updates the relevant directory.
+
+`e` opens scan coverage with checked, incompletely read and skipped locations; select a location and press `Enter` to recheck it, or `i` for reasons. `f` updates locations from changes delivered during this session, `r` rechecks selected items, and `R` rescans everything. Missing or lost change records, replaced roots, and absent usable change batches make `f` fall back to a full scan. Across restarts, disk history remains a previous-results preview; it cannot skip unvalidated trees. A local update does not establish a new whole-disk observation.

@@ -32,6 +32,7 @@ pub enum ResultPresentation {
 }
 mod quarantine;
 use quarantine::QuarantineView;
+mod coverage;
 mod grouped;
 mod issues;
 pub use issues::JunkIssueKind;
@@ -51,6 +52,10 @@ pub trait JunkRow: Send + Sync {
     fn evidence(&self) -> &str;
     /// Current risk, classification, activity and blockers; stable machine values remain intact.
     fn context(&self) -> String;
+    /// Localized purpose and next action for ordinary users; diagnostic fields stay separate.
+    fn user_context(&self, _locale: Locale) -> String {
+        self.context()
+    }
     /// Logical bytes, preserving known/lower-bound/unknown evidence.
     fn logical_bytes(&self) -> &ByteValue;
     /// Whether native source and aggregate coverage are complete; never mutation authority.
@@ -59,6 +64,10 @@ pub trait JunkRow: Send + Sync {
     /// filter: the provider and native worker must independently enforce execution guards.
     fn report_allows_trash(&self) -> bool {
         true
+    }
+    /// Enter opens a specialized item inventory before raw directory descendants.
+    fn opens_items(&self) -> bool {
+        false
     }
     /// Display grouping only; never used to derive native operation targets.
     fn grouping(&self, _locale: Locale) -> Option<JunkGrouping> {
@@ -99,6 +108,15 @@ pub enum JunkEvent {
         revision: u64,
         count: u64,
         path: String,
+    },
+    /// Bounded advisory coverage location. Status is pending, checked, partial or excluded;
+    /// the provider privately retains retry paths behind opaque keys.
+    Location {
+        revision: u64,
+        key: String,
+        path: String,
+        status: &'static str,
+        detail: String,
     },
     /// Replace one row without changing the user's selection or cursor key.
     Candidate {
@@ -185,6 +203,14 @@ pub trait JunkProvider {
     /// A system provider rediscovers its roots for full refresh.
     /// Stale/unknown selected bindings fail on the worker.
     fn refresh(&mut self, keys: &[String]) -> Result<(), String>;
+    /// Explicitly update recorded changed locations; unavailable evidence falls back to full scan.
+    fn refresh_changed(&mut self) -> Result<(), String> {
+        self.refresh(&[])
+    }
+    /// Retry one location previously supplied by this provider; a display path is not authority.
+    fn retry_location(&mut self, _key: &str) -> Result<(), String> {
+        Err("Location retry unavailable".into())
+    }
     /// Prioritize the native directory behind a presentation key; affects ordering only.
     fn prioritize(&mut self, key: &str);
     /// Begin a bounded, explicitly selected Trash batch on a worker.
@@ -193,6 +219,20 @@ pub trait JunkProvider {
     /// The returned provider owns any scan-admission lease needed while the modal is open.
     fn inspect(&mut self, _key: &str) -> Result<JunkInspection, String> {
         Err("directory inspection is unavailable for this analysis".into())
+    }
+    /// Open an independently scanned item list inside the existing terminal. Construction must
+    /// enqueue work only. The child must retain any parent scan-admission lease until closed.
+    fn open_items(
+        &mut self,
+        _key: &str,
+        _locale: Locale,
+        _unit: HumanSizeUnit,
+    ) -> Result<Option<Box<dyn JunkProvider>>, String> {
+        Ok(None)
+    }
+    /// Refresh after an embedded item list closes; removed children may require their parent scope.
+    fn refresh_after_items(&mut self, key: &str) -> Result<(), String> {
+        self.refresh(&[key.into()])
     }
     /// Explicitly choose/clear the keeper for a duplicate group. No native work runs here.
     fn toggle_keeper(&mut self, _key: &str) -> Result<(), String> {
@@ -256,6 +296,10 @@ pub struct JunkModel {
     /// Latest modal's display-only choices; at most 32 bounded paths, never provider Trash keys.
     review_paths: Vec<String>,
     inspection_text: Option<(String, u16)>,
+    trash_preview: Option<Vec<String>>,
+    trash_preview_offset: u16,
+    locations: BTreeMap<String, coverage::Location>,
+    coverage_cursor: Option<usize>,
 }
 
 impl JunkModel {
@@ -293,6 +337,10 @@ impl JunkModel {
             quarantine: None,
             review_paths: Vec::new(),
             inspection_text: None,
+            trash_preview: None,
+            trash_preview_offset: 0,
+            locations: BTreeMap::new(),
+            coverage_cursor: None,
         }
     }
 
@@ -352,6 +400,7 @@ impl JunkModel {
         }
         let revision = match &event {
             JunkEvent::Started { revision, .. }
+            | JunkEvent::Location { revision, .. }
             | JunkEvent::Phase { revision, .. }
             | JunkEvent::Progress { revision, .. }
             | JunkEvent::Candidate { revision, .. }
@@ -378,6 +427,16 @@ impl JunkModel {
                 | JunkEvent::Candidate { .. }
                 | JunkEvent::Removed { .. }
                 | JunkEvent::Invalidated { .. }
+        ) {
+            self.trash_preview = None;
+            self.trash_preview_offset = 0;
+        }
+        if matches!(
+            event,
+            JunkEvent::Started { .. }
+                | JunkEvent::Candidate { .. }
+                | JunkEvent::Removed { .. }
+                | JunkEvent::Invalidated { .. }
                 | JunkEvent::Completed { .. }
         ) {
             self.dirty = true;
@@ -394,6 +453,9 @@ impl JunkModel {
         }
         match event {
             JunkEvent::Started { revision, keys } => {
+                if keys.is_none() {
+                    self.locations.clear();
+                }
                 self.revision = revision;
                 self.affected = keys.map(|keys| keys.into_iter().collect());
                 for (key, row) in &mut self.rows {
@@ -410,6 +472,29 @@ impl JunkModel {
                 self.issue_history.clear();
                 self.issues.clear();
                 self.notice_history.clear();
+            }
+            JunkEvent::Location {
+                revision,
+                key,
+                path,
+                status,
+                detail,
+            } => {
+                if (self.locations.len() < 256 || self.locations.contains_key(&key))
+                    && key.len() <= 128
+                    && path.len() <= 4096
+                    && detail.len() <= 2048
+                {
+                    self.locations.insert(
+                        key,
+                        coverage::Location {
+                            revision,
+                            path,
+                            status,
+                            detail,
+                        },
+                    );
+                }
             }
             JunkEvent::Phase { phase, .. } => self.phase = phase,
             JunkEvent::Progress { count, path, .. } => {
@@ -659,7 +744,11 @@ impl JunkModel {
             "rules" => self.text("加载规则", "Loading rules"),
             "cache" => self.text("读取与核验缓存", "Reading and validating cache"),
             "cache_write" => self.text("保存扫描事实", "Saving scan facts"),
-            "discovery" => self.text("发现上下文", "Discovering context"),
+            "discovery" => self.text("查找缓存位置", "Finding cache locations"),
+            "supplementary" => self.text(
+                "已检查已知位置，正在补充工具位置",
+                "Known locations checked; looking up additional locations",
+            ),
             "traversal" => self.text("扫描", "Scanning"),
             "formats" => self.text("核验项目文件格式", "Checking project file formats"),
             "content" => self.text(
@@ -694,8 +783,30 @@ impl JunkModel {
 
 /// Renders only bounded presentation data; logical size is never labeled reclaimable.
 pub fn render_junk(frame: &mut Frame<'_>, model: &JunkModel) {
+    if model.coverage_cursor.is_some() {
+        coverage::render(frame, model);
+        return;
+    }
     if let Some(view) = &model.quarantine {
         quarantine::render(frame, model, view);
+        return;
+    }
+    if let Some(keys) = &model.trash_preview {
+        let names = keys
+            .iter()
+            .filter_map(|key| model.rows.get(key))
+            .map(|row| crate::live::sanitize_terminal_text(row.row.path()))
+            .collect::<Vec<_>>();
+        frame.render_widget(
+            Paragraph::new(names.join("\n"))
+                .scroll((model.trash_preview_offset, 0))
+                .wrap(Wrap { trim: false })
+                .block(Block::default().borders(Borders::ALL).title(model.text(
+                    "放入回收站 · Enter 确认 · Esc 取消",
+                    "Move to Trash · Enter Confirm · Esc Cancel",
+                ))),
+            frame.area(),
+        );
         return;
     }
     if model.grouped.is_some() {
@@ -824,7 +935,9 @@ pub fn render_junk(frame: &mut Frame<'_>, model: &JunkModel) {
     let context = model
         .order
         .get(model.cursor)
-        .map_or_else(String::new, |key| model.rows[key].row.context());
+        .map_or_else(String::new, |key| {
+            model.rows[key].row.user_context(model.locale)
+        });
     let full_path = model
         .order
         .get(model.cursor)
@@ -946,7 +1059,12 @@ fn rule_label(rule: &str, locale: Locale) -> &str {
 }
 
 /// Runs with injectable terminal/events for independent rendering and interaction tests.
-pub fn run_junk_loop<B: Backend, E: BrowserEventSource, P: JunkProvider, T: TerminationFlag>(
+pub fn run_junk_loop<
+    B: Backend,
+    E: BrowserEventSource,
+    P: JunkProvider + ?Sized,
+    T: TerminationFlag,
+>(
     terminal: &mut Terminal<B>,
     model: &mut JunkModel,
     events: &mut E,
@@ -998,6 +1116,44 @@ pub fn run_junk_loop<B: Backend, E: BrowserEventSource, P: JunkProvider, T: Term
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             return Ok(130);
         }
+        if model.coverage_key(key, provider) {
+            continue;
+        }
+        if let Some(keys) = &model.trash_preview {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => model.trash_preview = None,
+                KeyCode::Up => {
+                    model.trash_preview_offset = model.trash_preview_offset.saturating_sub(1)
+                }
+                KeyCode::Down => {
+                    model.trash_preview_offset = model
+                        .trash_preview_offset
+                        .saturating_add(1)
+                        .min(keys.len().saturating_sub(1) as u16)
+                }
+                KeyCode::PageUp => {
+                    model.trash_preview_offset = model.trash_preview_offset.saturating_sub(10)
+                }
+                KeyCode::PageDown => {
+                    model.trash_preview_offset = model
+                        .trash_preview_offset
+                        .saturating_add(10)
+                        .min(keys.len().saturating_sub(1) as u16)
+                }
+                KeyCode::Enter => {
+                    let keys = keys.clone();
+                    model.trash_preview = None;
+                    if !model.busy && keys.iter().all(|key| model.eligible(key)) {
+                        match provider.trash(&keys) {
+                            Ok(()) => model.trash_pending = keys.into_iter().collect(),
+                            Err(error) => model.diagnostic(error),
+                        }
+                    }
+                }
+                _ => {}
+            }
+            continue;
+        }
         if let Some((_, offset)) = &mut model.inspection_text {
             match key.code {
                 KeyCode::Esc | KeyCode::Char('q') => model.inspection_text = None,
@@ -1012,6 +1168,11 @@ pub fn run_junk_loop<B: Backend, E: BrowserEventSource, P: JunkProvider, T: Term
         if model.quarantine_key(key, provider) {
             continue;
         }
+        if key.code == KeyCode::Char('e') && model.presentation == ResultPresentation::Junk {
+            model.coverage_cursor = Some(0);
+            continue;
+        }
+        let inspect_files = key.code == KeyCode::Char('i');
         if model.grouped_key(&mut key, provider) {
             continue;
         }
@@ -1080,6 +1241,47 @@ pub fn run_junk_loop<B: Backend, E: BrowserEventSource, P: JunkProvider, T: Term
                     && model.trash_pending.is_empty() =>
             {
                 if let Some(key) = model.order.get(model.cursor).cloned() {
+                    match if inspect_files {
+                        Ok(None)
+                    } else {
+                        provider.open_items(&key, model.locale, model.unit)
+                    } {
+                        Ok(Some(mut child)) => {
+                            let mut child_model = JunkModel::new(model.locale, model.unit)
+                                .with_sort(model.sort)
+                                .with_presentation(child.presentation());
+                            child_model.max_bytes =
+                                child.candidate_byte_budget().min(256 * 1024 * 1024);
+                            let result = run_junk_loop(
+                                terminal,
+                                &mut child_model,
+                                events,
+                                child.as_mut(),
+                                termination,
+                            );
+                            child.close();
+                            drop(child);
+                            let code = result?;
+                            if code >= 128 {
+                                return Ok(code);
+                            }
+                            // Any child cleanup may change parent totals; refresh only the captured
+                            // candidate, with current native admission, after releasing its lease.
+                            match provider.refresh_after_items(&key) {
+                                Ok(()) => {
+                                    model.busy = true;
+                                    model.phase = "replacement";
+                                }
+                                Err(error) => model.diagnostic(error),
+                            }
+                            continue;
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            model.diagnostic(error);
+                            continue;
+                        }
+                    }
                     match provider.inspect(&key) {
                         Ok(inspection) => {
                             let result = inspection::run(
@@ -1118,6 +1320,12 @@ pub fn run_junk_loop<B: Backend, E: BrowserEventSource, P: JunkProvider, T: Term
                     model.diagnostic(error);
                 }
             }
+            KeyCode::Char('f') if !model.busy && model.trash_pending.is_empty() => {
+                match provider.refresh_changed() {
+                    Ok(()) => model.busy = true,
+                    Err(error) => model.diagnostic(error),
+                }
+            }
             KeyCode::Char('r' | 'R') if model.busy => {
                 model.diagnostic(
                     model
@@ -1147,6 +1355,10 @@ pub fn run_junk_loop<B: Backend, E: BrowserEventSource, P: JunkProvider, T: Term
                     continue;
                 }
                 if keys.iter().all(|key| model.eligible(key)) {
+                    if model.presentation == ResultPresentation::ManagedCaches {
+                        model.trash_preview = Some(keys);
+                        continue;
+                    }
                     match provider.trash(&keys) {
                         Ok(()) => model.trash_pending = keys.into_iter().collect(),
                         Err(error) => model.diagnostic(error),

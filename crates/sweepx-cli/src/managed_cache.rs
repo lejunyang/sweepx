@@ -103,22 +103,7 @@ fn pnpm_scopes(args: &PnpmArguments) -> Result<Vec<PathBuf>, String> {
         if let Some(project) = &args.project {
             scopes.push(project.parent().unwrap_or(project).to_path_buf());
         } else {
-            scopes.push(std::env::current_dir().map_err(|e| e.to_string())?);
-            if let Some(home) = sweepx_core::junk::platform::user_home_dir() {
-                for name in [
-                    "Desktop/Projects",
-                    "Projects",
-                    "projects",
-                    "workspace",
-                    "workspaces",
-                    "dev",
-                ] {
-                    let path = home.join(name);
-                    if path.is_dir() {
-                        scopes.push(path);
-                    }
-                }
-            }
+            scopes.extend(default_pnpm_scopes()?);
         }
     }
     if let Some(project) = &args.project {
@@ -131,6 +116,30 @@ fn pnpm_scopes(args: &PnpmArguments) -> Result<Vec<PathBuf>, String> {
     if scopes.len() > 32 || scopes.iter().any(|p| !p.is_absolute()) {
         return Err("absolute_bounded_project_scopes_required".into());
     }
+    Ok(scopes)
+}
+/// Shared default reference scopes. Filesystem discovery belongs on a worker in interactive use.
+pub(crate) fn default_pnpm_scopes() -> Result<Vec<PathBuf>, String> {
+    let mut scopes = vec![std::env::current_dir().map_err(|e| e.to_string())?];
+    if let Some(home) = sweepx_core::junk::platform::user_home_dir() {
+        for name in [
+            "Desktop/Projects",
+            "Projects",
+            "projects",
+            "workspace",
+            "workspaces",
+            "dev",
+        ] {
+            let path = home.join(name);
+            if path.is_dir() {
+                scopes.push(path);
+            }
+        }
+    }
+    scopes.sort();
+    scopes.dedup();
+    let all = scopes.clone();
+    scopes.retain(|p| !all.iter().any(|other| other != p && p.starts_with(other)));
     Ok(scopes)
 }
 pub(crate) fn run_pnpm(

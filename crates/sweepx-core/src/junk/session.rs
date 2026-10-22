@@ -6,6 +6,7 @@
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 mod cache;
+mod discovery;
 #[cfg(target_os = "linux")]
 mod linux_temp;
 mod mailbox;
@@ -79,6 +80,8 @@ pub enum JunkSessionScope {
 pub enum JunkSessionPhase {
     Rules,
     Discovery,
+    /// Known locations have been scanned; optional tool answers may add locations.
+    Supplementary,
     /// Bounded historical preview reads.
     Cache,
     /// Best-effort publication of freshly observed filesystem facts.
@@ -266,6 +269,12 @@ pub enum JunkSessionEventKind {
     Started { scope: JunkSessionScope },
     /// Worker advanced to the next phase.
     Phase(JunkSessionPhase),
+    /// Coverage for an explicitly requested location; None means traversal is pending.
+    /// Paths are advisory display/retry scopes, never deletion authority.
+    Location {
+        path: PathBuf,
+        complete: Option<bool>,
+    },
     /// Coalesced traversal count and current presentation path; never execution authority.
     Progress {
         observed_entries: u64,
@@ -377,8 +386,11 @@ pub struct JunkSessionRequest {
     /// None retains the standalone cache API and its local limits.
     pub cache_state_root: Option<PathBuf>,
     /// Keep native notifications alive across revisions and refresh changed directory scopes.
-    /// Opt-in for API consumers; the interactive junk browser enables it. One-shot reports do not.
+    /// Opt-in for API consumers. Interactive cleanup tracks changes without auto-refresh.
     pub watch: bool,
+    /// Retain bounded native changes for explicitly requested incremental refresh, without
+    /// automatically replacing a result while the user reviews or selects it.
+    pub track_changes: bool,
     /// Notification queue and native subscription bounds, independent of scan retention.
     pub watch_limits: sweepx_platform::change_monitor::ChangeMonitorLimits,
     /// Continue read-only traversal after candidate retention exhausts; omitted results stay
@@ -399,6 +411,7 @@ impl JunkSessionRequest {
             cache_dir: None,
             cache_state_root: None,
             watch: false,
+            track_changes: false,
             continue_on_candidate_limit: false,
             watch_limits: sweepx_platform::change_monitor::ChangeMonitorLimits::default(),
             limits: JunkSessionLimits::default(),
@@ -560,6 +573,7 @@ impl JunkSession {
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         worker.run(&job, &mut writer)
                     }));
+                    writer.defer_terminal = false;
                     match result {
                         Ok(Ok(())) => {}
                         Ok(Err(failure)) if failure.code == "cancelled" => {
@@ -658,6 +672,37 @@ impl JunkSession {
         )
     }
 
+    /// Refresh delivered change scopes. Missing/gapped history, replaced roots, or an empty
+    /// delivered batch falls back to a full scan; silence never certifies an unchanged tree.
+    pub fn refresh_changed(&self) -> Result<JunkSessionRevision, JunkSessionControlError> {
+        self.shared.refresh_scope(Vec::new(), Some(Vec::new()))
+    }
+
+    /// Rechecks advisory locations inside the session's admitted scope, including disappeared
+    /// children. The worker reopens roots and parents natively; paths grant no cleanup authority.
+    pub fn refresh_directories(
+        &self,
+        paths: &[PathBuf],
+    ) -> Result<JunkSessionRevision, JunkSessionControlError> {
+        if paths.is_empty()
+            || paths.len() > MAX_ROOTS
+            || paths.iter().any(|p| {
+                !p.is_absolute()
+                    || p.components()
+                        .any(|c| matches!(c, std::path::Component::ParentDir))
+                    || p.as_os_str().len() > 4096
+            })
+            || paths
+                .iter()
+                .map(|p| p.as_os_str().len() + 256)
+                .sum::<usize>()
+                > 128 * 1024
+        {
+            return Err(JunkSessionControlError::InvalidRequest);
+        }
+        self.shared.refresh_scope(Vec::new(), Some(paths.to_vec()))
+    }
+
     /// Cancels and closes the mailbox. Unconsumed events are intentionally discarded on close.
     pub fn close(&self) {
         self.shared.close();
@@ -713,6 +758,15 @@ struct Worker {
 }
 
 impl Worker {
+    fn loaded_rules_digest(&self) -> [u8; 32] {
+        let mut hash = Sha256::new();
+        hash.update(Sha256::digest(&self.request.project_rule_bytes));
+        hash.update([u8::from(self.request.include_platform_rules)]);
+        if self.request.include_platform_rules {
+            hash.update(super::platform::PLATFORM_JUNK_RULES_JSON.as_bytes());
+        }
+        hash.finalize().into()
+    }
     fn history_scope(&self) -> String {
         let mut hash = Sha256::new();
         hash.update(b"sweepx-junk-session-history/v1");
@@ -731,9 +785,21 @@ impl Worker {
         format!("{:x}", hash.finalize())
     }
     fn run(&mut self, job: &Job, writer: &mut Writer) -> Result<(), JunkSessionFailure> {
+        if job.paths.as_ref().is_some_and(Vec::is_empty) {
+            let next = Job {
+                revision: job.revision,
+                selected: None,
+                paths: self.changed_scope(&job.cancel),
+                cancel: job.cancel.clone(),
+            };
+            return self.run(&next, writer);
+        }
         let system = self.request.system;
         let selected = job.selected.is_some();
         let rule_ids = self.discovery_rule_ids(job)?;
+        if self.request.include_platform_rules && job.selected.is_none() && job.paths.is_none() {
+            return self.run_progressive(job, writer, rule_ids);
+        }
         self.run_with_discovery(job, writer, move |cancel| {
             if selected && rule_ids.is_empty() {
                 return Ok((PlatformJunkSetup::default(), Vec::new()));
@@ -776,15 +842,27 @@ impl Worker {
         writer: &mut Writer,
         discover: impl FnOnce(CancellationToken) -> Result<(PlatformJunkSetup, Vec<PathBuf>), String>,
     ) -> Result<(), JunkSessionFailure> {
-        writer.send(JunkSessionEventKind::Started {
-            scope: match &job.selected {
-                Some(keys) => JunkSessionScope::Selected(keys.clone().into()),
-                None => match &job.paths {
-                    Some(paths) => JunkSessionScope::Directories(paths.clone().into()),
-                    None => JunkSessionScope::All,
+        if !writer.supplementary_pass {
+            writer.send(JunkSessionEventKind::Started {
+                scope: match &job.selected {
+                    Some(keys) => JunkSessionScope::Selected(keys.clone().into()),
+                    None => match &job.paths {
+                        Some(paths) => JunkSessionScope::Directories(paths.clone().into()),
+                        None => JunkSessionScope::All,
+                    },
                 },
-            },
-        })?;
+            })?;
+        }
+        if let Some(paths) = &job.paths
+            && paths
+                .iter()
+                .any(|path| !self.scan_roots.iter().any(|root| path.starts_with(root)))
+        {
+            return Err(JunkSessionFailure::new(
+                "scope_unavailable",
+                "requested location is outside the scan scope",
+            ));
+        }
         writer.phase(JunkSessionPhase::Rules)?;
         if job.cancel.is_cancelled() {
             writer.finish(JunkSessionOutcome::Cancelled, false, 0);
@@ -792,15 +870,7 @@ impl Worker {
         }
         let service = JunkService::from_rule_bytes(&self.request.project_rule_bytes)
             .map_err(|error| JunkSessionFailure::new("rules_invalid", error.to_string()))?;
-        let rules_digest: [u8; 32] = {
-            let mut hash = Sha256::new();
-            hash.update(service.rule_bytes_digest);
-            hash.update([u8::from(self.request.include_platform_rules)]);
-            if self.request.include_platform_rules {
-                hash.update(super::platform::PLATFORM_JUNK_RULES_JSON.as_bytes());
-            }
-            hash.finalize().into()
-        };
+        let rules_digest = self.loaded_rules_digest();
         if !self.request.system {
             self.scan_roots = self.request.roots.clone();
         }
@@ -812,7 +882,7 @@ impl Worker {
                 &self.request.project_rule_bytes,
                 super::platform::PLATFORM_JUNK_RULES_JSON.as_bytes(),
             );
-            if job.revision.0 == 1 {
+            if job.revision.0 == 1 && !writer.supplementary_pass {
                 if self.request.system {
                     self.restore_regular_history(&mut reader, &service, rules_digest, job, writer)?;
                 } else {
@@ -835,32 +905,13 @@ impl Worker {
             (PlatformJunkSetup::default(), Vec::new())
         };
         let mut partial = platform.evidence.discovery_incomplete();
-        for (rule, detail) in platform.evidence.cache_query_failures() {
-            writer.send(JunkSessionEventKind::ToolQueryWarning(
-                JunkSessionFailure::new("tool_query_failed", format!("{detail} ({rule})")),
-            ))?;
-        }
         if let Some(reason) = platform.evidence.layout_failure() {
             writer.failure(JunkSessionFailure::new(
                 "layout_discovery_incomplete",
                 reason.code(),
             ));
         }
-        if let Some(reason) = platform.evidence.tool_discovery_failure() {
-            writer.send(JunkSessionEventKind::ToolQueryWarning(
-                JunkSessionFailure::new(
-                    "npm_discovery_incomplete",
-                    format!(
-                        "{}: {}",
-                        reason.code(),
-                        platform
-                            .evidence
-                            .tool_discovery_detail()
-                            .unwrap_or("npm installation discovery could not complete")
-                    ),
-                ),
-            ))?;
-        }
+        self.send_tool_warnings(&platform, writer)?;
         if job.cancel.is_cancelled() {
             writer.finish(JunkSessionOutcome::Cancelled, false, 0);
             return Ok(());
@@ -868,7 +919,7 @@ impl Worker {
         if self.request.system && job.selected.is_none() && job.paths.is_none() {
             self.scan_roots = normalize_discovered_roots(discovered_roots)?;
             #[cfg(not(target_os = "linux"))]
-            if self.scan_roots.is_empty() {
+            if self.scan_roots.is_empty() && !writer.defer_terminal {
                 return Err(JunkSessionFailure::new(
                     "roots_unavailable",
                     "no supported platform junk root is available",
@@ -978,6 +1029,17 @@ impl Worker {
             .current
             .values()
             .fold(0usize, |sum, row| sum.saturating_add(row.cost()));
+        for path in paths.as_ref().unwrap_or(&self.scan_roots) {
+            if writer.locations.len() >= MAX_ROOTS && !writer.locations.contains(path) {
+                continue;
+            }
+            writer.locations.insert(path.clone());
+            writer.send(JunkSessionEventKind::Location {
+                path: path.clone(),
+                complete: None,
+            })?;
+        }
+        let supplementary_pass = writer.supplementary_pass;
         let mut observer = Observer {
             service: &service,
             platform: &platform,
@@ -996,7 +1058,11 @@ impl Worker {
         let mut scanner = Scanner::new(
             HostPlatformScanner::new(),
             ScannerOptions {
-                scan_id: ScanId::new(format!("{}:{}", self.session_id, job.revision.0)),
+                scan_id: ScanId::new(if supplementary_pass {
+                    format!("{}:{}:supplement", self.session_id, job.revision.0)
+                } else {
+                    format!("{}:{}", self.session_id, job.revision.0)
+                }),
                 resource_limits: self.request.limits.scan,
                 retain_directory_index: false,
                 retain_file_index:
@@ -1234,6 +1300,24 @@ impl ClassifiedScanObserver for Observer<'_> {
             .send(JunkSessionEventKind::Boundary(Box::new(boundary.clone())))
         {
             self.writer.abort(failure);
+        }
+    }
+    fn on_directory_coverage(&mut self, path: &Path, coverage: &sweepx_model::Coverage) {
+        // A selected scan only enumerates ancestors shallowly. It cannot replace the earlier
+        // recursive coverage observation for one of those ancestor locations.
+        if self
+            .paths
+            .is_some_and(|paths| !paths.iter().any(|selected| path.starts_with(selected)))
+        {
+            return;
+        }
+        if self.writer.locations.contains(path)
+            && let Err(error) = self.writer.send(JunkSessionEventKind::Location {
+                path: path.to_path_buf(),
+                complete: Some(coverage.complete && !coverage.details_lost),
+            })
+        {
+            self.writer.abort(error);
         }
     }
     fn on_directory_progress(&mut self, path: &Path, aggregate: &DirectoryAggregate) {

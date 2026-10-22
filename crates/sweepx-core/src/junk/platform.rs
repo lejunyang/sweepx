@@ -957,6 +957,23 @@ impl PlatformJunkSetup {
         Self::discover_selected_with_cancel(&[], cancel)
     }
 
+    /// Observes default and configuration-file locations without launching tools. Unknown tool
+    /// answers stay unknown; later optional discovery may add locations to this native scope.
+    pub fn discover_known_with_cancel(
+        rule_ids: &[String],
+        cancel: CancellationToken,
+    ) -> Result<Self, String> {
+        let rules = select_platform_rules(rule_ids)?;
+        let evidence = PlatformJunkEvidence::precompute_with_limits(
+            &rules,
+            |_| None,
+            Vec::new(),
+            LayoutDiscoveryLimits::default(),
+            cancel,
+        );
+        Ok(Self { rules, evidence })
+    }
+
     /// Discovers only selected host/portable rule IDs; an empty selection keeps the default.
     /// Validation precedes all native/tool observations. Selecting rules narrows discovery and
     /// classification together; it never grants freshness or permission to clean a candidate.

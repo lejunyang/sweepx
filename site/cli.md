@@ -649,3 +649,9 @@ SweepX 已内置扩展和本地通信组件，安装入口见 [`browser-extensio
 ## 项目产物细分
 
 使用 `sweepx junk --details ROOT`，或 `--format json junk --details ROOT`，查看 Rust 子产物、Python 环境和 Vite 依赖缓存。父子行占用重叠，汇总只计上层候选。TUI 显示细分类别，Enter 可继续只读查看目录。这些新规则均只报告，`--details` 与清理选项冲突。见[产物细分约定](https://github.com/lejunyang/sweepx/blob/main/docs/architecture/project-artifact-details-2026-10-07.md)。
+
+### 交互清理与增量更新
+
+垃圾扫描先检查已知目录，同时在后台补充 npm/pnpm/pip 等工具的位置；新位置会在同次扫描中补查。进入 npx 或 pnpm 清理项后，可在当前界面查看包、版本和项目引用，选择后按 `d` 预览、`Enter` 确认放入回收站，`Esc` 取消。返回时只更新相关目录。
+
+`e` 打开扫描范围：显示已检查、未读完和已跳过的位置；选中位置后 `Enter` 重新检查，`i` 查看原因详情。`f` 根据当前会话已收到的文件变化更新相关目录，`r` 重新检查所选项，`R` 重新扫描全部。变化记录缺失、丢失、根目录被替换或没有可用记录时，`f` 回退到完整扫描。重启后的磁盘缓存仍用于展示上次结果，不据此跳过未验证的目录；局部更新也不代表重新检查了整个磁盘。

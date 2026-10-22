@@ -114,7 +114,7 @@ impl JunkModel {
     pub(super) fn quarantine_key(
         &mut self,
         key: KeyEvent,
-        provider: &mut impl JunkProvider,
+        provider: &mut (impl JunkProvider + ?Sized),
     ) -> bool {
         let Some(view) = self.quarantine.as_mut() else {
             return false;

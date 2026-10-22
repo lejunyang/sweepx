@@ -2973,3 +2973,189 @@ fn deep_candidate_limit_preserves_bounded_rows_and_finishes_read_only_traversal(
     ));
     assert_eq!(worker.current.len(), 1);
 }
+
+#[test]
+fn directory_refresh_reconciles_deleted_children_without_reopening_stale_candidates() {
+    let _serial = SESSION_TESTS.lock().unwrap();
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture_root(&fixture);
+    fs::write(root.join("Cargo.toml"), b"[workspace]\nmembers=[]\n").unwrap();
+    fs::create_dir(root.join("target")).unwrap();
+    fs::write(root.join("target/payload"), b"fixture").unwrap();
+    let session = JunkSession::start(JunkSessionRequest::new(vec![root.clone()])).unwrap();
+    let first = drain(&session, JunkSessionRevision(1));
+    let key = first
+        .iter()
+        .find_map(|e| match &e.kind {
+            JunkSessionEventKind::Candidate { key, .. } => Some(*key),
+            _ => None,
+        })
+        .unwrap();
+    fs::remove_dir_all(root.join("target")).unwrap();
+    let revision = session
+        .refresh_directories(std::slice::from_ref(&root))
+        .unwrap();
+    let next = drain(&session, revision);
+    assert!(next.iter().any(
+        |e| matches!(e.kind, JunkSessionEventKind::Removed { key: removed } if removed == key)
+    ));
+    let revision = session
+        .refresh_directories(&[root.parent().unwrap().into()])
+        .unwrap();
+    assert!(drain(&session, revision).iter().any(
+        |e| matches!(&e.kind, JunkSessionEventKind::Error(f) if f.code == "scope_unavailable")
+    ));
+    session.close();
+    assert!(
+        session
+            .wait_for_worker_exit(Duration::from_secs(10))
+            .unwrap()
+    );
+}
+
+#[test]
+fn known_candidates_precede_optional_queries_and_new_locations_merge_once() {
+    use crate::junk::platform::{PlatformJunkEvidence, load_platform_junk_rules};
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture_root(&fixture);
+    let target = project(&root, "app", b"known payload");
+    let cache = root.join("custom-pip");
+    let mut worker = controlled_worker(&root);
+    worker.request.include_platform_rules = true;
+    let shared = Arc::new(Shared::new(worker.request.limits));
+    let job = Job {
+        revision: JunkSessionRevision(1),
+        selected: None,
+        paths: None,
+        cancel: CancellationToken::new(),
+    };
+    let mut writer = Writer::new(shared.clone(), job.revision, job.cancel.clone());
+    let mut early = Vec::new();
+    worker.run_progressive_with(&job, &mut writer, |_| Ok(PlatformJunkSetup::default()), || {
+        while let Some(event) = shared.pop() { early.push(event); }
+        assert!(early.iter().any(|e| matches!(&e.kind, JunkSessionEventKind::Candidate { row, .. } if row.observed_native_path().as_ref() == Some(&target))));
+        assert!(!early.iter().any(|e| matches!(e.kind, JunkSessionEventKind::Completed { .. })));
+        fs::create_dir_all(cache.join("wheels")).unwrap();
+        fs::write(cache.join("wheels/data"), b"new payload").unwrap();
+        let rules = load_platform_junk_rules().unwrap().into_iter().filter(|r| r.id == "tool.pip-cache").collect::<Vec<_>>();
+        let evidence = PlatformJunkEvidence::precompute_with(&rules, |_| Some(cache.clone()), Vec::new());
+        Ok(PlatformJunkSetup { rules, evidence })
+    }).unwrap();
+    let session = JunkSession { shared };
+    early.extend(drain(&session, job.revision));
+    assert_eq!(
+        early
+            .iter()
+            .filter(|e| matches!(e.kind, JunkSessionEventKind::Started { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        early
+            .iter()
+            .filter(|e| matches!(e.kind, JunkSessionEventKind::Completed { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(worker.current.len(), 2);
+    assert!(
+        worker
+            .current
+            .values()
+            .any(|r| r.observed_native_path().as_ref() == Some(&cache))
+    );
+    assert!(matches!(
+        early.last().unwrap().kind,
+        JunkSessionEventKind::Completed {
+            outcome: JunkSessionOutcome::Complete,
+            ..
+        }
+    ));
+    let initial_digest = early
+        .iter()
+        .find_map(|event| match &event.kind {
+            JunkSessionEventKind::Candidate { rules_digest, .. } => Some(*rules_digest),
+            _ => None,
+        })
+        .unwrap();
+    assert_ne!(initial_digest, [0; 32]);
+    for event in early {
+        if let JunkSessionEventKind::Candidate { rules_digest, .. } = event.kind {
+            assert_eq!(
+                rules_digest, initial_digest,
+                "one revision must retain its loaded-rule binding across both passes"
+            );
+        }
+    }
+    session.close();
+}
+
+#[test]
+fn optional_probe_failure_keeps_known_rows_and_one_complete_terminal() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture_root(&fixture);
+    project(&root, "app", b"still usable");
+    let mut worker = controlled_worker(&root);
+    let shared = Arc::new(Shared::new(worker.request.limits));
+    let job = Job {
+        revision: JunkSessionRevision(1),
+        selected: None,
+        paths: None,
+        cancel: CancellationToken::new(),
+    };
+    let mut writer = Writer::new(shared.clone(), job.revision, job.cancel.clone());
+    worker
+        .run_progressive_with(
+            &job,
+            &mut writer,
+            |_| Ok(PlatformJunkSetup::default()),
+            || Err("OSDK version is not configured".into()),
+        )
+        .unwrap();
+    let session = JunkSession { shared };
+    let events = drain(&session, job.revision);
+    assert_eq!(current(&events).len(), 1);
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e.kind, JunkSessionEventKind::ToolQueryWarning(_)))
+    );
+    assert!(events.iter().any(|e| matches!(&e.kind, JunkSessionEventKind::Location { path, complete: Some(true) } if path == &root)));
+    assert!(matches!(
+        events.last().unwrap().kind,
+        JunkSessionEventKind::Completed {
+            outcome: JunkSessionOutcome::Complete,
+            error_count: 0,
+            ..
+        }
+    ));
+    session.close();
+}
+
+#[test]
+fn manual_incremental_without_history_falls_back_to_full_native_observation() {
+    let _serial = SESSION_TESTS.lock().unwrap();
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture_root(&fixture);
+    let target = project(&root, "app", b"before");
+    let session = JunkSession::start(JunkSessionRequest::new(vec![root.clone()])).unwrap();
+    drain(&session, JunkSessionRevision(1));
+    fs::write(target.join("payload"), b"current native bytes").unwrap();
+    let revision = session.refresh_changed().unwrap();
+    let events = drain(&session, revision);
+    assert!(matches!(
+        events[0].kind,
+        JunkSessionEventKind::Started {
+            scope: JunkSessionScope::All
+        }
+    ));
+    let size = fs::read_dir(&target)
+        .unwrap()
+        .map(|e| fs::symlink_metadata(e.unwrap().path()).unwrap().len() as u128)
+        .sum();
+    assert_eq!(
+        current(&events).values().next().unwrap().logical_bytes(),
+        &sweepx_platform::known_u128(size)
+    );
+    shutdown(&session);
+}

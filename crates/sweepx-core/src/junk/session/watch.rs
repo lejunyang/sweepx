@@ -45,13 +45,20 @@ impl Worker {
         job: &Job,
         writer: &mut Writer,
     ) -> Result<(), JunkSessionFailure> {
-        if self.request.watch
+        if (self.request.watch || self.request.track_changes)
             && !self.watch_disabled
             && !self.scan_roots.is_empty()
-            && (self.monitor.is_none() || (job.selected.is_none() && job.paths.is_none()))
+            && (self.monitor.is_none()
+                || (job.selected.is_none() && job.paths.is_none())
+                || self
+                    .watch_roots
+                    .iter()
+                    .map(|r| &r.path)
+                    .ne(self.scan_roots.iter()))
         {
             // A complete scan rebuilds subscriptions after gaps or root replacement. Installation
             // precedes observations; no event drain occurs after traversal to hide racing writes.
+            let rebuilding = self.monitor.is_some() && job.paths.is_some();
             self.stop_monitor();
             self.watch_roots = self
                 .scan_roots
@@ -68,7 +75,14 @@ impl Worker {
             };
             self.watch_checked = std::time::Instant::now();
             match startup {
-                Ok(monitor) => self.monitor = Some(Arc::new(monitor)),
+                Ok(monitor) => {
+                    // A scope expansion restarts subscriptions after part of this revision was
+                    // already observed. Preserve that gap so a later incremental request rescans.
+                    if rebuilding {
+                        monitor.report_gap();
+                    }
+                    self.monitor = Some(Arc::new(monitor));
+                }
                 Err(error) => {
                     self.watch_disabled = true;
                     self.watch_warning = Some(error.to_string());
@@ -82,6 +96,44 @@ impl Worker {
             )))?;
         }
         Ok(())
+    }
+
+    pub(super) fn changed_scope(&mut self, cancel: &CancellationToken) -> Option<Vec<PathBuf>> {
+        if self.watch_roots.len() != self.scan_roots.len()
+            || self.watch_roots.iter().any(|root| {
+                WatchRoot::observe(&root.path, cancel).is_none_or(|now| !root.matches(&now))
+            })
+        {
+            return None;
+        }
+        let monitor = self.monitor.as_ref()?;
+        if !monitor.is_available() {
+            return None;
+        }
+        let changes = monitor.drain_ready()?;
+        if changes.full_scan || changes.unavailable.is_some() || changes.directories.is_empty() {
+            return None;
+        }
+        let paths = changes.directories;
+        if paths.iter().fold(512usize, |sum, path| {
+            sum.saturating_add(path.capacity())
+                .saturating_add(std::mem::size_of::<PathBuf>())
+        }) > self.request.limits.max_event_bytes
+            || paths.len() > MAX_ROOTS
+            || paths
+                .iter()
+                .any(|path| !self.scan_roots.iter().any(|root| path.starts_with(root)))
+        {
+            return None;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            mailbox::watch_paths_for_macos_aliases(&self.scan_roots, Some(paths))
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Some(paths)
+        }
     }
 
     pub(super) fn next_job(&mut self, shared: &Shared) -> Option<Job> {

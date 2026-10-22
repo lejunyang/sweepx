@@ -103,6 +103,13 @@ impl Shared {
         &self,
         keys: Vec<JunkCandidateKey>,
     ) -> Result<JunkSessionRevision, JunkSessionControlError> {
+        self.refresh_scope(keys, None)
+    }
+    pub fn refresh_scope(
+        &self,
+        keys: Vec<JunkCandidateKey>,
+        paths: Option<Vec<PathBuf>>,
+    ) -> Result<JunkSessionRevision, JunkSessionControlError> {
         if keys
             .len()
             .saturating_mul(std::mem::size_of::<JunkCandidateKey>())
@@ -137,7 +144,7 @@ impl Shared {
         state.job = Some(Job {
             revision,
             selected: (!keys.is_empty()).then_some(keys),
-            paths: None,
+            paths,
             cancel: state.cancel.clone(),
         });
         state.idle = false;
@@ -321,6 +328,10 @@ pub(super) struct Writer {
     pub coverage_incomplete: bool,
     revision: JunkSessionRevision,
     cancel: CancellationToken,
+    pub locations: BTreeSet<PathBuf>,
+    pub defer_terminal: bool,
+    pub supplementary_pass: bool,
+    pub deferred: std::cell::RefCell<Option<(JunkSessionOutcome, bool, usize)>>,
 }
 impl Writer {
     pub fn new(
@@ -335,6 +346,10 @@ impl Writer {
             fault: None,
             error_count: 0,
             coverage_incomplete: false,
+            locations: BTreeSet::new(),
+            defer_terminal: false,
+            supplementary_pass: false,
+            deferred: std::cell::RefCell::new(None),
         }
     }
     pub fn send(&mut self, kind: JunkSessionEventKind) -> Result<(), JunkSessionFailure> {
@@ -441,6 +456,10 @@ impl Writer {
         self.cancel.cancel();
     }
     pub fn finish(&self, outcome: JunkSessionOutcome, replaced: bool, candidate_count: usize) {
+        if self.defer_terminal {
+            *self.deferred.borrow_mut() = Some((outcome, replaced, candidate_count));
+            return;
+        }
         let mut state = self.shared.lock();
         if state.closed {
             return;
@@ -476,7 +495,8 @@ fn event_cost(kind: &JunkSessionEventKind) -> usize {
             |bytes, path| bytes.saturating_add(path.capacity()),
         ),
         JunkSessionEventKind::Candidate { row, .. } => row.cost(),
-        JunkSessionEventKind::Progress { path, .. } => path.capacity(),
+        JunkSessionEventKind::Progress { path, .. }
+        | JunkSessionEventKind::Location { path, .. } => path.capacity(),
         JunkSessionEventKind::DirectoryStatistics { path, aggregate } => path
             .capacity()
             .saturating_add(1024)

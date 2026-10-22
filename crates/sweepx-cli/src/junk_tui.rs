@@ -17,6 +17,7 @@ use sweepx_model::{ByteValue, HumanSizeUnit, ScanSort};
 use sweepx_tui::junk::{
     JunkEvent, JunkInspection, JunkIssueKind, JunkOutcome, JunkProvider, JunkRow, run_junk_browser,
 };
+mod items;
 #[cfg(target_os = "linux")]
 mod quarantine;
 
@@ -59,6 +60,7 @@ pub(crate) fn run(
     // An interactive cleanup result must remain available while the user reviews it. Cache
     // writes can otherwise immediately replace a finished scan with another busy revision.
     request.watch = false;
+    request.track_changes = true;
     let candidate_byte_budget = request.limits.max_candidate_bytes;
     let session = match JunkSession::start(request) {
         Ok(session) => session,
@@ -103,6 +105,9 @@ impl JunkRow for Row {
     fn rule(&self) -> &str {
         &self.row.candidate.rule_id
     }
+    fn opens_items(&self) -> bool {
+        matches!(self.rule(), "tool.npm-npx" | "tool.pnpm-store")
+    }
     fn grouping(&self, locale: Locale) -> Option<sweepx_tui::junk::JunkGrouping> {
         let group = sweepx_core::junk::organization::organize(&self.row.candidate);
         Some(sweepx_tui::junk::JunkGrouping {
@@ -129,17 +134,6 @@ impl JunkRow for Row {
     }
     fn context(&self) -> String {
         let candidate = &self.row.candidate;
-        if candidate.rule_id == "tool.npm-npx"
-            && let Some(root) = self
-                .row
-                .observed_native_path()
-                .and_then(|p| p.parent().map(|parent| parent.to_path_buf()))
-        {
-            let quoted = root.to_string_lossy().replace('\'', "'\\''");
-            return format!(
-                "sweepx npx-cache --root '{quoted}'\n--older-versions · --entry <ID> · --trash"
-            );
-        }
         format!(
             "risk={} · classification={} · confidence={} · activity={} · format={} · projectContext={} · blockers={}",
             candidate.risk,
@@ -168,6 +162,58 @@ impl JunkRow for Row {
                 }),
             candidate.blockers.join(",")
         )
+    }
+    fn user_context(&self, locale: Locale) -> String {
+        use sweepx_core::junk::candidate::JunkExecutionPolicy as Policy;
+        let candidate = &self.row.candidate;
+        let (zh, en) = if self.preview || !self.current {
+            (
+                "等待本次检查，完成后可查看和选择。",
+                "Waiting for the current check before selection.",
+            )
+        } else if !self.row.complete() {
+            (
+                "部分内容未能读取，按 e 查看位置和原因。",
+                "Some contents could not be read; press e for locations and reasons.",
+            )
+        } else if matches!(
+            candidate.rule_id.as_str(),
+            "tool.npm-npx" | "tool.pnpm-store"
+        ) {
+            (
+                "按 Enter 查看包、版本和清理选项。",
+                "Press Enter for packages, versions and cleanup options.",
+            )
+        } else if candidate.rule_id == "tool.npm-other-data" {
+            (
+                "npm 旧版或其他工具留下的数据。用途尚未确认，按 Enter 查看文件。",
+                "Legacy npm or other tool data. Purpose is unconfirmed; press Enter to inspect files.",
+            )
+        } else if candidate.rule_id.starts_with("tool.")
+            && candidate.execution_policy != Policy::NativeRevalidationRequired
+        {
+            (
+                "暂时保留：部分内容的格式或用途尚未确认。按 Enter 查看文件。",
+                "Retained: the format or purpose of some contents is unconfirmed. Press Enter to inspect files.",
+            )
+        } else {
+            match candidate.execution_policy {
+                Policy::NativeRevalidationRequired => (
+                    "可选择清理；清理后应用可能重新下载或生成这些内容。",
+                    "Can be selected for cleanup; the application may download or rebuild these contents.",
+                ),
+                Policy::NotChecked => ("尚未检查，请刷新。", "Not checked yet; refresh this item."),
+                Policy::RequireUserDataSelection => (
+                    "包含应用或用户数据，需单独查看和选择。",
+                    "Contains application or user data requiring separate review and selection.",
+                ),
+                Policy::ReportOnly | Policy::RequireProjectOwnershipAndActivity => (
+                    "暂时保留：尚未确认项目是否仍需要这些内容。按 Enter 查看文件。",
+                    "Retained: the project may still need these contents. Press Enter to inspect files.",
+                ),
+            }
+        };
+        if locale == Locale::ZhCn { zh } else { en }.into()
     }
     fn logical_bytes(&self) -> &ByteValue {
         self.row.logical_bytes()
@@ -209,6 +255,8 @@ impl Default for RetentionLimits {
 }
 
 struct Provider {
+    locations: BTreeMap<String, PathBuf>,
+    pending_item_refresh: Option<PathBuf>,
     scan_mode: &'static str,
     session: JunkSession,
     rows: BTreeMap<String, Arc<Row>>,
@@ -255,8 +303,49 @@ pub(crate) fn mutation_permit() -> Result<MutationPermit, String> {
 }
 
 impl Provider {
+    fn location_event(
+        &mut self,
+        revision: u64,
+        path: PathBuf,
+        status: &'static str,
+        mut detail: String,
+    ) -> Option<JunkEvent> {
+        if path.as_os_str().len() > 4096 {
+            return None;
+        }
+        let key = self
+            .locations
+            .iter()
+            .find(|(_, value)| **value == path)
+            .map(|(key, _)| key.clone())
+            .or_else(|| {
+                (self.locations.len() < 256).then(|| format!("location-{}", self.locations.len()))
+            })?;
+        let display = path.to_string_lossy().into_owned();
+        if display.len() > 4096 {
+            return None;
+        }
+        if detail.len() > 2048 {
+            let mut end = 2048;
+            while !detail.is_char_boundary(end) {
+                end -= 1;
+            }
+            detail.truncate(end);
+        }
+        self.locations.insert(key.clone(), path);
+        Some(JunkEvent::Location {
+            revision,
+            key,
+            path: display,
+            status,
+            detail,
+        })
+    }
+
     fn new(session: JunkSession) -> Self {
         Self {
+            locations: BTreeMap::new(),
+            pending_item_refresh: None,
             scan_mode: "custom",
             session,
             rows: BTreeMap::new(),
@@ -302,7 +391,7 @@ impl Provider {
         if self.quarantine.is_some() {
             return true;
         }
-        self.trash.is_some()
+        self.trash.is_some() || self.pending_item_refresh.is_some()
     }
 
     fn remove_row(&mut self, key: &str) {
@@ -410,7 +499,10 @@ impl Provider {
                 self.complete = false;
                 self.rejected = false;
                 let keys = match scope {
-                    JunkSessionScope::All => None,
+                    JunkSessionScope::All => {
+                        self.locations.clear();
+                        None
+                    }
                     JunkSessionScope::Directories(paths) => Some(
                         self.rows
                             .iter()
@@ -457,6 +549,7 @@ impl Provider {
                     phase: match phase {
                         JunkSessionPhase::Rules => "rules",
                         JunkSessionPhase::Discovery => "discovery",
+                        JunkSessionPhase::Supplementary => "supplementary",
                         JunkSessionPhase::Cache => "cache",
                         JunkSessionPhase::CacheWrite => "cache_write",
                         JunkSessionPhase::Traversal => "traversal",
@@ -467,6 +560,18 @@ impl Provider {
                         JunkSessionPhase::Replacement => "replacement",
                     },
                 });
+            }
+            JunkSessionEventKind::Location { path, complete } => {
+                return self.location_event(
+                    revision,
+                    path,
+                    match complete {
+                        None => "pending",
+                        Some(true) => "checked",
+                        Some(false) => "partial",
+                    },
+                    String::new(),
+                );
             }
             JunkSessionEventKind::Progress {
                 observed_entries,
@@ -504,7 +609,7 @@ impl Provider {
             }
             JunkSessionEventKind::Boundary(boundary) => {
                 let message = format!("{}: {}", boundary.path.display(), boundary.detail);
-                return Some(
+                let issue = Some(
                     if matches!(
                         boundary.kind,
                         sweepx_platform::BoundaryKind::Symlink
@@ -534,6 +639,25 @@ impl Provider {
                         }
                     },
                 );
+                let excluded = matches!(
+                    boundary.kind,
+                    sweepx_platform::BoundaryKind::Symlink
+                        | sweepx_platform::BoundaryKind::RootSymlink
+                        | sweepx_platform::BoundaryKind::Mount
+                        | sweepx_platform::BoundaryKind::OtherFilesystem
+                ) || boundary.detail == "special filesystem entry rejected";
+                if let Some(location) = self.location_event(
+                    revision,
+                    boundary.path.clone(),
+                    if excluded { "excluded" } else { "partial" },
+                    boundary.detail.clone(),
+                ) {
+                    if let Some(issue) = issue {
+                        self.pending.push_back(issue);
+                    }
+                    return Some(location);
+                }
+                return issue;
             }
             JunkSessionEventKind::ToolQueryWarning(error) => {
                 return Some(JunkEvent::Issue {
@@ -637,6 +761,103 @@ impl JunkProvider for Provider {
     fn candidate_byte_budget(&self) -> usize {
         self.limits.bytes
     }
+    fn open_items(
+        &mut self,
+        key: &str,
+        locale: Locale,
+        unit: HumanSizeUnit,
+    ) -> Result<Option<Box<dyn JunkProvider>>, String> {
+        let row = self.rows.get(key).ok_or("unknown candidate")?;
+        let kind = row.row.candidate.rule_id.as_str();
+        if !matches!(kind, "tool.npm-npx" | "tool.pnpm-store") {
+            return Ok(None);
+        }
+        if self.busy || self.mutation_busy() || !row.current || row.preview {
+            return Err(if locale == Locale::ZhCn {
+                "请等待本次扫描完成，再查看包和版本。"
+            } else {
+                "Wait for this scan to finish before opening packages."
+            }
+            .into());
+        }
+        let pause = self
+            .session
+            .suspend_auto_refresh()
+            .map_err(|e| e.to_string())?;
+        let path = row
+            .row
+            .observed_native_path()
+            .ok_or("native location unavailable")?;
+        let child = if kind == "tool.npm-npx" {
+            items::npx(
+                row.row.clone(),
+                path.parent().ok_or("npx root unavailable")?.to_path_buf(),
+                locale,
+                pause.clone(),
+            )?
+        } else {
+            let config = crate::managed_cache::Config {
+                tool: "pnpm",
+                root: path.clone(),
+                cache: path,
+                projects: Vec::new(),
+                package: None,
+                max_links: None,
+                unobserved: false,
+            };
+            Box::new(crate::managed_cache_tui::provider(
+                config,
+                locale,
+                unit,
+                Some(row.row.clone()),
+                Some(pause.clone()),
+            )?) as Box<dyn JunkProvider>
+        };
+        Ok(Some(Box::new(items::Child {
+            provider: child,
+            _pause: pause,
+        })))
+    }
+    fn retry_location(&mut self, key: &str) -> Result<(), String> {
+        if self.mutation_busy() {
+            return Err("cleanup is running".into());
+        }
+        let path = self
+            .locations
+            .get(key)
+            .ok_or("location unavailable")?
+            .clone();
+        self.session
+            .refresh_directories(&[path])
+            .map_err(|e| e.to_string())?;
+        self.busy = true;
+        Ok(())
+    }
+    fn refresh_changed(&mut self) -> Result<(), String> {
+        if self.mutation_busy() {
+            return Err("cleanup is running".into());
+        }
+        self.session.refresh_changed().map_err(|e| e.to_string())?;
+        self.busy = true;
+        Ok(())
+    }
+    fn refresh_after_items(&mut self, key: &str) -> Result<(), String> {
+        let row = self.rows.get(key).ok_or("unknown candidate")?;
+        let path = row
+            .row
+            .observed_native_path()
+            .ok_or("native location unavailable")?;
+        let scope = if row.row.candidate.rule_id == "tool.npm-npx" {
+            path.parent().ok_or("npx parent unavailable")?.to_path_buf()
+        } else {
+            path
+        };
+        // A cancelled child can still be exiting a native call. Its worker keeps the lease;
+        // retry admission from poll rather than joining it or dropping the requested refresh.
+        self.pending_item_refresh = Some(scope);
+        self.busy = true;
+        Ok(())
+    }
     fn inspect(&mut self, key: &str) -> Result<JunkInspection, String> {
         if self.mutation_busy() {
             return Err("a cleanup operation is running".into());
@@ -675,6 +896,28 @@ impl JunkProvider for Provider {
         })
     }
     fn poll(&mut self) -> Option<JunkEvent> {
+        if let Some(path) = &self.pending_item_refresh {
+            match self.session.refresh_directories(std::slice::from_ref(path)) {
+                Ok(_) => {
+                    self.pending_item_refresh = None;
+                }
+                Err(sweepx_core::junk::session::JunkSessionControlError::Busy) => return None,
+                Err(error) => {
+                    self.pending_item_refresh = None;
+                    self.busy = false;
+                    self.pending.push_back(JunkEvent::Completed {
+                        revision: self.revision,
+                        outcome: JunkOutcome::Failed,
+                        replaced: false,
+                    });
+                    return Some(JunkEvent::Error {
+                        revision: self.revision,
+                        message: error.to_string(),
+                    });
+                }
+            }
+        }
+
         if let Some(event) = self.pending.pop_front() {
             if self.pending.is_empty() {
                 // The preceding batch may have removed every row whose estimate reserved this

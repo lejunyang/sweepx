@@ -925,3 +925,25 @@ fn fresh_directory_remains_inspectable_during_scan_and_after_partial_completion(
     assert!(provider.trash(std::slice::from_ref(&key)).is_err());
     stop_adapter_fixture(&mut provider, &rows);
 }
+
+#[test]
+fn returning_from_items_defers_refresh_until_the_native_worker_releases_its_lease() {
+    let _gate = SESSION_FIXTURE_GATE.lock().unwrap();
+    let (_fixture, mut provider, rows) = adapter_fixture();
+    provider.admit(rows[0].clone()).unwrap();
+    let modal = provider.session.suspend_auto_refresh().unwrap();
+    let worker = modal.clone();
+    provider.refresh_after_items(&rows[0].key).unwrap();
+    drop(modal);
+    assert!(provider.poll().is_none());
+    assert!(provider.pending_item_refresh.is_some() && provider.mutation_busy());
+    drop(worker);
+    let events = complete(&mut provider);
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, JunkEvent::Started { revision: 2, .. }))
+    );
+    assert!(provider.pending_item_refresh.is_none());
+    stop_adapter_fixture(&mut provider, &rows);
+}

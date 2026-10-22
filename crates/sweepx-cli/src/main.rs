@@ -253,10 +253,10 @@ enum Commands {
         /// regular cleanup; --deep traverses the system disk with all supported rules.
         /// Space selects eligible items; d previews the selection, Enter confirms. Moves selected
         /// current, complete directory candidates to Trash after native identity revalidation.
-        /// Runs one scan and keeps the result open for review. r/R explicitly refreshes results.
+        /// Keeps results open for review. f updates recorded changes (full scan if unavailable); r/R rechecks selected/all locations. e shows coverage and retries one location. Known folders scan while optional tool queries run in the background.
         /// Junk traversal allows up to 4,194,304 directories while retaining bounded candidate
         /// evidence. Mount/permission gaps remain partial; macOS / includes verified System and Data.
-        /// Enter expands groups and nested candidates; i or Enter on a leaf opens read-only files.
+        /// Enter expands groups or opens npx/pnpm packages and versions; i opens read-only files. Package cleanup uses d to preview and Enter to confirm.
         /// Space in file details records up to 32 review paths;
         /// q returns to candidates, and the latest review list is printed on exit without deleting.
         /// Only freshly verified rows can be moved; c stops the current scan.

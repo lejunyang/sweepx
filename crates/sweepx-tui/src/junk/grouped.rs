@@ -375,7 +375,11 @@ impl JunkModel {
         }
     }
 
-    fn group_select_or_check<P: JunkProvider>(&mut self, keys: Vec<String>, provider: &mut P) {
+    fn group_select_or_check<P: JunkProvider + ?Sized>(
+        &mut self,
+        keys: Vec<String>,
+        provider: &mut P,
+    ) {
         if !self.busy {
             let actionable: Vec<_> = keys
                 .iter()
@@ -515,7 +519,7 @@ impl JunkModel {
 
     /// Returns true when the hierarchy consumed the key. Leaf inspection continues through the
     /// existing native-bound inspector; no group label is ever sent to a provider operation.
-    pub(super) fn grouped_key<P: JunkProvider>(
+    pub(super) fn grouped_key<P: JunkProvider + ?Sized>(
         &mut self,
         key: &mut crossterm::event::KeyEvent,
         provider: &mut P,
@@ -595,6 +599,10 @@ impl JunkModel {
                     .as_ref()
                     .filter(|candidate| {
                         key.code == KeyCode::Char('i')
+                            || self
+                                .rows
+                                .get(*candidate)
+                                .is_some_and(|row| row.row.opens_items())
                             || !view.parents.values().any(|parent| parent == *candidate)
                     })
                     .cloned();
@@ -826,7 +834,10 @@ pub(super) fn render(frame: &mut Frame<'_>, model: &JunkModel) {
             node.candidate
                 .as_ref()
                 .and_then(|key| model.rows.get(key))
-                .map_or_else(|| node.label.clone(), |row| row.row.path().into())
+                .map_or_else(
+                    || node.label.clone(),
+                    |row| format!("{}\n{}", row.row.path(), row.row.user_context(model.locale)),
+                )
         },
     );
     frame.render_widget(
@@ -839,7 +850,7 @@ pub(super) fn render(frame: &mut Frame<'_>, model: &JunkModel) {
         .block(Block::default().borders(Borders::ALL)),
         detail,
     );
-    frame.render_widget(Paragraph::new(model.text("↑↓ 移动 · Enter 展开 · Esc 返回 · Space 选组/项 · a 选当前层 · u 清空 · d 清理预览 · i 文件详情 · e 未检查原因 · r/R 刷新 · c 暂停 · q 返回/退出", "↑↓ Move · Enter Open · Esc Back · Space Select group/item · a Select level · u Clear · d Preview Trash · i Files · e Reasons · r/R Refresh · c Pause · q Back/quit")).wrap(Wrap { trim: true }).block(Block::default().borders(Borders::ALL)), help);
+    frame.render_widget(Paragraph::new(model.text("↑↓ 移动 · Enter 展开 · Esc 返回 · Space 选组/项 · a 选当前层 · u 清空 · d 清理预览 · i 文件详情 · e 扫描范围 · f 更新变化 · r/R 刷新 · c 暂停 · q 返回/退出", "↑↓ Move · Enter Open · Esc Back · Space Select group/item · a Select level · u Clear · d Preview Trash · i Files · e Coverage · f Update changes · r/R Refresh · c Pause · q Back/quit")).wrap(Wrap { trim: true }).block(Block::default().borders(Borders::ALL)), help);
     if let Some((_, keys)) = &view.preview {
         let size =
             crate::byte_value_label_with_unit(&total(model, keys, &view.parents), model.unit);
