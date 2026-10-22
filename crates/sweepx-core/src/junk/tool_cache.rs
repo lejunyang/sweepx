@@ -468,6 +468,8 @@ mod tests {
         let scanned = Scanner::new(
             HostPlatformScanner::new(),
             ScannerOptions {
+                // Tool-cache fixtures interpret native markers and totals, not previews.
+                accelerated_preview: false,
                 retain_directory_index: false,
                 ..ScannerOptions::default()
             },

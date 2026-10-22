@@ -22,14 +22,21 @@ fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
 
 fn capture(root: &Path) -> StoredJunkRoot {
     let service = JunkService::built_in().unwrap();
-    let scan = Scanner::new(HostPlatformScanner::new(), ScannerOptions::default())
-        .scan_classified(
-            &[ScanRoot::new(root.to_path_buf()).unwrap()],
-            &CancellationToken::new(),
-            &service,
-            None,
-        )
-        .unwrap();
+    let scan = Scanner::new(
+        HostPlatformScanner::new(),
+        ScannerOptions {
+            // History fixtures need live subtree evidence, not a whole-volume preview.
+            accelerated_preview: false,
+            ..ScannerOptions::default()
+        },
+    )
+    .scan_classified(
+        &[ScanRoot::new(root.to_path_buf()).unwrap()],
+        &CancellationToken::new(),
+        &service,
+        None,
+    )
+    .unwrap();
     let aggregates = scan
         .summary
         .aggregates
@@ -242,14 +249,21 @@ fn rule_platform_scope_replacement_and_linked_ancestors_refuse_history() {
 #[test]
 fn root_without_mount_evidence_cannot_publish_history() {
     let (_guard, root, _cache) = fixture();
-    let scan = Scanner::new(HostPlatformScanner::new(), ScannerOptions::default())
-        .scan_classified(
-            &[ScanRoot::new(root.clone()).unwrap()],
-            &CancellationToken::new(),
-            &JunkService::built_in().unwrap(),
-            None,
-        )
-        .unwrap();
+    let scan = Scanner::new(
+        HostPlatformScanner::new(),
+        ScannerOptions {
+            // History fixtures need live subtree evidence, not a whole-volume preview.
+            accelerated_preview: false,
+            ..ScannerOptions::default()
+        },
+    )
+    .scan_classified(
+        &[ScanRoot::new(root.clone()).unwrap()],
+        &CancellationToken::new(),
+        &JunkService::built_in().unwrap(),
+        None,
+    )
+    .unwrap();
     let mut source = scan.observed_roots[0].clone();
     let unknown =
         sweepx_model::IdentityEvidence::unknown(sweepx_model::ReasonCode::UnknownIdentity);

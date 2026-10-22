@@ -164,12 +164,19 @@ fn fixture() -> (tempfile::TempDir, std::path::PathBuf, JunkCandidate) {
     std::fs::create_dir(root.join(".dart_tool")).unwrap();
     std::fs::write(root.join("pubspec.yaml"), "name: example\n").unwrap();
     std::fs::write(root.join(".dart_tool/package_config.json"), PUB).unwrap();
-    let summary = Scanner::new(HostPlatformScanner::new(), ScannerOptions::default())
-        .scan(
-            &[ScanRoot::new(root.clone()).unwrap()],
-            &CancellationToken::new(),
-        )
-        .unwrap();
+    let summary = Scanner::new(
+        HostPlatformScanner::new(),
+        ScannerOptions {
+            // Format fixtures consume native entries and markers, never preview events.
+            accelerated_preview: false,
+            ..ScannerOptions::default()
+        },
+    )
+    .scan(
+        &[ScanRoot::new(root.clone()).unwrap()],
+        &CancellationToken::new(),
+    )
+    .unwrap();
     let service = JunkService::built_in().unwrap();
     let entry = summary
         .entries
@@ -869,12 +876,19 @@ fn svelte_fixture() -> (tempfile::TempDir, std::path::PathBuf, JunkCandidate) {
     std::fs::write(root.join("svelte.config.js"), "export default {}\n").unwrap();
     std::fs::write(root.join(".svelte-kit/tsconfig.json"), SVELTEKIT2_CONFIG).unwrap();
     std::fs::write(root.join(".svelte-kit/ambient.d.ts"), SVELTEKIT_AMBIENT).unwrap();
-    let summary = Scanner::new(HostPlatformScanner::new(), ScannerOptions::default())
-        .scan(
-            &[ScanRoot::new(root.clone()).unwrap()],
-            &CancellationToken::new(),
-        )
-        .unwrap();
+    let summary = Scanner::new(
+        HostPlatformScanner::new(),
+        ScannerOptions {
+            // Format fixtures consume native entries and markers, never preview events.
+            accelerated_preview: false,
+            ..ScannerOptions::default()
+        },
+    )
+    .scan(
+        &[ScanRoot::new(root.clone()).unwrap()],
+        &CancellationToken::new(),
+    )
+    .unwrap();
     let service = JunkService::built_in().unwrap();
     let entry = summary
         .entries

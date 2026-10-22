@@ -1902,7 +1902,11 @@ mod tests {
         let scan = |path: PathBuf| {
             let scanned = sweepx_scanner::Scanner::new(
                 sweepx_scanner::HostPlatformScanner::new(),
-                sweepx_scanner::ScannerOptions::default(),
+                sweepx_scanner::ScannerOptions {
+                    // This fixture asserts native anchor scope, not provisional volume totals.
+                    accelerated_preview: false,
+                    ..sweepx_scanner::ScannerOptions::default()
+                },
             )
             .scan_classified(
                 &[sweepx_platform::ScanRoot::new(path).unwrap()],

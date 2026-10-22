@@ -173,7 +173,7 @@ fn fixture(live_lengths: bool) -> Fixture {
                 .collect(),
         );
     }
-    let mut scanner = Scanner::new(MountedPlatform(platform), ScannerOptions::default());
+    let mut scanner = Scanner::new(MountedPlatform(platform), fixture_scanner_options());
     scanner.scope_override = Some(VolumeScope {
         data: Some(data_metadata),
         aliases: [(alias.clone(), logical_metadata)].into_iter().collect(),

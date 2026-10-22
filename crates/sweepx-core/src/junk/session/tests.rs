@@ -97,6 +97,8 @@ fn native_closed_candidate_reaches_session_mailbox_before_unrelated_subtree() {
     Scanner::new(
         HostPlatformScanner::new(),
         ScannerOptions {
+            // Observe candidate ordering from the native traversal, not a volume preview.
+            accelerated_preview: false,
             max_workers: 1,
             ..Default::default()
         },

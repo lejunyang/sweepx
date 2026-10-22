@@ -3792,6 +3792,15 @@ mod tests {
         Scanner::new(HostPlatformScanner::new(), options)
     }
 
+    /// Traversal fixtures assert native facts, scheduling and classification, not volume previews.
+    /// Even a fake C:\root backend would otherwise query the real C: volume on Windows.
+    fn fixture_scanner_options() -> ScannerOptions {
+        ScannerOptions {
+            accelerated_preview: false,
+            ..ScannerOptions::default()
+        }
+    }
+
     fn test_native_name(name: &str) -> NativeName {
         #[cfg(unix)]
         {
@@ -3884,7 +3893,7 @@ mod tests {
             serial,
             ScannerOptions {
                 max_workers: 1,
-                ..ScannerOptions::default()
+                ..fixture_scanner_options()
             },
         )
         .scan(
@@ -3902,7 +3911,7 @@ mod tests {
             parallel,
             ScannerOptions {
                 max_workers: 4,
-                ..ScannerOptions::default()
+                ..fixture_scanner_options()
             },
         )
         .scan(
@@ -3926,7 +3935,7 @@ mod tests {
                     max_frontier_entries: 256,
                     ..ScanResourceLimits::default()
                 },
-                ..ScannerOptions::default()
+                ..fixture_scanner_options()
             },
         )
         .scan(
@@ -3956,7 +3965,7 @@ mod tests {
                         max_frontier_entries: 3,
                         ..ScanResourceLimits::default()
                     },
-                    ..ScannerOptions::default()
+                    ..fixture_scanner_options()
                 },
             )
             .scan(&[ScanRoot::new(root).unwrap()], &CancellationToken::new())
@@ -3993,7 +4002,7 @@ mod tests {
             ScannerOptions {
                 scan_id: ScanId::new("stable-scheduler"),
                 max_workers: 2,
-                ..ScannerOptions::default()
+                ..fixture_scanner_options()
             },
         )
         .scan(
@@ -4056,7 +4065,7 @@ mod tests {
                 platform,
                 ScannerOptions {
                     max_workers: 4,
-                    ..ScannerOptions::default()
+                    ..fixture_scanner_options()
                 },
             )
             .scan(&[ScanRoot::new(root).unwrap()], &CancellationToken::new());
@@ -4092,7 +4101,7 @@ mod tests {
             platform,
             ScannerOptions {
                 max_workers,
-                ..ScannerOptions::default()
+                ..fixture_scanner_options()
             },
         )
         .scan(&[ScanRoot::new(root.clone()).unwrap()], &cancel)
@@ -4172,7 +4181,7 @@ mod tests {
                     max_frontier_entries: frontier_permits,
                     ..ScanResourceLimits::default()
                 },
-                ..ScannerOptions::default()
+                ..fixture_scanner_options()
             },
         )
         .scan(
@@ -4240,7 +4249,7 @@ mod tests {
                     max_retained_entries: retained_entries,
                     ..ScanResourceLimits::default()
                 },
-                ..ScannerOptions::default()
+                ..fixture_scanner_options()
             },
         )
         .scan(
@@ -4318,7 +4327,7 @@ mod tests {
                     max_retained_entries: retained_entries,
                     ..ScanResourceLimits::default()
                 },
-                ..ScannerOptions::default()
+                ..fixture_scanner_options()
             },
         )
         .scan(&[ScanRoot::new(root).unwrap()], &CancellationToken::new())
@@ -4371,7 +4380,7 @@ mod tests {
             ScannerOptions {
                 scan_id: ScanId::new("classified"),
                 max_workers: 4,
-                ..ScannerOptions::default()
+                ..fixture_scanner_options()
             },
         )
         .scan_classified(
@@ -4537,7 +4546,7 @@ mod tests {
                         max_directory_entries: directory_limit,
                         ..Default::default()
                     },
-                    ..Default::default()
+                    ..fixture_scanner_options()
                 },
             )
             .scan_classified_with_observer(
@@ -4582,7 +4591,7 @@ mod tests {
     fn live_classified_observations_preserve_results_and_final_candidates() {
         let platform = NestedFanOutPlatform::new(8);
         let roots = [ScanRoot::new(platform.root.clone()).unwrap()];
-        let scanner = Scanner::new(platform, ScannerOptions::default());
+        let scanner = Scanner::new(platform, fixture_scanner_options());
         let ordinary = scanner
             .scan_classified(&roots, &CancellationToken::new(), &ObservedBranches, None)
             .unwrap();
@@ -4637,7 +4646,7 @@ mod tests {
             platform,
             ScannerOptions {
                 max_workers: 1,
-                ..ScannerOptions::default()
+                ..fixture_scanner_options()
             },
         )
         .scan_classified_with_observer(&roots, &cancel, &ObservedBranches, None, &mut observed)
@@ -4670,7 +4679,7 @@ mod tests {
     fn progress_log_omissions_preserve_classified_results_and_live_observations() {
         let platform = NestedFanOutPlatform::new(8);
         let roots = [ScanRoot::new(platform.root.clone()).unwrap()];
-        let ordinary = Scanner::new(platform, ScannerOptions::default())
+        let ordinary = Scanner::new(platform, fixture_scanner_options())
             .scan_classified(&roots, &CancellationToken::new(), &ObservedBranches, None)
             .unwrap();
         for cap in [0, 1, 4] {
@@ -4682,7 +4691,7 @@ mod tests {
                         max_progress_events: cap,
                         ..ScanResourceLimits::default()
                     },
-                    ..ScannerOptions::default()
+                    ..fixture_scanner_options()
                 },
             )
             .scan_classified_with_observer(
@@ -4772,7 +4781,7 @@ mod tests {
                     max_progress_events: 0,
                     ..ScanResourceLimits::default()
                 },
-                ..ScannerOptions::default()
+                ..fixture_scanner_options()
             },
         )
         .scan(
@@ -4802,7 +4811,7 @@ mod tests {
                     max_retained_boundaries: 0,
                     ..ScanResourceLimits::default()
                 },
-                ..ScannerOptions::default()
+                ..fixture_scanner_options()
             },
         )
         .scan_classified_with_observer(
@@ -4846,7 +4855,7 @@ mod tests {
             platform,
             ScannerOptions {
                 max_workers: 1,
-                ..ScannerOptions::default()
+                ..fixture_scanner_options()
             },
         )
         .scan_classified_with_observer(
@@ -4901,7 +4910,7 @@ mod tests {
                     max_classified_metadata_bytes: 0,
                     ..ScanResourceLimits::default()
                 },
-                ..ScannerOptions::default()
+                ..fixture_scanner_options()
             },
         )
         .scan_classified(
@@ -4939,7 +4948,7 @@ mod tests {
     fn required_evidence_evicts_optional_root_observations_and_releases_their_vector() {
         let platform = NestedFanOutPlatform::new(0);
         let root = platform.root.clone();
-        let source = Scanner::new(platform, ScannerOptions::default())
+        let source = Scanner::new(platform, fixture_scanner_options())
             .scan(
                 &[ScanRoot::new(root.clone()).unwrap()],
                 &CancellationToken::new(),
@@ -5053,7 +5062,7 @@ mod tests {
                     max_retained_boundaries: 2,
                     ..ScanResourceLimits::default()
                 },
-                ..ScannerOptions::default()
+                ..fixture_scanner_options()
             },
         )
         .scan(
@@ -5143,7 +5152,7 @@ mod tests {
         fs::write(sub.join("beta.txt"), b"123456").unwrap();
         std::os::unix::fs::symlink(&alpha, root.join("alpha-link")).unwrap();
 
-        let scanner = linux_scanner(ScannerOptions::default());
+        let scanner = linux_scanner(fixture_scanner_options());
         let result = scanner
             .scan(
                 &[ScanRoot::new(root.clone()).unwrap()],
@@ -5292,7 +5301,7 @@ mod tests {
         fs::create_dir(&root).unwrap();
         fs::create_dir(root.join("child")).unwrap();
 
-        let scanner = linux_scanner(ScannerOptions::default());
+        let scanner = linux_scanner(fixture_scanner_options());
         let cancel = CancellationToken::new();
         cancel.cancel();
         let result = scanner
@@ -5307,7 +5316,7 @@ mod tests {
         );
         let root_aggregate = result.aggregates.first().unwrap();
         let cancelled_identity = root_aggregate.scan_entry_id().unwrap();
-        assert!(cancelled_identity.belongs_to(&ScannerOptions::default().scan_id));
+        assert!(cancelled_identity.belongs_to(&fixture_scanner_options().scan_id));
         assert_ne!(
             root_aggregate.directory_identity,
             root.display().to_string()
@@ -5328,7 +5337,7 @@ mod tests {
         let cancel = CancellationToken::new();
         cancel.cancel();
 
-        let result = linux_scanner(ScannerOptions::default())
+        let result = linux_scanner(fixture_scanner_options())
             .scan(
                 &[
                     ScanRoot::new(first.clone()).unwrap(),
@@ -5363,7 +5372,7 @@ mod tests {
         fs::create_dir(&root).unwrap();
         fs::write(root.join("child"), b"payload").unwrap();
 
-        let result = linux_scanner(ScannerOptions::default())
+        let result = linux_scanner(fixture_scanner_options())
             .scan_roots_only(
                 &[ScanRoot::new(root.clone()).unwrap()],
                 &CancellationToken::new(),
@@ -5405,7 +5414,7 @@ mod tests {
                 max_progress_events: 16_384,
                 ..ScanResourceLimits::default()
             },
-            ..ScannerOptions::default()
+            ..fixture_scanner_options()
         });
         let result = scanner
             .scan(&[ScanRoot::new(root).unwrap()], &CancellationToken::new())
@@ -5441,7 +5450,7 @@ mod tests {
                     max_frontier_entries,
                     ..ScanResourceLimits::default()
                 },
-                ..ScannerOptions::default()
+                ..fixture_scanner_options()
             },
         )
         .scan(
@@ -5496,7 +5505,7 @@ mod tests {
                     max_frontier_entries: 1,
                     ..ScanResourceLimits::default()
                 },
-                ..ScannerOptions::default()
+                ..fixture_scanner_options()
             },
         )
         .scan(&[ScanRoot::new(root).unwrap()], &CancellationToken::new())
@@ -5537,7 +5546,7 @@ mod tests {
                     max_frontier_entries: 0,
                     ..ScanResourceLimits::default()
                 },
-                ..ScannerOptions::default()
+                ..fixture_scanner_options()
             },
         )
         .scan(&[ScanRoot::new(root).unwrap()], &CancellationToken::new());
@@ -5608,7 +5617,7 @@ mod tests {
                     max_frontier_entries: 1,
                     ..ScanResourceLimits::default()
                 },
-                ..ScannerOptions::default()
+                ..fixture_scanner_options()
             },
         );
 
@@ -5653,7 +5662,7 @@ mod tests {
         fs::write(&original, b"1234").unwrap();
         fs::hard_link(&original, right.join("shared.txt")).unwrap();
 
-        let scanner = linux_scanner(ScannerOptions::default());
+        let scanner = linux_scanner(fixture_scanner_options());
         let result = scanner
             .scan(
                 &[ScanRoot::new(root.clone()).unwrap()],
@@ -5744,7 +5753,7 @@ mod tests {
                     ),
                 ]),
             ),
-            ScannerOptions::default(),
+            fixture_scanner_options(),
         );
 
         let result = scanner
@@ -5798,7 +5807,7 @@ mod tests {
                 max_progress_events: 16_384,
                 ..ScanResourceLimits::default()
             },
-            ..ScannerOptions::default()
+            ..fixture_scanner_options()
         });
         let result = scanner
             .scan(&[ScanRoot::new(root).unwrap()], &CancellationToken::new())
@@ -5835,7 +5844,7 @@ mod tests {
                 max_progress_events: 8,
                 ..ScanResourceLimits::default()
             },
-            ..ScannerOptions::default()
+            ..fixture_scanner_options()
         });
         let result = scanner
             .scan(
@@ -5899,7 +5908,7 @@ mod tests {
                     }),
                 )]),
             ),
-            ScannerOptions::default(),
+            fixture_scanner_options(),
         );
 
         let result = scanner
@@ -5953,7 +5962,7 @@ mod tests {
                 vec![test_entry(&root, "file")],
                 BTreeMap::from([(file, WalkEntry::File(metadata))]),
             ),
-            ScannerOptions::default(),
+            fixture_scanner_options(),
         );
         let mut sink = CollectingScanSink::new(ScanResourceLimits::default());
         scanner
@@ -6034,7 +6043,7 @@ mod tests {
                     max_directory_batch_entries: 2,
                     ..ScanResourceLimits::default()
                 },
-                ..ScannerOptions::default()
+                ..fixture_scanner_options()
             },
         );
         let mut sink = CollectingScanSink::new(ScanResourceLimits::default());
@@ -6202,7 +6211,7 @@ mod tests {
                     }),
                 )]),
             ),
-            ScannerOptions::default(),
+            fixture_scanner_options(),
         );
 
         let result = scanner
@@ -6270,7 +6279,7 @@ mod tests {
             ),
             ScannerOptions {
                 scan_id: ScanId::new("identity-test"),
-                ..ScannerOptions::default()
+                ..fixture_scanner_options()
             },
         );
 
@@ -6337,7 +6346,7 @@ mod tests {
                 vec![test_entry(&root, "file")],
                 BTreeMap::from([(child.clone(), WalkEntry::File(metadata))]),
             ),
-            ScannerOptions::default(),
+            fixture_scanner_options(),
         );
 
         let result = scanner
@@ -6372,7 +6381,7 @@ mod tests {
             },
             ScannerOptions {
                 scan_id: ScanId::new("multi-root"),
-                ..ScannerOptions::default()
+                ..fixture_scanner_options()
             },
         );
 
@@ -6425,7 +6434,7 @@ mod tests {
             },
             ScannerOptions {
                 scan_id: ScanId::new("denied-root"),
-                ..ScannerOptions::default()
+                ..fixture_scanner_options()
             },
         );
         let roots = [
@@ -6506,7 +6515,7 @@ mod tests {
                 )]),
             )
             .with_inspect_calls(inspect_calls.clone()),
-            ScannerOptions::default(),
+            fixture_scanner_options(),
         );
 
         let error = scanner
@@ -6543,7 +6552,7 @@ mod tests {
                 )]),
             )
             .with_inspect_calls(inspect_calls.clone()),
-            ScannerOptions::default(),
+            fixture_scanner_options(),
         );
 
         let error = scanner
@@ -6575,7 +6584,7 @@ mod tests {
                     WalkEntry::File(test_metadata(outside, "evil", EntryKind::File, Some(1))),
                 )]),
             ),
-            ScannerOptions::default(),
+            fixture_scanner_options(),
         );
 
         let error = scanner
@@ -6643,7 +6652,7 @@ mod tests {
         );
         let replacement_flag = platform.replace_child_path_after_open.clone();
         replacement_flag.store(true, Ordering::SeqCst);
-        let scanner = Scanner::new(platform, ScannerOptions::default());
+        let scanner = Scanner::new(platform, fixture_scanner_options());
 
         let result = scanner
             .scan(&[ScanRoot::new(root).unwrap()], &CancellationToken::new())
@@ -6683,7 +6692,7 @@ mod tests {
                     }),
                 )]),
             ),
-            ScannerOptions::default(),
+            fixture_scanner_options(),
         );
 
         let result = scanner
@@ -6722,7 +6731,7 @@ mod tests {
             FakePlatform::new(root.clone(), Vec::new(), BTreeMap::new()).with_enumeration_failure(
                 PlatformError::ResourceLimit("adversarial byte budget".to_string()),
             ),
-            ScannerOptions::default(),
+            fixture_scanner_options(),
         );
 
         let result = scanner
@@ -6753,7 +6762,7 @@ mod tests {
                     io_kind: Some(std::io::ErrorKind::PermissionDenied),
                 },
             ),
-            ScannerOptions::default(),
+            fixture_scanner_options(),
         );
 
         let result = scanner
@@ -6801,7 +6810,7 @@ mod tests {
                 BTreeMap::new(),
             )
             .with_cancel_on_inspect(),
-            ScannerOptions::default(),
+            fixture_scanner_options(),
         );
 
         let result = scanner
@@ -6847,7 +6856,7 @@ mod tests {
             .collect();
         let scanner = Scanner::new(
             FakePlatform::new(root.clone(), entries, walk_entries).with_batch_size(1),
-            ScannerOptions::default(),
+            fixture_scanner_options(),
         );
 
         let result = scanner
@@ -6936,7 +6945,7 @@ mod tests {
                     max_retained_aggregates: 2,
                     ..ScanResourceLimits::default()
                 },
-                ..ScannerOptions::default()
+                ..fixture_scanner_options()
             },
         );
 
@@ -6988,7 +6997,7 @@ mod tests {
                     max_directory_batch_entries: 1,
                     ..ScanResourceLimits::default()
                 },
-                ..ScannerOptions::default()
+                ..fixture_scanner_options()
             },
         );
 

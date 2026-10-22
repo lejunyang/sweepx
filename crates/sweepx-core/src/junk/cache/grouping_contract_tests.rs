@@ -44,18 +44,25 @@ impl NativeFixture {
     }
 
     fn scan(&self) -> ClassifiedScan {
-        Scanner::new(HostPlatformScanner::new(), ScannerOptions::default())
-            .scan_classified(
-                &self
-                    .roots
-                    .iter()
-                    .map(|root| ScanRoot::new(root.clone()).unwrap())
-                    .collect::<Vec<_>>(),
-                &CancellationToken::new(),
-                &JunkService::built_in().unwrap(),
-                None,
-            )
-            .unwrap()
+        Scanner::new(
+            HostPlatformScanner::new(),
+            ScannerOptions {
+                // Native attribution facts seed this fixture, not whole-volume previews.
+                accelerated_preview: false,
+                ..ScannerOptions::default()
+            },
+        )
+        .scan_classified(
+            &self
+                .roots
+                .iter()
+                .map(|root| ScanRoot::new(root.clone()).unwrap())
+                .collect::<Vec<_>>(),
+            &CancellationToken::new(),
+            &JunkService::built_in().unwrap(),
+            None,
+        )
+        .unwrap()
     }
 
     fn expected_candidates(&self) -> BTreeMap<usize, BTreeSet<PathBuf>> {
