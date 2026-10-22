@@ -23,6 +23,7 @@ use sweepx_platform::{
 use thiserror::Error;
 
 mod file_content;
+mod lookup;
 use crate::volume_scope::{self, VolumeScopeError};
 pub use file_content::{FileContentError, FileContentRequest};
 #[cfg(all(
@@ -269,7 +270,8 @@ where
         self
     }
 
-    /// Observes one fixed native child without enumerating siblings or following links.
+    /// Observes one fixed native child without following links. Backends that bind inspection
+    /// to enumeration use bounded sibling batches to obtain the exact native child token.
     /// Revalidates the captured root and entire parent lineage within the shared volume scope.
     /// Returned metadata is time-local evidence; callers must revalidate again before mutation.
     pub fn observe_child(
@@ -280,12 +282,13 @@ where
         cancel: &CancellationToken,
     ) -> Result<ScannedEntry, DetailRescanError> {
         self.validate_request(&request, ids)?;
-        let reopened = self.reopen_target(&request, cancel)?;
-        let child = DirectoryEntryRecord::from_parent_and_name(
+        let mut reopened = self.reopen_target(&request, cancel)?;
+        let child = self.lookup_child(
+            &mut reopened.target_handle,
             &reopened.target_metadata.path,
-            name.clone(),
-        )
-        .map_err(|_| DetailRescanError::InvalidRequest)?;
+            name,
+            cancel,
+        )?;
         let walked = inspect_detail_child(
             &self.platform,
             &reopened.target_handle,
@@ -372,7 +375,8 @@ where
         })
     }
 
-    /// Reopens and checks the captured root and directory without enumerating their children.
+    /// Reopens and checks the captured root and directory without walking the target's children.
+    /// Backends may require bounded parent enumeration to revalidate the native lineage.
     ///
     /// Uses the same no-follow, object/filesystem/mount and relative-component checks as detail
     /// rescans. Directory fingerprints may change when children change; identity must still
@@ -683,11 +687,12 @@ where
             .map(|component| (component, false))
             .chain(std::iter::once((&request.directory_locator.entry, true)));
         for (expected, is_target) in lineage {
-            let child = DirectoryEntryRecord::from_parent_and_name(
+            let child = self.lookup_child(
+                &mut current_handle,
                 &current_path,
-                expected.native_basename.clone(),
-            )
-            .map_err(|_| DetailRescanError::InvalidRequest)?;
+                &expected.native_basename,
+                cancel,
+            )?;
             let walked = inspect_detail_child(
                 &self.platform,
                 &current_handle,

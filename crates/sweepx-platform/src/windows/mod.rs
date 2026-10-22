@@ -1632,6 +1632,10 @@ mod backend {
             "windows"
         }
 
+        fn child_inspection_requires_enumeration(&self) -> bool {
+            true
+        }
+
         fn admit_root(
             &self,
             root: &ScanRoot,

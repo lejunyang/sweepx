@@ -105,12 +105,13 @@ impl<P: PlatformScanner> DetailRescanner<P> {
         };
         let ids = DetailEntryIdAllocator::new(entry.scan_id.clone())?;
         self.validate_request(&directory_request, &ids)?;
-        let reopened = self.reopen_target(&directory_request, cancel)?;
-        let child = DirectoryEntryRecord::from_parent_and_name(
+        let mut reopened = self.reopen_target(&directory_request, cancel)?;
+        let child = self.lookup_child(
+            &mut reopened.target_handle,
             &reopened.target_metadata.path,
-            entry.native_basename.clone(),
-        )
-        .map_err(|_| invalid())?;
+            &entry.native_basename,
+            cancel,
+        )?;
         let metadata = match inspect_bound_child_with_mount_identity(
             &self.platform,
             &reopened.target_handle,

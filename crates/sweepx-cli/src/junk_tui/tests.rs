@@ -796,6 +796,26 @@ fn bridge_refreshes_current_native_evidence_and_refuses_replaced_object_before_t
     assert!(
         matches!(events.first().unwrap(), JunkEvent::Started { revision: 2, keys: Some(keys) } if keys == std::slice::from_ref(&key))
     );
+    assert!(
+        matches!(
+            events.last(),
+            Some(JunkEvent::Completed {
+                outcome: JunkOutcome::Complete,
+                replaced: true,
+                ..
+            })
+        ),
+        "selected refresh failed: {:?}",
+        events
+            .iter()
+            .filter_map(|event| match event {
+                JunkEvent::Error { message, .. } => Some(message.clone()),
+                JunkEvent::Issue { detail, .. } => Some(detail.clone()),
+                JunkEvent::Completed { outcome, .. } => Some(format!("{outcome:?}")),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    );
     assert_eq!(
         provider.rows[&key]
             .row

@@ -315,6 +315,10 @@ impl PlatformScanner for CountingBackend {
     fn platform_name(&self) -> &'static str {
         self.inner.platform_name()
     }
+    fn child_inspection_requires_enumeration(&self) -> bool {
+        self.inner.child_inspection_requires_enumeration()
+    }
+
     fn admit_root(
         &self,
         root: &sweepx_platform::ScanRoot,

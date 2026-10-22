@@ -456,6 +456,53 @@ fn connect(vfs: &Registered) -> Connection {
 }
 
 #[test]
+fn exclusive_wal_reopen_requires_locking_mode_before_schema_pragmas() {
+    let (_temp, storage, file) = fixture();
+    let vfs = register(storage.clone(), file).unwrap();
+    let connection = connect(&vfs);
+    connection.execute_batch("PRAGMA locking_mode=EXCLUSIVE; PRAGMA journal_mode=WAL; CREATE TABLE reopen_oracle(value INTEGER); INSERT INTO reopen_oracle VALUES(42);").unwrap();
+    drop(connection);
+    drop(vfs);
+
+    let reopen = || {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(storage.root.join("state.db"))
+            .unwrap();
+        register(storage.clone(), file).unwrap()
+    };
+    let vfs = reopen();
+    let connection = connect(&vfs);
+    // Reading persisted WAL-mode metadata in normal locking mode requires a shared-memory
+    // implementation, which the deliberately exclusive VFS does not provide.
+    assert_eq!(
+        connection
+            .execute_batch("PRAGMA synchronous=FULL;")
+            .unwrap_err()
+            .sqlite_error_code(),
+        Some(rusqlite::ErrorCode::CannotOpen)
+    );
+    drop(connection);
+    drop(vfs);
+
+    let vfs = reopen();
+    let connection = connect(&vfs);
+    connection
+        .execute_batch(
+            "PRAGMA locking_mode=EXCLUSIVE; PRAGMA synchronous=FULL; PRAGMA journal_mode=WAL;",
+        )
+        .unwrap();
+    assert_eq!(
+        connection
+            .query_row("SELECT value FROM reopen_oracle", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        42
+    );
+}
+
+#[test]
 fn sqlite_wal_uses_retained_descriptor_and_preserves_default_vfs() {
     let (_temp, storage, file) = fixture();
     let original = file.metadata().unwrap();

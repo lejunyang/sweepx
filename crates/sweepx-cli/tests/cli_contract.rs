@@ -1476,7 +1476,7 @@ fn experimental_cargo_detect_scans_with_compatible_builtin() {
     assert_eq!(json["summary"]["experimental"], true);
     assert_eq!(json["summary"]["liveOnly"], true);
     assert_eq!(json["summary"]["matchCount"], "0");
-    assert_eq!(json["summary"]["hintCount"], "0");
+    assert_eq!(json["summary"]["hintCount"], "1");
     assert_eq!(json["data"]["readOnly"], true);
     assert_eq!(json["data"]["candidateAllowed"], false);
     assert_eq!(json["data"]["planAllowed"], false);
@@ -1484,9 +1484,19 @@ fn experimental_cargo_detect_scans_with_compatible_builtin() {
     assert_eq!(json["data"]["executionAllowed"], false);
     assert_eq!(json["data"]["builtinManifestCompatible"], true);
     assert_eq!(json["data"]["matchCount"], "0");
-    assert_eq!(json["data"]["hintCount"], "0");
+    assert_eq!(json["data"]["hintCount"], "1");
     assert_eq!(json["data"]["matches"], Value::Array(Vec::new()));
-    assert_eq!(json["data"]["hints"], Value::Array(Vec::new()));
+    // An unverified target is visible as a report-only hint, never a cleanup match.
+    let hints = json["data"]["hints"].as_array().unwrap();
+    assert_eq!(hints.len(), 1);
+    assert_eq!(
+        hints[0]["displayPath"],
+        root.join("target").display().to_string()
+    );
+    assert_eq!(hints[0]["disposition"], "report_only");
+    assert_eq!(hints[0]["executable"], false);
+    assert_eq!(hints[0]["ruleEvaluation"]["reportOnly"], true);
+    assert!(!hints[0]["reasonCodes"].as_array().unwrap().is_empty());
     assert!(output.stderr.is_empty());
 }
 
@@ -2672,14 +2682,15 @@ fn junk_system_uses_only_the_explicit_xdg_cache_root_and_reports_verification() 
     let home = fixture.path().join("home");
     let empty_path = fixture.path().join("empty-path");
     fs::create_dir_all(cache.join("example")).unwrap();
-    fs::create_dir(&home).unwrap();
+    fs::create_dir_all(home.join(".cache/decoy")).unwrap();
+    fs::write(home.join(".cache/decoy/blob"), b"not the explicit cache").unwrap();
     fs::create_dir(&empty_path).unwrap();
     fs::write(cache.join("example/blob"), b"cache").unwrap();
 
     let mut cmd = cli_command();
-    // `junk --system` intentionally discovers caches reported by installed tools in addition to
-    // XDG. Isolate both HOME and PATH so a developer's real npm/pnpm/pip installation cannot add
-    // unrelated candidates to this XDG-specific contract test.
+    // Select the XDG rule explicitly: system-wide manager discovery can find npm outside
+    // PATH and its read-only config probe may create an unrelated ~/.npm/_logs candidate.
+    // The decoy default cache independently proves that XDG_CACHE_HOME overrides HOME.
     cmd.env("HOME", &home)
         .env("PATH", &empty_path)
         .env("XDG_CACHE_HOME", &cache)
@@ -2687,7 +2698,8 @@ fn junk_system_uses_only_the_explicit_xdg_cache_root_and_reports_verification() 
         .arg("--format")
         .arg("json")
         .arg("junk")
-        .arg("--system");
+        .arg("--system")
+        .args(["--rule", "linux.xdg-user-cache"]);
     let output = cmd.assert().get_output().clone();
     if output.stdout.is_empty() {
         panic!(
@@ -3467,7 +3479,8 @@ fn scan_defaults_to_a_human_readable_file_table() {
     let text = String::from_utf8(output).unwrap();
 
     assert!(text.contains("Path"));
-    assert!(text.contains("Reclaimable"));
+    assert!(text.contains("Size"));
+    assert!(!text.contains("Reclaimable"));
     assert!(text.contains("visible.txt"));
     assert!(text.contains("Summary: 1 roots, 1 entries"));
     assert!(text.contains("0 boundaries, 0 errors"));

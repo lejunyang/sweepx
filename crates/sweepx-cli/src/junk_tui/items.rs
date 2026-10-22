@@ -408,11 +408,7 @@ mod tests {
             Locale::ZhCn,
         );
         assert!(!prepared.limited);
-        assert!(
-            prepared.inventory.complete,
-            "{:?}",
-            prepared.inventory.issues
-        );
+        assert!(prepared.inventory.complete, "{:?}", prepared.inventory);
         assert_eq!(prepared.rows.len(), 2);
         assert!(
             prepared

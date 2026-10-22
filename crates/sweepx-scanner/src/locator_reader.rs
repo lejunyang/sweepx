@@ -233,7 +233,8 @@ pub enum LocatorDirectoryLookupFailure {
     /// The fixed-name no-follow lookup found a non-directory ordinary object.
     #[error("resolved object is not a directory")]
     NotDirectory,
-    /// One fixed-name no-follow lookup returned typed NotFound; this is not atomic absence.
+    /// A no-follow lookup or complete bounded enumeration did not find the native name.
+    /// This is a time-local observation, not atomic absence.
     #[error("directory name was not found during lookup")]
     NotFoundDuringLookup,
 }
@@ -727,11 +728,26 @@ impl<P: PlatformScanner> LocatorReader<P> {
             .reopen_captured_directory(captured, cancel)
             .map_err(map_capture_attempt)?;
         let mut budget = BatchBudget::default();
-        if nested_cargo {
-            // Cargo requests one fixed name. Inspect it relative to the captured parent rather
-            // than enumerating every unrelated child (e.g. a huge system temporary directory).
-            // A typed NotFound is only a time-local lookup result. Existing objects still need
-            // complete native directory/mount evidence, and member reads remain bounded.
+        if nested_cargo && self.platform.child_inspection_requires_enumeration() {
+            // Keep Windows' current-batch binding and reject Cargo case aliases, including an
+            // alias in a later batch. Exact-name absence must not hide a tool-visible .CARGO.
+            directory = match self.find_cargo_directory(&mut directory, cancel, &mut budget) {
+                Ok(Some(cargo)) => cargo,
+                Ok(None) => {
+                    return Ok(CargoConfigPairObservation {
+                        consistency: CargoConfigPairConsistency::NonAtomic,
+                        config: CargoConfigMemberObservation::AbsentDuringEnumeration,
+                        config_toml: CargoConfigMemberObservation::AbsentDuringEnumeration,
+                        total_bytes: 0,
+                    });
+                }
+                Err(ReadAttempt::Failed(failure)) => return Ok(pair_failed(failure)),
+                Err(ReadAttempt::Absent) => {
+                    return Ok(pair_failed(LocatorReadFailure::IdentityMismatch));
+                }
+            };
+        } else if nested_cargo {
+            // Backends that allow direct inspection need not enumerate unrelated siblings.
             let child = DirectoryEntryRecord::from_parent_and_name(
                 &directory.path,
                 fixed_native_name(".cargo"),
@@ -1002,11 +1018,17 @@ impl<P: PlatformScanner> LocatorReader<P> {
         {
             return Err(LocatorReadFailure::ResourceLimit.into());
         }
-        let directory = self
+        let mut directory = self
             .reopen_captured_directory(captured, cancel)
             .map_err(map_directory_attempt)?;
-        let child = DirectoryEntryRecord::from_parent_and_name(&directory.path, name.clone())
-            .map_err(|_| LocatorReadFailure::InvalidBinding)?;
+        let child = if self.platform.child_inspection_requires_enumeration() {
+            self.find_child(&mut directory, name, cancel, &mut BatchBudget::default())
+                .map_err(map_directory_attempt)?
+                .ok_or(LocatorDirectoryLookupFailure::NotFoundDuringLookup)?
+        } else {
+            DirectoryEntryRecord::from_parent_and_name(&directory.path, name.clone())
+                .map_err(|_| LocatorReadFailure::InvalidBinding)?
+        };
         let walked = inspect_bound_child(
             &self.platform,
             &directory.handle,
@@ -2097,6 +2119,9 @@ impl<P: PlatformScanner> LocatorReader<P> {
             .platform
             .enumerate_children(&mut directory.handle, cancel, limits)
             .map_err(map_platform_failure)?;
+        if cancel.is_cancelled() {
+            return Err(LocatorReadFailure::Cancelled);
+        }
         if batch.entries.is_empty() && !batch.end_of_directory {
             return Err(LocatorReadFailure::Unavailable);
         }
@@ -2657,6 +2682,9 @@ impl<P: PlatformScanner> LocatorReader<P> {
                 .platform
                 .enumerate_children(&mut directory.handle, cancel, batch_limits)
                 .map_err(|error| ReadAttempt::Failed(map_platform_failure(error)))?;
+            if cancel.is_cancelled() {
+                return Err(ReadAttempt::Failed(LocatorReadFailure::Cancelled));
+            }
             if batch.entries.is_empty() && !batch.end_of_directory {
                 return Err(ReadAttempt::Failed(LocatorReadFailure::Unavailable));
             }
@@ -3419,6 +3447,9 @@ mod tests {
 
         fn platform_name(&self) -> &'static str {
             self.inner.platform_name()
+        }
+        fn child_inspection_requires_enumeration(&self) -> bool {
+            self.inner.child_inspection_requires_enumeration()
         }
 
         fn admit_root(

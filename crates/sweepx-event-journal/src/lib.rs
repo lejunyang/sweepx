@@ -2023,8 +2023,12 @@ fn configure_connection(connection: &Connection) -> Result<(), JournalError> {
     connection.set_db_config(DbConfig::SQLITE_DBCONFIG_TRUSTED_SCHEMA, false)?;
     connection.set_db_config(DbConfig::SQLITE_DBCONFIG_DQS_DDL, false)?;
     connection.set_db_config(DbConfig::SQLITE_DBCONFIG_DQS_DML, false)?;
+    // A persisted WAL database must enter exclusive locking before any schema-reading
+    // pragma. Otherwise SQLite tries normal-mode shared memory, which this VFS deliberately
+    // does not implement, and reopening an otherwise valid completed journal fails.
+    connection.execute_batch("PRAGMA locking_mode=EXCLUSIVE;")?;
     connection.execute_batch(
-        "PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL; PRAGMA mmap_size=0; PRAGMA trusted_schema=OFF; PRAGMA read_uncommitted=OFF; PRAGMA locking_mode=EXCLUSIVE; PRAGMA temp_store=MEMORY; PRAGMA wal_autocheckpoint=64; PRAGMA journal_size_limit=8388608;",
+        "PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL; PRAGMA mmap_size=0; PRAGMA trusted_schema=OFF; PRAGMA read_uncommitted=OFF; PRAGMA temp_store=MEMORY; PRAGMA wal_autocheckpoint=64; PRAGMA journal_size_limit=8388608;",
     )?;
     connection.pragma_update(None, "max_page_count", MAX_PAGE_COUNT)?;
     connection.pragma_update(None, "journal_size_limit", MAX_WAL_BYTES as i64)?;

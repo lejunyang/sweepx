@@ -53,6 +53,10 @@ impl PlatformScanner for ProbeScanner {
     fn platform_name(&self) -> &'static str {
         self.inner.platform_name()
     }
+    fn child_inspection_requires_enumeration(&self) -> bool {
+        self.inner.child_inspection_requires_enumeration()
+    }
+
     fn admit_root(
         &self,
         root: &ScanRoot,
@@ -852,7 +856,7 @@ fn captured_ancestor_and_configured_spelling_require_native_lineage_and_bounded_
 }
 
 #[test]
-fn fixed_cargo_lookup_does_not_need_unrelated_enumeration_or_convert_a_read_gap_to_absence() {
+fn fixed_cargo_lookup_respects_backend_enumeration_and_does_not_convert_a_gap_to_absence() {
     let (_owner, directory, _) = fixture();
     let reader = new_reader(
         LocatorReadLimits {
@@ -868,14 +872,14 @@ fn fixed_cargo_lookup_does_not_need_unrelated_enumeration_or_convert_a_read_gap_
     let absent = reader
         .read_cargo_config_pair_in_captured_directory(&captured, true, &CancellationToken::new())
         .unwrap();
-    assert!(matches!(
-        absent.config,
+    let expected = if reader.platform.child_inspection_requires_enumeration() {
+        // No batch can be admitted: Windows must not mistake an unobserved name for absence.
+        CargoConfigMemberObservation::Failed(LocatorReadFailure::ResourceLimit)
+    } else {
         CargoConfigMemberObservation::AbsentDuringLookup
-    ));
-    assert!(matches!(
-        absent.config_toml,
-        CargoConfigMemberObservation::AbsentDuringLookup
-    ));
+    };
+    assert_eq!(absent.config, expected);
+    assert_eq!(absent.config_toml, expected);
     assert_eq!(reader.platform.streams.load(Ordering::SeqCst), 0);
     std::fs::create_dir(directory.join(".cargo")).unwrap();
     let captured = reader

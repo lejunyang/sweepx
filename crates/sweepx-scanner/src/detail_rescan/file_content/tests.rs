@@ -186,6 +186,10 @@ impl PlatformScanner for GrowingPlatform {
     fn platform_name(&self) -> &'static str {
         self.host.platform_name()
     }
+    fn child_inspection_requires_enumeration(&self) -> bool {
+        self.host.child_inspection_requires_enumeration()
+    }
+
     fn admit_root(
         &self,
         root: &ScanRoot,
