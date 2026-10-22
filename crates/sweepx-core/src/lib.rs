@@ -7544,7 +7544,10 @@ mod tests {
         ));
         let invoked = AtomicBool::new(false);
         let temp = tempfile::TempDir::new().unwrap();
+        #[cfg(unix)]
         let base = fs::canonicalize(temp.path()).unwrap();
+        #[cfg(windows)]
+        let base = temp.path().to_path_buf();
         let root = base.join("workspace");
         fs::create_dir(&root).unwrap();
         fs::write(root.join("Cargo.toml"), b"[workspace]\nmembers=[]\n").unwrap();
@@ -7581,7 +7584,10 @@ mod tests {
             sweepx_i18n::LocaleSource::Default,
         ));
         let temp = tempfile::TempDir::new().unwrap();
+        #[cfg(unix)]
         let base = fs::canonicalize(temp.path()).unwrap();
+        #[cfg(windows)]
+        let base = temp.path().to_path_buf();
         let root = base.join("workspace");
         fs::create_dir(&root).unwrap();
         fs::write(root.join("Cargo.toml"), b"[workspace]\nmembers=[]\n").unwrap();

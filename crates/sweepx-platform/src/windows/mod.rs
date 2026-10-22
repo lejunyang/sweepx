@@ -738,7 +738,7 @@ mod backend {
                 parent,
                 name,
                 role.desired_access(),
-                FILE_DIRECTORY_FILE,
+                FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT,
                 case_insensitive,
             )
         }
@@ -751,7 +751,7 @@ mod backend {
                 parent.as_raw_handle() as HANDLE,
                 component,
                 FILE_READ_ATTRIBUTES | SYNCHRONIZE,
-                0,
+                FILE_SYNCHRONOUS_IO_NONALERT,
                 false,
             )
             .map_err(|error| match error {
@@ -776,7 +776,7 @@ mod backend {
                 parent.as_raw_handle() as HANDLE,
                 component,
                 DirectoryOpenRole::AdmittedRoot.desired_access(),
-                FILE_DIRECTORY_FILE,
+                FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT,
                 false,
             )
             .map_err(|error| match error {
@@ -865,7 +865,7 @@ mod backend {
             parent: HANDLE,
             name: &[u16],
             desired_access: u32,
-            type_options: u32,
+            create_options: u32,
             case_insensitive: bool,
         ) -> Result<Admitted<OwnedHandle>, RootOpenError> {
             let byte_length = name
@@ -907,10 +907,7 @@ mod backend {
                     0,
                     FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                     FILE_OPEN,
-                    type_options
-                        | no_recall_option_for(type_options)
-                        | FILE_OPEN_REPARSE_POINT
-                        | FILE_SYNCHRONOUS_IO_NONALERT,
+                    create_options | no_recall_option_for(create_options) | FILE_OPEN_REPARSE_POINT,
                     ptr::null(),
                     0,
                 )
@@ -1537,58 +1534,18 @@ mod backend {
     fn open_notification_directory(
         directory: &WindowsDirectoryHandle,
     ) -> Result<Admitted<OwnedHandle>, RootOpenError> {
-        use windows_sys::Win32::Storage::FileSystem::{
-            ExtendedFileIdType, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_NO_RECALL,
-            FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAG_OVERLAPPED, FILE_ID_128, FILE_ID_DESCRIPTOR,
-            FileIdType, OpenFileById,
-        };
-        let mut descriptor = FILE_ID_DESCRIPTOR {
-            dwSize: std::mem::size_of::<FILE_ID_DESCRIPTOR>() as u32,
-            Type: ExtendedFileIdType,
-            ..Default::default()
-        };
-        descriptor.Anonymous.ExtendedFileId = FILE_ID_128 {
-            Identifier: directory.identity.file_id,
-        };
-        let lease = HandleLease::acquire_io().map_err(RootOpenError::Io)?;
-        let open = |descriptor: &FILE_ID_DESCRIPTOR| unsafe {
-            // SAFETY: volume hint is retained, the descriptor selects its initialized union field,
-            // and no name, content read, privilege change or reparse traversal is requested.
-            OpenFileById(
-                directory.handle.as_raw_handle() as HANDLE,
-                descriptor,
-                FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
-                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                ptr::null(),
-                FILE_FLAG_BACKUP_SEMANTICS
-                    | FILE_FLAG_OPEN_REPARSE_POINT
-                    | FILE_FLAG_OPEN_NO_RECALL
-                    | FILE_FLAG_OVERLAPPED,
-            )
-        };
-        let mut handle = open(&descriptor);
-        if handle == INVALID_HANDLE_VALUE
-            && directory.identity.file_id[8..]
-                .iter()
-                .all(|byte| *byte == 0)
-        {
-            // NTFS may require the 64-bit FileId form. Only exactly representable IDs are retried;
-            // the reopened handle must still match all 128 bits and the captured volume below.
-            descriptor.Type = FileIdType;
-            descriptor.Anonymous.FileId = i64::from_le_bytes(
-                directory.identity.file_id[..8]
-                    .try_into()
-                    .expect("fixed ID length"),
-            );
-            handle = open(&descriptor);
-        }
-        if handle.is_null() || handle == INVALID_HANDLE_VALUE {
-            return Err(RootOpenError::Io(io::Error::last_os_error()));
-        }
-        let handle = Admitted::new(
-            unsafe { OwnedHandle::from_raw_handle(handle as RawHandle) },
-            lease,
-        );
+        // An ID-only open has no namespace context for directory notifications. Reopen the
+        // retained named directory with an empty relative name instead: no display-path lookup,
+        // reparse traversal or new authority. Unlike ReOpenFile (which opens non-directories),
+        // NtCreateFile explicitly preserves the directory type. Omit synchronous I/O flags so
+        // ReadDirectoryChangesW can keep an overlapped request pending on this fresh file object.
+        let handle = WindowsPlatformScanner::nt_open_relative(
+            directory.handle.as_raw_handle() as HANDLE,
+            &[],
+            DirectoryOpenRole::AdmittedRoot.desired_access(),
+            FILE_DIRECTORY_FILE,
+            false,
+        )?;
         let observed = WindowsPlatformScanner::reject_reparse_or_nondirectory(&handle)?;
         if observed.file_id.VolumeSerialNumber != directory.identity.volume
             || observed.file_id.FileId.Identifier != directory.identity.file_id
@@ -1611,9 +1568,9 @@ mod backend {
             if !root {
                 return;
             }
-            // Open by captured full object ID using the pinned volume hint, without resolving
-            // a display pathname or depending on undocumented native '.' path normalization.
-            // Unsupported ID formats/filesystems refuse the listener and retain ordinary scans.
+            // Reopen only the retained directory object, then revalidate its full volume/file
+            // identity before installing an asynchronous listener. No display path is authority;
+            // an unavailable listener preserves ordinary scans and refuses watch freshness.
             let result = open_notification_directory(directory);
             match result {
                 Ok(handle) => {
@@ -3053,6 +3010,49 @@ mod backend {
                 .admit_root(&requested, &CancellationToken::new())
                 .expect("replacement directory is independently admitted");
             assert_ne!(replacement.metadata.identity, expected);
+        }
+
+        #[test]
+        fn notifications_reopen_retained_named_directory_after_path_replacement() {
+            use crate::change_monitor::{ChangeMonitor, ChangeMonitorLimits};
+            use std::time::{Duration, Instant};
+
+            let container = TempDir::new("retained-notifications");
+            let original = container.0.join("root");
+            let renamed = container.0.join("renamed");
+            fs::create_dir_all(original.join("kept")).unwrap();
+            let scanner = scanner();
+            let admission = admitted_directory(&original);
+            fs::rename(&original, &renamed).unwrap();
+            fs::create_dir_all(original.join("replacement")).unwrap();
+
+            let monitor = ChangeMonitor::start(
+                std::slice::from_ref(&original),
+                ChangeMonitorLimits::default(),
+            )
+            .unwrap();
+            scanner.monitor_directory(&admission.directory, &original, true, &monitor);
+            assert!(monitor.is_available(), "native notification startup failed");
+
+            // Independent ordinary writes distinguish the retained object from its replacement.
+            fs::write(original.join("replacement").join("ignored"), b"new").unwrap();
+            fs::write(renamed.join("kept").join("observed"), b"retained").unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let changes = loop {
+                if let Some(changes) = monitor.drain_ready() {
+                    break changes;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "native notification was not delivered"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            };
+            assert!(changes.unavailable.is_none(), "{changes:?}");
+            assert!(!changes.full_scan, "{changes:?}");
+            assert_eq!(changes.directories, vec![original.join("kept")]);
+            monitor.wait_for_exit();
+            assert!(!monitor.is_available());
         }
 
         #[test]

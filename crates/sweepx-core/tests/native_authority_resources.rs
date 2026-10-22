@@ -243,11 +243,27 @@ fn run_scan_oracle() {
         );
         usize::try_from(count).unwrap()
     };
-    let baseline = observed_handles();
-    let directory = Directory::open(&state, true).unwrap();
     let platform = HostPlatformScanner::new();
     let scan_root = ScanRoot::new(root.clone()).unwrap();
     let cancel = CancellationToken::new();
+    #[cfg(windows)]
+    {
+        // The process-wide oracle also counts one-time Windows security/runtime handles.
+        // Initialize both consumers and close their fixture capabilities before the baseline;
+        // the exact live-capability deltas below must still hold on every subsequent open.
+        drop(Directory::open(&state, true).unwrap());
+        drop(platform.admit_root(&scan_root, &cancel).unwrap());
+        let initialized = observed_handles();
+        drop(Directory::open(&state, true).unwrap());
+        drop(platform.admit_root(&scan_root, &cancel).unwrap());
+        assert_eq!(
+            observed_handles(),
+            initialized,
+            "warm-up must not hide leaks"
+        );
+    }
+    let baseline = observed_handles();
+    let directory = Directory::open(&state, true).unwrap();
     let mut roots = (0..16)
         .map(|_| platform.admit_root(&scan_root, &cancel).unwrap())
         .collect::<Vec<_>>();
@@ -287,7 +303,11 @@ fn run_scan_oracle() {
     ));
     let refused = sweepx_scanner::Scanner::new(
         HostPlatformScanner::new(),
-        sweepx_scanner::ScannerOptions::default(),
+        sweepx_scanner::ScannerOptions {
+            // Exercise the exhausted native traversal pool, not optional whole-volume preview.
+            accelerated_preview: false,
+            ..sweepx_scanner::ScannerOptions::default()
+        },
     )
     .scan(std::slice::from_ref(&scan_root), &cancel);
     assert!(matches!(

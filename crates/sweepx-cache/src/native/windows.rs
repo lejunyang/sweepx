@@ -33,11 +33,10 @@ use windows_sys::Win32::Foundation::{
 use windows_sys::Win32::Storage::FileSystem::{
     DELETE, FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS,
     FILE_ATTRIBUTE_RECALL_ON_OPEN, FILE_ATTRIBUTE_REPARSE_POINT, FILE_BASIC_INFO, FILE_DEVICE_DISK,
-    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FILE_LIST_DIRECTORY,
-    FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    FILE_STANDARD_INFO, FILE_TYPE_DISK, FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, FileBasicInfo,
-    FileIdInfo, FileStandardInfo, GetDriveTypeW, GetFileInformationByHandleEx, GetFileType,
-    READ_CONTROL, ReOpenFile, SYNCHRONIZE, SetFileTime,
+    FILE_ID_INFO, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_DELETE,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STANDARD_INFO, FILE_TYPE_DISK, FILE_WRITE_ATTRIBUTES,
+    FILE_WRITE_DATA, FileBasicInfo, FileIdInfo, FileStandardInfo, GetDriveTypeW,
+    GetFileInformationByHandleEx, GetFileType, READ_CONTROL, SYNCHRONIZE, SetFileTime,
 };
 use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 use windows_sys::Win32::System::Ioctl::FILE_DEVICE_DISK_FILE_SYSTEM;
@@ -497,27 +496,18 @@ impl Directory {
         mut visit: impl FnMut(Option<&str>) -> io::Result<()>,
     ) -> io::Result<()> {
         self.private()?;
-        // ReOpenFile creates an independent cursor on the same retained object. A duplicate
-        // handle would share the cursor, and reopening a display path could reach a replacement.
+        // An empty NT name reopens the retained object with an independent cursor. ReOpenFile
+        // rejects directories even with BACKUP_SEMANTICS (Wine's kernel32 file conformance test
+        // covers this); a duplicate shares its cursor, and a display path can reach a replacement.
         let original: FILE_ID_INFO = query(&self.file, FileIdInfo)?;
-        let io_lease = Lease::acquire_io()?;
-        // SAFETY: the handle is live and the flags request an ordinary synchronous directory
-        // handle. Reparse/provider attributes and native identity are checked before enumeration.
-        let raw = unsafe {
-            ReOpenFile(
-                self.file.as_raw_handle().cast(),
-                DIR_ACCESS | SYNCHRONIZE,
-                SHARE_ALL,
-                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
-            )
-        };
-        if raw.is_null() || raw == INVALID_HANDLE_VALUE {
-            return Err(native_error(
-                "ReOpenFile(directory enumeration)",
-                io::Error::last_os_error(),
-            ));
-        }
-        let directory = NativeFile::new(unsafe { File::from_raw_handle(raw.cast()) }, io_lease);
+        let directory = self.open_relative(
+            &[],
+            DIR_ACCESS,
+            FILE_DIRECTORY_FILE,
+            FILE_OPEN,
+            SHARE_ALL,
+            None,
+        )?;
         let reopened: FILE_ID_INFO = query(&directory, FileIdInfo)?;
         if reopened.VolumeSerialNumber != original.VolumeSerialNumber
             || reopened.FileId.Identifier != original.FileId.Identifier
@@ -527,6 +517,7 @@ impl Directory {
             ));
         }
         ordinary(&directory, true, Some(self.volume))?;
+        private(&directory)?;
         let mut page = vec![0usize; (64 * 1024) / size_of::<usize>()];
         let mut remaining = super::ENUMERATION_ENTRY_LIMIT;
         // One extra query allows the terminal NO_MORE_FILES status at the entry cap. Zero-byte
@@ -1021,6 +1012,50 @@ mod tests {
         directory.remove("fact").unwrap();
         assert!(!retained.join("fact").exists());
         assert_eq!(fs::read(path.join("other")).unwrap(), br#""replacement""#);
+    }
+
+    #[test]
+    fn reentrant_enumeration_has_independent_cursors_after_path_replacement() {
+        let (guard, path, directory) = fixture();
+        // More than one 64 KiB names page is required: if everything fits in the first page,
+        // an inner enumeration could exhaust a shared cursor without truncating the outer one.
+        for index in 0..300 {
+            let name = format!("entry-{index:04}-{}", "x".repeat(128));
+            fs::write(path.join(name), []).unwrap();
+        }
+        let retained = guard.path().join("retained");
+        fs::rename(&path, &retained).unwrap();
+        let replacement = Directory::open(&path, true).unwrap();
+        replacement.write_json("replacement", &true, 16).unwrap();
+        let expected: BTreeSet<_> = fs::read_dir(&retained)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(expected.len(), 300);
+
+        // retain() duplicates authority, not the underlying file-object enumeration cursor.
+        // Reenter through that alias while the outer enumerator still has pages left to read.
+        let alias = directory.retain().unwrap();
+        let mut outer = BTreeSet::new();
+        let mut inner = None;
+        directory
+            .entries(|name| {
+                outer.insert(name.to_owned());
+                if inner.is_none() {
+                    let mut names = BTreeSet::new();
+                    alias.entries(|name| {
+                        names.insert(name.to_owned());
+                        Ok(())
+                    })?;
+                    inner = Some(names);
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(outer, expected);
+        assert_eq!(inner.unwrap(), expected);
+        assert_eq!(fs::read_dir(&path).unwrap().count(), 1);
+        assert_eq!(fs::read(path.join("replacement")).unwrap(), b"true");
     }
 
     #[test]

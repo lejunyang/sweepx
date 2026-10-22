@@ -87,6 +87,16 @@ fn run_oracle() {
     assert_eq!(visited, 1);
     let recovered = survivor.try_clone().unwrap();
     drop(recovered);
+    let mut successful_visits = 0;
+    root.entries(|name| {
+        assert_eq!(name, "seed.json");
+        successful_visits += 1;
+        refused(survivor.try_clone());
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(successful_visits, 1);
+    drop(survivor.try_clone().unwrap());
     assert!(
         std::panic::catch_unwind(|| root.entries(|_| panic!("controlled visitor unwind"))).is_err()
     );

@@ -26,7 +26,10 @@ fn directory_newest_mtime_tracks_a_child_write() {
     // resolution equalizing the two writes.
     let future = UNIX_EPOCH + Duration::from_secs(4_000_000_000);
     let accessed = std::fs::FileTimes::new().set_modified(future);
-    std::fs::File::open(&child)
+    // Windows SetFileTime requires write access; a read-only fixture handle is insufficient.
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&child)
         .unwrap()
         .set_times(accessed)
         .unwrap();
@@ -216,7 +219,9 @@ fn partial_activity_is_unknown_and_complete_answers_are_invocation_local() {
     let file = root.join("payload");
     std::fs::write(&file, b"unchanged").unwrap();
     let future = UNIX_EPOCH + Duration::from_secs(4_000_000_000);
-    std::fs::File::open(&file)
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&file)
         .unwrap()
         .set_times(std::fs::FileTimes::new().set_modified(future))
         .unwrap();
@@ -246,7 +251,9 @@ fn partial_activity_is_unknown_and_complete_answers_are_invocation_local() {
         "identical cache answers must not re-enumerate"
     );
     let later = future + Duration::from_secs(100);
-    std::fs::File::open(&file)
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&file)
         .unwrap()
         .set_times(std::fs::FileTimes::new().set_modified(later))
         .unwrap();

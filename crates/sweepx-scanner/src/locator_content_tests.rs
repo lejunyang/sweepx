@@ -282,14 +282,24 @@ fn include_parent_normalizes_the_complete_spelling_before_native_lookup() {
     };
     assert_eq!(parent, captured);
     assert_eq!(name, native("input.toml"));
-    let dotted = reader
-        .capture_directory_identity(&directory.join("."), &cancel)
-        .unwrap();
-    let (observed, name) = reader
-        .observe_cargo_config_include_parent(&dotted, Path::new("input.toml"), &cancel)
-        .unwrap();
-    assert_eq!(observed, DirectoryPathObservation::Present(parent));
-    assert_eq!(name, native("input.toml"));
+    #[cfg(unix)]
+    {
+        let dotted = reader
+            .capture_directory_identity(&directory.join("."), &cancel)
+            .unwrap();
+        let (observed, name) = reader
+            .observe_cargo_config_include_parent(&dotted, Path::new("input.toml"), &cancel)
+            .unwrap();
+        assert_eq!(observed, DirectoryPathObservation::Present(parent));
+        assert_eq!(name, native("input.toml"));
+    }
+    // Windows admission deliberately rejects ambiguous Win32 spellings, so such a captured
+    // source cannot exist there. Include normalization must not weaken that boundary.
+    #[cfg(windows)]
+    assert!(matches!(
+        reader.capture_directory_identity(&directory.join("."), &cancel),
+        Err(LocatorReadError::InvalidRequest)
+    ));
     assert!(!directory.join("missing").exists());
 }
 

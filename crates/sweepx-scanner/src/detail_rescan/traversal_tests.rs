@@ -398,6 +398,8 @@ fn source(root: &Path) -> (ScanId, ScannedEntry) {
         HostPlatformScanner::new(),
         ScannerOptions {
             scan_id: scan_id.clone(),
+            // These fixtures validate native traversal, not a volume-wide NTFS preview.
+            accelerated_preview: false,
             ..ScannerOptions::default()
         },
     )
@@ -900,7 +902,7 @@ fn completed_directory_observations_match_each_independent_subtree_walk() {
     let directories = [
         root.clone(),
         root.join("first"),
-        root.join("first/deep"),
+        root.join("first").join("deep"),
         root.join("second"),
         root.join("empty"),
     ];
@@ -969,7 +971,7 @@ fn active_nested_progress_includes_unfinished_descendants_without_double_countin
     oracle.walk(&root, true);
     let (scan_id, observed) = source(&root);
     let (_, child) = source(&root.join("child"));
-    let (_, deep) = source(&root.join("child/deep"));
+    let (_, deep) = source(&root.join("child").join("deep"));
     let probe = Arc::new(Probe::default());
     let mut platform = ProbedPlatform::new(Arc::clone(&probe));
     // A controlled native file observation exceeds the measured 120 ms presentation interval.

@@ -2327,7 +2327,10 @@ mod tests {
     #[test]
     fn system_root_selection_reuses_the_classifiers_tool_probe() {
         let fixture = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
         let cache = fixture.path().canonicalize().unwrap();
+        #[cfg(windows)]
+        let cache = fixture.path().to_path_buf();
         std::fs::create_dir(cache.join("wheels")).unwrap();
         let rule = load_platform_junk_rules()
             .unwrap()

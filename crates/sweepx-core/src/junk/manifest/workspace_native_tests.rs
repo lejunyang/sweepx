@@ -51,7 +51,13 @@ fn native_workspace_matches_raw_cargo_root_members_and_cwd_defaults_for_all_53_c
         let (_owner, root) = fixture();
         let mut originals = Vec::new();
         for input in record["inputs"].as_array().unwrap() {
-            let path = root.join(input["path"].as_str().unwrap());
+            let path = root.join(
+                input["path"]
+                    .as_str()
+                    .unwrap()
+                    .split('/')
+                    .collect::<PathBuf>(),
+            );
             let bytes = input["utf8"].as_str().unwrap().as_bytes();
             assert_eq!(hex_digest(bytes), input["sha256"].as_str().unwrap());
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -60,7 +66,13 @@ fn native_workspace_matches_raw_cargo_root_members_and_cwd_defaults_for_all_53_c
         }
         let reader = reader();
         let cancel = CancellationToken::new();
-        let cwd = root.join(record["fixtureRelativeCwd"].as_str().unwrap());
+        let cwd = root.join(
+            record["fixtureRelativeCwd"]
+                .as_str()
+                .unwrap()
+                .split('/')
+                .collect::<PathBuf>(),
+        );
         let project = reader.capture_directory_identity(&cwd, &cancel).unwrap();
         let mut inputs = WorkspaceInputs::default();
         let mut reserved = 0;
@@ -97,7 +109,9 @@ fn native_workspace_matches_raw_cargo_root_members_and_cwd_defaults_for_all_53_c
                     .as_str()
                     .unwrap()
                     .strip_prefix(&prefix)
-                    .unwrap(),
+                    .unwrap()
+                    .split('/')
+                    .collect::<PathBuf>(),
             );
             let expected_root = reader
                 .capture_directory_identity(&expected_root, &cancel)
@@ -132,7 +146,10 @@ fn native_workspace_matches_raw_cargo_root_members_and_cwd_defaults_for_all_53_c
                         .strip_suffix("/Cargo.toml")
                         .unwrap();
                     let native = reader
-                        .capture_directory_identity(&root.join(relative), &cancel)
+                        .capture_directory_identity(
+                            &root.join(relative.split('/').collect::<PathBuf>()),
+                            &cancel,
+                        )
                         .unwrap();
                     let matched = actual_ids
                         .iter()

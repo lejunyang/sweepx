@@ -5017,7 +5017,11 @@ mod tests {
                 logical_bytes: 123,
             },
         );
-        assert!(sink.file_markers[&parent].contains("Cargo.toml"));
+        assert!(sink.file_markers[&parent].contains(if cfg!(windows) {
+            "cargo.toml"
+        } else {
+            "Cargo.toml"
+        }));
         assert!(
             !sink.metadata_lost,
             "optional cache pressure must not lose required evidence"
@@ -6096,7 +6100,11 @@ mod tests {
             logical_bytes: 123,
         };
         sink.note_cached_file(&parent, &file);
-        assert!(sink.file_markers[&parent].contains("Cargo.toml"));
+        assert!(sink.file_markers[&parent].contains(if cfg!(windows) {
+            "cargo.toml"
+        } else {
+            "Cargo.toml"
+        }));
         assert_eq!(
             sink.finish_classified().dir_listings[&root.display().to_string()].files["Cargo.toml"],
             123

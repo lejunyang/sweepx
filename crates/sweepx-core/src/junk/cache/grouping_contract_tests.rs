@@ -136,10 +136,11 @@ fn ordinary_file_lengths(path: &Path) -> BTreeMap<String, u128> {
             let entry = entry.unwrap();
             let metadata = fs::symlink_metadata(entry.path()).unwrap();
             metadata.file_type().is_file().then(|| {
-                (
-                    entry.file_name().into_string().unwrap(),
-                    u128::from(metadata.len()),
-                )
+                let name = entry.file_name().into_string().unwrap();
+                // The listing index uses ASCII-folded Windows rule-marker keys.
+                #[cfg(windows)]
+                let name = name.to_ascii_lowercase();
+                (name, u128::from(metadata.len()))
             })
         })
         .collect()

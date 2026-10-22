@@ -781,7 +781,13 @@ fn output_path(bytes: &[u8]) -> Option<PathBuf> {
     #[cfg(windows)]
     {
         let bytes = bytes.strip_suffix(b"\r").unwrap_or(bytes);
-        Some(PathBuf::from(std::str::from_utf8(bytes).ok()?))
+        // Git for Windows emits ordinary drive-letter paths using forward slashes.
+        // Translate only separators at this external-format boundary. Do not canonicalize,
+        // collapse components or strip prefixes: native admission must still reject ambiguous
+        // Win32 paths and compare the captured filesystem identity before trusting scope.
+        Some(PathBuf::from(
+            std::str::from_utf8(bytes).ok()?.replace('/', "\\"),
+        ))
     }
 }
 
@@ -1092,6 +1098,44 @@ mod tests {
             ],
         );
         (owner, base, project)
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn git_scope_slashes_preserve_native_identity_and_ambiguous_paths_stay_refused() {
+        let (_owner, base, _) = fixture();
+        let directory = base.join(".git");
+        let output = format!(
+            "{}\n{}\n",
+            base.to_str().unwrap().replace('\\', "/"),
+            directory.to_str().unwrap().replace('\\', "/"),
+        );
+        let paths = scope_output_paths(output.as_bytes()).unwrap();
+        let mut session = session();
+        for (decoded, expected) in paths.iter().zip([&base, &directory]) {
+            assert_eq!(decoded, expected);
+            let actual = session.admit(decoded).unwrap();
+            let expected = session.admit(expected).unwrap();
+            assert!(same_metadata(&actual.metadata, &expected.metadata));
+        }
+        for raw in [
+            "C:/project/../other\n",
+            "C:/project./child\n",
+            "C:/project/CON\n",
+            "//?/C:/project\n",
+            "//server/share/project\n",
+        ] {
+            let decoded = output_path(raw.as_bytes()).unwrap();
+            let root = ScanRoot::new(decoded).unwrap();
+            assert!(
+                matches!(
+                    session.backend.admit_root(&root, &session.cancel),
+                    Err(sweepx_platform::PlatformError::RootRejected(_))
+                ),
+                "{raw:?}"
+            );
+        }
+        assert!(output_path(b"C:/invalid-\xff\n").is_none());
     }
 
     #[test]

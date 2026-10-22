@@ -20,18 +20,18 @@ fn fixture() -> Fixture {
     #[cfg(not(unix))]
     let base = temp.path().to_path_buf();
     let store = base.join("store");
-    let project = base.join("projects/selected");
-    let content = store.join("files/01").join("01".repeat(63));
+    let project = base.join("projects").join("selected");
+    let content = store.join("files").join("01").join("01".repeat(63));
     fs::create_dir_all(content.parent().unwrap()).unwrap();
     fs::write(&content, b"dependency").unwrap();
-    fs::create_dir_all(store.join("index/00")).unwrap();
+    fs::create_dir_all(store.join("index").join("00")).unwrap();
     let integrity = "sha512-AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ==";
-    fs::write(store.join("index/00/pkg.json"), serde_json::to_vec(&json!({"name":"pkg","version":"1.0.0","files":{"file":{"integrity":integrity,"mode":420,"size":10}}})).unwrap()).unwrap();
-    let slot = project.join("node_modules/.pnpm/pkg@1.0.0");
+    fs::write(store.join("index").join("00").join("pkg.json"), serde_json::to_vec(&json!({"name":"pkg","version":"1.0.0","files":{"file":{"integrity":integrity,"mode":420,"size":10}}})).unwrap()).unwrap();
+    let slot = project.join("node_modules").join(".pnpm").join("pkg@1.0.0");
     fs::create_dir_all(&slot).unwrap();
     fs::hard_link(&content, slot.join("file")).unwrap();
     fs::write(
-        project.join("node_modules/.modules.yaml"),
+        project.join("node_modules").join(".modules.yaml"),
         format!("storeDir: {}\nvirtualStoreDir: .pnpm\n", store.display()),
     )
     .unwrap();
@@ -81,7 +81,7 @@ fn preview_is_stable_and_replaced_plan_refuses_before_any_move() {
     let id = p["plan"]["id"].as_str().unwrap();
     let (_, next) = call(&f, "dependencies", None, false);
     assert_eq!(next["plan"]["id"], id);
-    fs::write(f.project.join("node_modules/changed"), b"new").unwrap();
+    fs::write(f.project.join("node_modules").join("changed"), b"new").unwrap();
     let (code, blocked) = call(&f, "dependencies", Some(id), true);
     assert_eq!(code, 8);
     assert_eq!(blocked["blocked"], "project_plan_changed_refresh_preview");
@@ -92,7 +92,13 @@ fn preview_is_stable_and_replaced_plan_refuses_before_any_move() {
 #[test]
 fn both_modes_preview_and_shared_copy_references_preserve_store() {
     let f = fixture();
-    let other = f.base.join("projects/other/node_modules/.pnpm/pkg@1.0.0");
+    let other = f
+        .base
+        .join("projects")
+        .join("other")
+        .join("node_modules")
+        .join(".pnpm")
+        .join("pkg@1.0.0");
     fs::create_dir_all(&other).unwrap();
     fs::write(other.join("file"), b"dependency").unwrap();
     for mode in ["dependencies", "project"] {
@@ -143,7 +149,7 @@ fn native_dependencies_retire_only_deps_and_accounted_cas_links() {
     assert!(!f.content.exists());
     assert!(in_native_trash(directory));
     assert!(in_native_trash(file));
-    assert!(f.store.join("index/00/pkg.json").exists());
+    assert!(f.store.join("index").join("00").join("pkg.json").exists());
 }
 #[test]
 #[cfg(target_os = "macos")]
@@ -166,7 +172,13 @@ fn native_whole_project_retires_project_and_exclusive_store_content() {
 #[ignore = "requires normal macOS process/open-file and native Trash permissions"]
 fn native_project_retirement_preserves_another_projects_copy_and_store_object() {
     let f = fixture();
-    let other = f.base.join("projects/other/node_modules/.pnpm/pkg@1.0.0");
+    let other = f
+        .base
+        .join("projects")
+        .join("other")
+        .join("node_modules")
+        .join(".pnpm")
+        .join("pkg@1.0.0");
     fs::create_dir_all(&other).unwrap();
     let copy = other.join("file");
     fs::write(&copy, b"dependency").unwrap();
@@ -185,9 +197,9 @@ fn native_project_retirement_preserves_another_projects_copy_and_store_object() 
 fn project_only_reports_package_bytes_with_a_json_marker_and_missing_store() {
     let f = fixture();
     fs::write(
-        f.project.join("node_modules/.modules.yaml"),
+        f.project.join("node_modules").join(".modules.yaml"),
         serde_json::to_vec(
-            &json!({"storeDir": f.base.join("absent/v11"), "virtualStoreDir":".pnpm"}),
+            &json!({"storeDir": f.base.join("absent").join("v11"), "virtualStoreDir":".pnpm"}),
         )
         .unwrap(),
     )
@@ -277,7 +289,7 @@ fn automatic_store_discovery_uses_installed_metadata_without_manager_or_home_def
 #[ignore = "requires normal macOS process/open-file and native Trash permissions"]
 fn native_bulk_store_trash_selects_all_owners_without_entry() {
     let f = fixture();
-    let cas = f.store.join("files/02").join("02".repeat(63));
+    let cas = f.store.join("files").join("02").join("02".repeat(63));
     fs::create_dir_all(cas.parent().unwrap()).unwrap();
     fs::write(&cas, b"unused content").unwrap();
     let integrity = "sha512-AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg==";
@@ -305,14 +317,20 @@ fn native_bulk_store_trash_selects_all_owners_without_entry() {
         result["results"].as_array().unwrap().last().unwrap()["completedMoves"],
         1
     );
-    assert!(f.store.join("index/00/unused-0.json").exists());
+    assert!(
+        f.store
+            .join("index")
+            .join("00")
+            .join("unused-0.json")
+            .exists()
+    );
 }
 
 #[test]
 fn automatic_discovery_finds_orphaned_project_local_store() {
     let f = fixture();
     fs::remove_dir_all(f.project.join("node_modules")).unwrap();
-    let local = f.project.join(".pnpm-store/v3");
+    let local = f.project.join(".pnpm-store").join("v3");
     fs::create_dir_all(local.join("files")).unwrap();
     let out = Command::cargo_bin("sweepx")
         .unwrap()

@@ -456,13 +456,20 @@ fn marker_fixture(marker: bool) -> (FakePlatform, PathBuf, PathBuf) {
     (platform, root, target)
 }
 
+// Rule marker spelling follows the host contract, unlike the retained native filename.
+const CARGO_MARKER: &str = if cfg!(windows) {
+    "cargo.toml"
+} else {
+    "Cargo.toml"
+};
+
 struct ParentMarker {
     negative: bool,
     local: bool,
 }
 impl JunkClassifier for ParentMarker {
     fn needs_file_marker(&self, name: &NativeName) -> bool {
-        native_basename_marker(name).as_deref() == Some("Cargo.toml")
+        native_basename_marker(name).as_deref() == Some(CARGO_MARKER)
     }
     fn uses_only_local_markers(&self) -> bool {
         self.local
@@ -478,7 +485,7 @@ impl JunkClassifier for ParentMarker {
         let parent = entry.identity.as_ref()?.parent_id.as_ref()?;
         let present = markers
             .get(parent)
-            .is_some_and(|names| names.contains("Cargo.toml"));
+            .is_some_and(|names| names.contains(CARGO_MARKER));
         (present != self.negative).then(|| "parent-marker".into())
     }
 }
