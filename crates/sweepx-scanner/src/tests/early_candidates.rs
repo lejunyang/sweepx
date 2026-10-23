@@ -49,7 +49,7 @@ fn classified_live_lengths_keep_markers_git_lineage_and_totals_without_file_inde
     };
     let (cold_platform, root, target) = fixture(false);
     let cold_calls = Arc::clone(&cold_platform.inspect_calls);
-    let cold = Scanner::new(cold_platform, ScannerOptions::default())
+    let cold = Scanner::new(cold_platform, fixture_scanner_options())
         .scan_classified(
             &[ScanRoot::new(root.clone()).unwrap()],
             &CancellationToken::new(),
@@ -64,7 +64,7 @@ fn classified_live_lengths_keep_markers_git_lineage_and_totals_without_file_inde
         fast_platform,
         ScannerOptions {
             retain_file_index: false,
-            ..Default::default()
+            ..fixture_scanner_options()
         },
     )
     .scan_classified(
@@ -117,7 +117,7 @@ fn ordinary_scans_and_full_file_observers_bypass_live_length_hook() {
     let (mut platform, root, _) = marker_fixture(true);
     enable_fixture_file_lengths(&mut platform);
     let hook_calls = Arc::clone(&platform.file_length_calls);
-    let scanner = Scanner::new(platform, ScannerOptions::default());
+    let scanner = Scanner::new(platform, fixture_scanner_options());
     let roots = [ScanRoot::new(root).unwrap()];
     let ordinary = scanner.scan(&roots, &CancellationToken::new()).unwrap();
     assert_eq!(
@@ -176,7 +176,7 @@ fn malformed_live_length_proposals_fall_back_to_bound_inspection() {
     payload.file_name = test_native_name("wrong-payload");
     payload.logical_bytes = 999;
     let calls = Arc::clone(&platform.inspect_calls);
-    let scan = Scanner::new(platform, ScannerOptions::default())
+    let scan = Scanner::new(platform, fixture_scanner_options())
         .scan_classified(
             &[ScanRoot::new(root).unwrap()],
             &CancellationToken::new(),
@@ -238,7 +238,7 @@ fn current_file_observer_bypasses_length_only_reuse_and_sees_unretained_files() 
     }
     let (platform, root, _) = marker_fixture(false);
     let mut files = Files::default();
-    let result = Scanner::new(platform, ScannerOptions::default())
+    let result = Scanner::new(platform, fixture_scanner_options())
         .scan_classified_with_observer(
             &[ScanRoot::new(root.clone()).unwrap()],
             &CancellationToken::new(),
@@ -336,7 +336,7 @@ fn completed_branch_arrives_before_other_payloads_and_survives_cancellation() {
         ScannerOptions {
             max_workers: 1,
             retain_directory_index: false,
-            ..Default::default()
+            ..fixture_scanner_options()
         },
     )
     .scan_classified_with_observer(&roots, &cancel, &LocalBranches, None, &mut log)
@@ -372,7 +372,7 @@ fn completed_branch_arrives_before_other_payloads_and_survives_cancellation() {
 
 #[test]
 fn local_final_results_match_root_end_classification_without_duplicate_callbacks() {
-    let scanner = Scanner::new(NestedFanOutPlatform::new(8), ScannerOptions::default());
+    let scanner = Scanner::new(NestedFanOutPlatform::new(8), fixture_scanner_options());
     let roots = [ScanRoot::new(scanner.platform.root.clone()).unwrap()];
     let ordinary = scanner
         .scan_classified(&roots, &CancellationToken::new(), &ObservedBranches, None)
@@ -456,13 +456,20 @@ fn marker_fixture(marker: bool) -> (FakePlatform, PathBuf, PathBuf) {
     (platform, root, target)
 }
 
+// Rule marker spelling follows the host contract, unlike the retained native filename.
+const CARGO_MARKER: &str = if cfg!(windows) {
+    "cargo.toml"
+} else {
+    "Cargo.toml"
+};
+
 struct ParentMarker {
     negative: bool,
     local: bool,
 }
 impl JunkClassifier for ParentMarker {
     fn needs_file_marker(&self, name: &NativeName) -> bool {
-        native_basename_marker(name).as_deref() == Some("Cargo.toml")
+        native_basename_marker(name).as_deref() == Some(CARGO_MARKER)
     }
     fn uses_only_local_markers(&self) -> bool {
         self.local
@@ -478,7 +485,7 @@ impl JunkClassifier for ParentMarker {
         let parent = entry.identity.as_ref()?.parent_id.as_ref()?;
         let present = markers
             .get(parent)
-            .is_some_and(|names| names.contains("Cargo.toml"));
+            .is_some_and(|names| names.contains(CARGO_MARKER));
         (present != self.negative).then(|| "parent-marker".into())
     }
 }
@@ -498,7 +505,7 @@ fn late_parent_marker_prevents_premature_negative_decisions_and_preserves_positi
             ScannerOptions {
                 max_workers: 1,
                 retain_directory_index,
-                ..Default::default()
+                ..fixture_scanner_options()
             },
         )
         .scan_classified_with_observer(
@@ -540,7 +547,7 @@ fn true_parent_marker_absence_is_decided_only_after_parent_enumeration() {
         ScannerOptions {
             max_workers: 1,
             retain_directory_index: false,
-            ..Default::default()
+            ..fixture_scanner_options()
         },
     )
     .scan_classified_with_observer(
@@ -577,7 +584,7 @@ fn custom_evaluator_defaults_to_full_root_markers() {
         ScannerOptions {
             max_workers: 1,
             retain_directory_index: false,
-            ..Default::default()
+            ..fixture_scanner_options()
         },
     )
     .scan_classified_with_observer(
@@ -613,7 +620,7 @@ fn exhausted_marker_budget_never_grants_local_absence_classification() {
                 max_classified_metadata_bytes: 0,
                 ..Default::default()
             },
-            ..Default::default()
+            ..fixture_scanner_options()
         },
     )
     .scan_classified_with_observer(
@@ -645,7 +652,7 @@ fn scoped_walk_preserves_parent_markers_and_native_lineage_without_inspecting_si
         platform,
         ScannerOptions {
             max_workers: 1,
-            ..Default::default()
+            ..fixture_scanner_options()
         },
     );
     let classifier = ParentMarker {
@@ -728,7 +735,7 @@ fn scoped_marker_directories_are_observed_shallowly_for_git_lineage() {
         platform,
         ScannerOptions {
             max_workers: 1,
-            ..Default::default()
+            ..fixture_scanner_options()
         },
     )
     .scan_classified_subtrees_with_observer(
@@ -769,7 +776,7 @@ fn scoped_negative_predicate_refuses_truncated_parent_markers() {
                 max_directory_entries: 2,
                 ..Default::default()
             },
-            ..Default::default()
+            ..fixture_scanner_options()
         },
     )
     .scan_classified_subtrees_with_observer(
@@ -797,7 +804,7 @@ fn scoped_negative_predicate_refuses_truncated_parent_markers() {
 #[test]
 fn unvisited_scoped_path_never_reports_complete_coverage() {
     let (platform, root, _) = marker_fixture(true);
-    let result = Scanner::new(platform, ScannerOptions::default())
+    let result = Scanner::new(platform, fixture_scanner_options())
         .scan_classified_subtrees_with_observer(
             &[ScanRoot::new(root.clone()).unwrap()],
             &CancellationToken::new(),
@@ -817,7 +824,7 @@ fn unvisited_scoped_path_never_reports_complete_coverage() {
 fn scoped_walk_rejects_global_evaluators_and_outside_paths_before_observation() {
     let (platform, root, target) = marker_fixture(true);
     let calls = Arc::clone(&platform.inspect_calls);
-    let scanner = Scanner::new(platform, ScannerOptions::default());
+    let scanner = Scanner::new(platform, fixture_scanner_options());
     let roots = [ScanRoot::new(root).unwrap()];
     assert!(
         scanner
@@ -864,7 +871,7 @@ fn scoped_omission_cannot_hide_malformed_backend_paths() {
             file_name: test_native_name("ignored"),
         });
     assert!(
-        Scanner::new(platform, ScannerOptions::default())
+        Scanner::new(platform, fixture_scanner_options())
             .scan_classified_subtrees_with_observer(
                 &[ScanRoot::new(root).unwrap()],
                 &CancellationToken::new(),
@@ -949,7 +956,7 @@ fn compact_local_scan_releases_unrelated_directory_evidence_under_a_small_budget
                     max_classified_root_metadata_bytes: 2 * 1024 * 1024,
                     ..Default::default()
                 },
-                ..Default::default()
+                ..fixture_scanner_options()
             },
         )
         .scan_classified(

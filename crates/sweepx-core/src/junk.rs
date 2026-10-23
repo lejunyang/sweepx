@@ -662,6 +662,11 @@ mod tests {
                 None,
             )
             .unwrap();
+            assert!(result.scan.summary.progress.iter().all(|event| !matches!(
+                event,
+                sweepx_scanner::ProgressEvent::AcceleratedPreview { .. }
+                    | sweepx_scanner::ProgressEvent::AccelerationUnavailable { .. }
+            )));
             assert_eq!(
                 result.scan.output.status,
                 sweepx_protocol::OutputStatus::Ok,

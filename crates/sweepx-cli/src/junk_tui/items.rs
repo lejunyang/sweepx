@@ -383,7 +383,12 @@ mod tests {
     #[test]
     fn package_names_and_older_versions_come_from_native_manifests() {
         let fixture = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
         let root = std::fs::canonicalize(fixture.path()).unwrap();
+        // Windows canonicalization creates a verbatim path, which is deliberately not an
+        // admitted native scan root. Keep the same ordinary absolute path as the core fixtures.
+        #[cfg(windows)]
+        let root = fixture.path().to_path_buf();
         for (slot, version) in [("aaaaaaaaaaaaaaaa", "1.0.0"), ("bbbbbbbbbbbbbbbb", "2.0.0")] {
             let path = root.join(slot);
             std::fs::create_dir_all(path.join("node_modules/example")).unwrap();
@@ -403,6 +408,7 @@ mod tests {
             Locale::ZhCn,
         );
         assert!(!prepared.limited);
+        assert!(prepared.inventory.complete, "{:?}", prepared.inventory);
         assert_eq!(prepared.rows.len(), 2);
         assert!(
             prepared

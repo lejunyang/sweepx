@@ -147,7 +147,20 @@ fn native_content_ranges_full_stream_and_hardlinks_match_ordinary_file_reads() {
 fn native_content_detects_stage_and_in_read_changes_and_cancellation() {
     let fixture = Fixture::new();
     let path = fixture.0.join("file");
-    fs::write(&path, vec![1; 170_099]).unwrap();
+    // Do not depend on the filesystem clock advancing between rapid same-length writes.
+    // Explicit, distinct timestamps keep the change-stamp regression deterministic, including
+    // while the reader holds its own native handle on Windows.
+    let modified = std::time::UNIX_EPOCH + std::time::Duration::from_secs(946_684_800);
+    let rewrite = |value, seconds| {
+        fs::write(&path, vec![value; 170_099]).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(modified + std::time::Duration::from_secs(seconds))
+            .unwrap();
+    };
+    rewrite(1, 0);
     let platform = platform();
     let cancel = CancellationToken::new();
     let parent = platform
@@ -161,7 +174,7 @@ fn native_content_detects_stage_and_in_read_changes_and_cancellation() {
         &mut |_| Ok(()),
     )
     .unwrap();
-    fs::write(&path, vec![2; 170_099]).unwrap();
+    rewrite(2, 2);
     assert!(matches!(
         stream_bound_regular_file(
             &platform,
@@ -181,7 +194,7 @@ fn native_content_detects_stage_and_in_read_changes_and_cancellation() {
             &cancel,
             &mut |_| {
                 if !changed {
-                    fs::write(&path, vec![3; 170_099]).unwrap();
+                    rewrite(3, 4);
                     changed = true;
                 }
                 Ok(())

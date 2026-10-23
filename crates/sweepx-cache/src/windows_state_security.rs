@@ -616,6 +616,12 @@ mod tests {
         let acl = storage.as_mut_ptr().cast::<ACL>();
         let everyone = well_known_sid(WinWorldSid).unwrap();
         let user = current_user_sid().unwrap();
+        // With both GUID pointers null, Windows can emit a basic allow ACE instead. Keep the
+        // current-object grant unrestricted, but supply an inherited-object type so the SDK
+        // constructs the object-ACE layout this regression must exercise. No inheritance flags
+        // are enabled, so this qualifier does not widen any child object's permissions.
+        let inherited_type =
+            windows_sys::core::GUID::from_u128(0x7d582570_4811_421d_8ff0_3c4d00000001);
         // SAFETY: aligned 512-byte ACL storage and live SID; SDK functions validate all bounds.
         assert_ne!(
             unsafe { InitializeAcl(acl, size_of_val(&storage) as u32, ACL_REVISION_DS) },
@@ -642,7 +648,7 @@ mod tests {
                     0,
                     FILE_GENERIC_READ,
                     ptr::null(),
-                    ptr::null(),
+                    &inherited_type,
                     everyone.as_ptr().cast_mut().cast(),
                 )
             },

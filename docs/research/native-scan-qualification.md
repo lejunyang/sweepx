@@ -309,6 +309,12 @@ qualifies, `scan_root` reads the volume's layout once, selects the records under
 emits an `AcceleratedPreview` before the traversal starts. The traversal still runs unchanged and
 still produces every authoritative record.
 
+`ScannerOptions::accelerated_preview` controls this optional work and defaults to enabled for
+direct scanner and legacy materialized scan consumers. Completion-only CLI exports, file views,
+junk reports and candidate sessions, and storage inventories disable it because they cannot
+display the preview before traversal completes. They still run the same authoritative native
+traversal, without making a volume-wide NTFS read a prerequisite for a small directory scan.
+
 ### Why a preview rather than a replacement
 
 `ScannedEntry` carries a `native_locator`: a reopen recipe built from handles the traversal

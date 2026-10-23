@@ -8,9 +8,14 @@ usage() {
 Usage: scripts/publish-crates.sh [--check]
 
 Publish all SweepX crates to crates.io in dependency order. The helper skips a
-crate only when crates.io already contains its exact name, version, and local
-package checksum. Failed publishes are retried a bounded number of times to
-tolerate index propagation.
+crate only when crates.io already contains its exact name, version, and package
+contents (apart from generated commit metadata). Failed publishes are retried a
+bounded number of times to tolerate index propagation.
+
+With --check, validate metadata, dependency order, and workspace packaging only.
+Development trees may differ from their already-published version; registry
+identity and per-crate verification builds are enforced only in publish mode.
+This does not publish anything or require CARGO_REGISTRY_TOKEN.
 
 Environment:
   CARGO_REGISTRY_TOKEN          Required for publishing; never passed on argv.
@@ -463,21 +468,15 @@ while IFS=$'\t' read -r crate version; do
   if [[ $check_only == true ]]; then
     crate_file=$(package_path "$crate" "$version")
     [[ -f $crate_file ]] || fail "cargo package did not create $crate_file"
-    if fetch_remote_checksum "$crate" "$version"; then
-      # Existing versions must also pass the exact per-package command used by
-      # real publication, including Cargo's package verification build.
-      crate_file=$(package_crate "$crate" "$version")
-      local_checksum=$(sha256_file "$crate_file")
-      [[ $local_checksum =~ ^[0-9a-f]{64}$ ]] || fail "could not hash $crate_file"
-      verify_checksum_match "$crate" "$version" "$local_checksum" "$fetched_checksum"
-      printf 'Already published with identical package bytes: %s@%s\n' \
-        "$crate" "$version"
-    else
-      local_checksum=$(sha256_file "$crate_file")
-      [[ $local_checksum =~ ^[0-9a-f]{64}$ ]] || fail "could not hash $crate_file"
-      printf 'Unpublished: %s@%s (local checksum %s; publish mode will run exact per-crate packaging)\n' \
-        "$crate" "$version" "$local_checksum"
-    fi
+    # CI runs this mode between releases, when sources and package metadata may
+    # legitimately differ from the immutable version on crates.io. Do not compare
+    # against that version or build against its stale workspace dependencies here.
+    # Actual publication below still verifies each package against the registry
+    # and refuses to reuse a published version with different package contents.
+    local_checksum=$(sha256_file "$crate_file")
+    [[ $local_checksum =~ ^[0-9a-f]{64}$ ]] || fail "could not hash $crate_file"
+    printf 'Validated local package: %s@%s (checksum %s).\n' \
+      "$crate" "$version" "$local_checksum"
     continue
   fi
 
@@ -614,7 +613,7 @@ PY
 done <"$package_file"
 
 if [[ $check_only == true ]]; then
-  printf 'Crate metadata and dependency order are valid.\n'
+  printf 'Crate metadata, dependency order, and workspace packaging are valid.\n'
 else
   printf 'All workspace crates are published at their exact workspace versions.\n'
 fi

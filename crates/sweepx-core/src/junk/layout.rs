@@ -7,8 +7,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use sweepx_model::{IdentityEvidence, NativeAbsolutePath, ScannedEntry};
 use sweepx_platform::{
-    CancellationToken, DirectoryReadLimits, EntryIdentity, FilesystemIdentity, MountIdentity,
-    PlatformError, PlatformScanner, ScanRoot,
+    CancellationToken, DirectoryEntryBatch, DirectoryEntryRecord, DirectoryReadLimits,
+    EntryIdentity, FilesystemIdentity, MountIdentity, PlatformError, PlatformScanner, ScanRoot,
 };
 use sweepx_scanner::HostPlatformScanner;
 
@@ -154,8 +154,8 @@ struct ChildListing {
     complete: bool,
 }
 
-pub(crate) struct LayoutDiscovery {
-    backend: HostPlatformScanner,
+pub(crate) struct LayoutDiscovery<P: PlatformScanner = HostPlatformScanner> {
+    backend: P,
     cancel: CancellationToken,
     limits: LayoutDiscoveryLimits,
     deadline: Option<Instant>,
@@ -173,8 +173,14 @@ pub(crate) struct LayoutDiscovery {
 
 impl LayoutDiscovery {
     pub fn new(limits: LayoutDiscoveryLimits, cancel: CancellationToken) -> Self {
+        Self::with_backend(HostPlatformScanner::new(), limits, cancel)
+    }
+}
+
+impl<P: PlatformScanner> LayoutDiscovery<P> {
+    fn with_backend(backend: P, limits: LayoutDiscoveryLimits, cancel: CancellationToken) -> Self {
         Self {
-            backend: HostPlatformScanner::new(),
+            backend,
             cancel,
             limits,
             deadline: Instant::now().checked_add(limits.deadline),
@@ -260,9 +266,7 @@ impl LayoutDiscovery {
     fn open_observed(
         &mut self,
         observed: &LayoutRoot,
-    ) -> Option<
-        sweepx_platform::RootAdmission<<HostPlatformScanner as PlatformScanner>::DirectoryHandle>,
-    > {
+    ) -> Option<sweepx_platform::RootAdmission<P::DirectoryHandle>> {
         if !self.available() {
             return None;
         }
@@ -410,48 +414,158 @@ impl LayoutDiscovery {
         markers: impl IntoIterator<Item = &'a str>,
         directories_only: bool,
     ) -> bool {
-        let Some(admitted) = self.open_observed(observed) else {
+        let Some(mut admitted) = self.open_observed(observed) else {
             return false;
         };
+        let requires_enumeration = self.backend.child_inspection_requires_enumeration();
+        let mut pending = Vec::new();
         for marker in markers {
             if !self.available() {
+                return false;
+            }
+            // Charge before constructing a requested name/path. These records are only lookup
+            // keys on backends requiring enumeration, never a substitute for native evidence.
+            if requires_enumeration
+                && !self.charge(
+                    128usize
+                        .saturating_add(observed.path.as_os_str().len().saturating_mul(4))
+                        .saturating_add(marker.len().saturating_mul(8)),
+                )
+            {
                 return false;
             }
             let Ok(child) = child_record(&observed.path, std::ffi::OsStr::new(marker)) else {
                 return false;
             };
-            // The inspected marker is resolved against the retained root handle. At most the
-            // root and one transient child-directory handle are open; no marker payload is read.
-            match sweepx_platform::inspect_bound_child(
-                &self.backend,
-                &admitted.directory,
-                &observed.path,
-                &child,
-                &self.cancel,
-            ) {
-                Ok(sweepx_platform::WalkEntry::File(_)) if !directories_only => {}
-                Ok(sweepx_platform::WalkEntry::Directory(child))
-                    if child.metadata.filesystem_identity.as_ref()
-                        == Some(&observed.filesystem)
-                        && child.metadata.mount_identity.as_ref() == Some(&observed.mount) => {}
-                Ok(sweepx_platform::WalkEntry::Boundary(_)) => {
+            if requires_enumeration {
+                if !pending.contains(&child) {
+                    pending.reserve_exact(1);
+                    pending.push(child);
+                }
+            } else if !self.inspect_marker(observed, &admitted.directory, &child, directories_only)
+            {
+                return false;
+            }
+        }
+        if pending.is_empty() {
+            return self.available();
+        }
+        #[cfg(test)]
+        {
+            self.enumerations += 1;
+        }
+        loop {
+            let Some(batch) = self.next_batch(&mut admitted.directory) else {
+                return false;
+            };
+            for child in batch.entries {
+                if !self.available() {
+                    return false;
+                }
+                if child.validate_for_parent(&observed.path).is_err() {
                     self.fail(LayoutDiscoveryFailure::ObservationUnavailable);
                     return false;
                 }
-                Ok(sweepx_platform::WalkEntry::Error(error)) => {
-                    if error.kind != sweepx_platform::ErrorKind::NotFound {
-                        self.fail(LayoutDiscoveryFailure::ObservationUnavailable);
-                    }
+                let Some(index) = pending
+                    .iter()
+                    .position(|wanted| wanted.file_name == child.file_name)
+                else {
+                    continue;
+                };
+                // Inspect before advancing the cursor: Windows binds the exact name and full
+                // identity to this handle's current batch. Retaining a name alone is insufficient.
+                if !self.inspect_marker(observed, &admitted.directory, &child, directories_only) {
                     return false;
                 }
-                Ok(_) => return false,
-                Err(error) => {
-                    self.record_error(&error);
-                    return false;
-                }
+                pending.swap_remove(index);
+            }
+            if pending.is_empty() {
+                return self.available();
+            }
+            if batch.end_of_directory {
+                return false;
             }
         }
-        self.available()
+    }
+
+    fn inspect_marker(
+        &mut self,
+        observed: &LayoutRoot,
+        directory: &P::DirectoryHandle,
+        child: &DirectoryEntryRecord,
+        directories_only: bool,
+    ) -> bool {
+        // At most the root and one transient child-directory handle are open; no payload is read.
+        match sweepx_platform::inspect_bound_child(
+            &self.backend,
+            directory,
+            &observed.path,
+            child,
+            &self.cancel,
+        ) {
+            Ok(sweepx_platform::WalkEntry::File(_)) if !directories_only => true,
+            Ok(sweepx_platform::WalkEntry::Directory(child))
+                if child.metadata.filesystem_identity.as_ref() == Some(&observed.filesystem)
+                    && child.metadata.mount_identity.as_ref() == Some(&observed.mount) =>
+            {
+                true
+            }
+            Ok(sweepx_platform::WalkEntry::Boundary(_)) => {
+                self.fail(LayoutDiscoveryFailure::ObservationUnavailable);
+                false
+            }
+            Ok(sweepx_platform::WalkEntry::Error(error)) => {
+                if error.kind != sweepx_platform::ErrorKind::NotFound {
+                    self.fail(LayoutDiscoveryFailure::ObservationUnavailable);
+                }
+                false
+            }
+            Ok(_) => false,
+            Err(error) => {
+                self.record_error(&error);
+                false
+            }
+        }
+    }
+
+    /// Read one bounded page without weakening backends' current-batch inspection contract.
+    fn next_batch(&mut self, directory: &mut P::DirectoryHandle) -> Option<DirectoryEntryBatch> {
+        if !self.available() {
+            return None;
+        }
+        if self.enumerated >= self.limits.max_enumerated_entries {
+            self.fail(LayoutDiscoveryFailure::ResourceLimit);
+            return None;
+        }
+        let limits = DirectoryReadLimits {
+            max_batch_entries: (self.limits.max_enumerated_entries - self.enumerated).min(256),
+            max_batch_bytes: 64 * 1024,
+        };
+        let batch = match self
+            .backend
+            .enumerate_children(directory, &self.cancel, limits)
+        {
+            Ok(batch) => batch,
+            Err(error) => {
+                self.record_error(&error);
+                return None;
+            }
+        };
+        if !self.available() {
+            return None;
+        }
+        let bytes = batch.entries.iter().try_fold(0usize, |total, child| {
+            total.checked_add(child.estimated_retained_bytes()?)
+        });
+        if batch.entries.len() > limits.max_batch_entries
+            || bytes.is_none_or(|bytes| bytes > limits.max_batch_bytes)
+            || (batch.entries.is_empty() && !batch.end_of_directory)
+        {
+            self.fail(LayoutDiscoveryFailure::ObservationUnavailable);
+            return None;
+        }
+        self.enumerated += batch.entries.len();
+        Some(batch)
     }
 
     pub fn profiles(&mut self, path: &Path, named: bool) -> Arc<[PathBuf]> {
@@ -476,71 +590,123 @@ impl LayoutDiscovery {
     /// prefix never establishes the layout. Each shard must remain on the parent's mount. Finder's
     /// `.DS_Store` is allowed only as a native no-follow regular file; other extra entries reject.
     pub fn has_hex_shards(&mut self, parent: &LayoutRoot, expected: usize) -> bool {
-        let listing = self.children(&parent.path, ChildSelection::All);
-        if !listing.complete
-            || listing.paths.len() < expected
-            || listing.paths.len() > expected.saturating_add(1)
-        {
-            return false;
+        if !self.backend.child_inspection_requires_enumeration() {
+            let listing = self.children(&parent.path, ChildSelection::All);
+            if !listing.complete
+                || listing.paths.len() < expected
+                || listing.paths.len() > expected.saturating_add(1)
+            {
+                return false;
+            }
+            let Some(admitted) = self.open_observed(parent) else {
+                return false;
+            };
+            let mut shards = 0;
+            for path in listing.paths.iter() {
+                let Some(name) = path.file_name() else {
+                    return false;
+                };
+                let Ok(record) = child_record(&parent.path, name) else {
+                    return false;
+                };
+                let Some(shard) = self.inspect_shard(parent, &admitted.directory, &record) else {
+                    return false;
+                };
+                shards += usize::from(shard);
+            }
+            return shards == expected && self.open_observed(parent).is_some();
         }
-        let Some(admitted) = self.open_observed(parent) else {
+        let Some(mut admitted) = self.open_observed(parent) else {
             return false;
         };
-        let mut shards = 0;
-        for path in listing.paths.iter() {
-            if !self.available() {
-                return false;
-            }
-            let Some(name) = path.file_name() else {
-                return false;
-            };
-            let valid_name = name.to_str().is_some_and(|name| {
-                name.len() == 2
-                    && name
-                        .bytes()
-                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-            });
-            let finder_metadata = name == std::ffi::OsStr::new(".DS_Store");
-            if !valid_name && !finder_metadata {
-                return false;
-            }
-            let Ok(record) = child_record(&parent.path, name) else {
+        let mut shards = 0usize;
+        let mut records = 0usize;
+        #[cfg(test)]
+        {
+            self.enumerations += 1;
+        }
+        loop {
+            let Some(batch) = self.next_batch(&mut admitted.directory) else {
                 return false;
             };
-            // One retained parent and one transient shard handle; avoid opening each ancestor
-            // chain or retaining a per-shard root index solely to validate a count.
-            match sweepx_platform::inspect_bound_child(
-                &self.backend,
-                &admitted.directory,
-                &parent.path,
-                &record,
-                &self.cancel,
-            ) {
-                Ok(sweepx_platform::WalkEntry::Directory(child))
-                    if valid_name
-                        && child.metadata.filesystem_identity.as_ref()
-                            == Some(&parent.filesystem)
-                        && child.metadata.mount_identity.as_ref() == Some(&parent.mount) =>
-                {
-                    shards += 1;
-                }
-                Ok(sweepx_platform::WalkEntry::File(child))
-                    if finder_metadata
-                        && child.filesystem_identity.as_ref() == Some(&parent.filesystem) => {}
-                Ok(sweepx_platform::WalkEntry::Error(_))
-                | Ok(sweepx_platform::WalkEntry::Boundary(_)) => {
-                    self.fail(LayoutDiscoveryFailure::ObservationUnavailable);
+            records = records.saturating_add(batch.entries.len());
+            if records > expected.saturating_add(1) {
+                return false;
+            }
+            for record in batch.entries {
+                // A memoized path listing or a reopened parent does not preserve Windows' native
+                // batch evidence. Inspect on this same retained handle before advancing its cursor.
+                let Some(shard) = self.inspect_shard(parent, &admitted.directory, &record) else {
                     return false;
-                }
-                Err(error) => {
-                    self.record_error(&error);
-                    return false;
-                }
-                Ok(_) => return false,
+                };
+                shards += usize::from(shard);
+            }
+            if batch.end_of_directory {
+                break;
             }
         }
-        // Detect parent replacement/mutation during the interval; this is not an atomic tree snapshot.
+        // Require clean EOF and detect parent replacement/mutation during the interval.
+        // This remains a non-atomic native observation, not an atomic tree snapshot.
         shards == expected && self.open_observed(parent).is_some()
+    }
+
+    /// Returns whether this is a shard (true) or an allowed Finder metadata file (false).
+    fn inspect_shard(
+        &mut self,
+        parent: &LayoutRoot,
+        directory: &P::DirectoryHandle,
+        record: &DirectoryEntryRecord,
+    ) -> Option<bool> {
+        if !self.available() {
+            return None;
+        }
+        if record.validate_for_parent(&parent.path).is_err() {
+            self.fail(LayoutDiscoveryFailure::ObservationUnavailable);
+            return None;
+        }
+        let name = record.path.file_name()?;
+        let valid_name = name.to_str().is_some_and(|name| {
+            name.len() == 2
+                && name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        });
+        let finder_metadata = name == std::ffi::OsStr::new(".DS_Store");
+        if !valid_name && !finder_metadata {
+            return None;
+        }
+        // One retained parent and one transient shard handle; never retain a per-shard root index.
+        match sweepx_platform::inspect_bound_child(
+            &self.backend,
+            directory,
+            &parent.path,
+            record,
+            &self.cancel,
+        ) {
+            Ok(sweepx_platform::WalkEntry::Directory(child))
+                if valid_name
+                    && child.metadata.filesystem_identity.as_ref() == Some(&parent.filesystem)
+                    && child.metadata.mount_identity.as_ref() == Some(&parent.mount) =>
+            {
+                Some(true)
+            }
+            Ok(sweepx_platform::WalkEntry::File(child))
+                if finder_metadata
+                    && child.filesystem_identity.as_ref() == Some(&parent.filesystem) =>
+            {
+                Some(false)
+            }
+            Ok(sweepx_platform::WalkEntry::Error(_))
+            | Ok(sweepx_platform::WalkEntry::Boundary(_)) => {
+                self.fail(LayoutDiscoveryFailure::ObservationUnavailable);
+                None
+            }
+            Err(error) => {
+                self.record_error(&error);
+                None
+            }
+            Ok(_) => None,
+        }
     }
 
     fn children(&mut self, path: &Path, selection: ChildSelection) -> ChildListing {
@@ -574,39 +740,8 @@ impl LayoutDiscovery {
         {
             self.enumerations += 1;
         }
-        loop {
-            if !self.available() {
-                break;
-            }
-            if self.enumerated >= self.limits.max_enumerated_entries {
-                self.fail(LayoutDiscoveryFailure::ResourceLimit);
-                break;
-            }
-            // Only one native directory cursor is retained during this enumeration. Its page and
-            // returned batch are bounded separately from the invocation's memoized path data.
-            let batch = match self.backend.enumerate_children(
-                &mut admitted.directory,
-                &self.cancel,
-                DirectoryReadLimits {
-                    max_batch_entries: (self.limits.max_enumerated_entries - self.enumerated)
-                        .min(256),
-                    max_batch_bytes: 64 * 1024,
-                },
-            ) {
-                Ok(batch) => batch,
-                Err(error) => {
-                    self.record_error(&error);
-                    break;
-                }
-            };
-            self.enumerated += batch.entries.len();
-            if !self.available() {
-                break;
-            }
-            if batch.entries.is_empty() && !batch.end_of_directory {
-                self.fail(LayoutDiscoveryFailure::ObservationUnavailable);
-                break;
-            }
+        // Only one native cursor and one bounded transient batch are retained.
+        while let Some(batch) = self.next_batch(&mut admitted.directory) {
             for entry in batch.entries {
                 if entry.validate_for_parent(path).is_err() {
                     valid_records = false;
@@ -677,6 +812,301 @@ fn is_named_profile(name: &sweepx_model::NativeName) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use sweepx_platform::{
+        DirectoryHandleAdmission, EntryMetadata, OpenedDirectory, RootAdmission, WalkEntry,
+    };
+
+    struct BatchHandle {
+        native: <HostPlatformScanner as PlatformScanner>::DirectoryHandle,
+        current: Vec<DirectoryEntryRecord>,
+    }
+
+    #[derive(Default)]
+    struct BatchPlatform {
+        native: HostPlatformScanner,
+        inspections: AtomicUsize,
+        cancel_after_batch: bool,
+        invalid_record: bool,
+        empty_unfinished_batch: bool,
+    }
+
+    impl BatchPlatform {
+        fn wrap(handle: <HostPlatformScanner as PlatformScanner>::DirectoryHandle) -> BatchHandle {
+            BatchHandle {
+                native: handle,
+                current: Vec::new(),
+            }
+        }
+
+        fn wrap_entry(
+            entry: WalkEntry<<HostPlatformScanner as PlatformScanner>::DirectoryHandle>,
+        ) -> WalkEntry<BatchHandle> {
+            match entry {
+                WalkEntry::Directory(opened) => WalkEntry::Directory(OpenedDirectory {
+                    handle: Self::wrap(opened.handle),
+                    metadata: opened.metadata,
+                }),
+                WalkEntry::File(value) => WalkEntry::File(value),
+                WalkEntry::Link(value) => WalkEntry::Link(value),
+                WalkEntry::Boundary(value) => WalkEntry::Boundary(value),
+                WalkEntry::Error(value) => WalkEntry::Error(value),
+                WalkEntry::CachedFile(value) => WalkEntry::CachedFile(value),
+            }
+        }
+    }
+
+    // Run the exact-current-batch contract on every host, with one record per page so retaining
+    // tokens until EOF or reopening the parent before inspection is observably incorrect.
+    impl PlatformScanner for BatchPlatform {
+        type DirectoryHandle = BatchHandle;
+
+        fn platform_name(&self) -> &'static str {
+            self.native.platform_name()
+        }
+
+        fn child_inspection_requires_enumeration(&self) -> bool {
+            true
+        }
+
+        fn admit_root(
+            &self,
+            root: &ScanRoot,
+            cancel: &CancellationToken,
+        ) -> Result<RootAdmission<BatchHandle>, PlatformError> {
+            let admitted = self.native.admit_root(root, cancel)?;
+            Ok(RootAdmission::new(
+                admitted.root,
+                admitted.metadata,
+                Self::wrap(admitted.directory),
+                admitted.root_locator,
+            ))
+        }
+
+        fn enumerate_children(
+            &self,
+            directory: &mut BatchHandle,
+            cancel: &CancellationToken,
+            limits: DirectoryReadLimits,
+        ) -> Result<DirectoryEntryBatch, PlatformError> {
+            if self.empty_unfinished_batch {
+                return Ok(DirectoryEntryBatch::continued(Vec::new()));
+            }
+            let mut batch = self.native.enumerate_children(
+                &mut directory.native,
+                cancel,
+                DirectoryReadLimits {
+                    max_batch_entries: limits.max_batch_entries.min(1),
+                    ..limits
+                },
+            )?;
+            if self.invalid_record {
+                for child in &mut batch.entries {
+                    child.path = child.path.join("unbound");
+                }
+            }
+            directory.current = batch.entries.clone();
+            if self.cancel_after_batch {
+                cancel.cancel();
+            }
+            Ok(batch)
+        }
+
+        fn inspect_child(
+            &self,
+            parent: &BatchHandle,
+            child: &DirectoryEntryRecord,
+            cancel: &CancellationToken,
+        ) -> Result<WalkEntry<BatchHandle>, PlatformError> {
+            self.inspect_child_with_directory_admission(
+                parent,
+                child,
+                cancel,
+                DirectoryHandleAdmission::Allow,
+            )
+        }
+
+        fn inspect_child_with_directory_admission(
+            &self,
+            parent: &BatchHandle,
+            child: &DirectoryEntryRecord,
+            cancel: &CancellationToken,
+            admission: DirectoryHandleAdmission,
+        ) -> Result<WalkEntry<BatchHandle>, PlatformError> {
+            if !parent.current.contains(child) {
+                return Err(PlatformError::InvalidDirectoryEntry {
+                    parent: child.path.parent().unwrap().to_path_buf(),
+                    detail: "child absent from this handle's current native batch".into(),
+                });
+            }
+            self.inspections.fetch_add(1, Ordering::SeqCst);
+            self.native
+                .inspect_child_with_directory_admission(&parent.native, child, cancel, admission)
+                .map(Self::wrap_entry)
+        }
+
+        fn is_same_mount(
+            &self,
+            root: &EntryMetadata,
+            entry: &EntryMetadata,
+        ) -> Result<bool, PlatformError> {
+            self.native.is_same_mount(root, entry)
+        }
+    }
+
+    #[test]
+    fn markers_inspect_each_current_batch_and_keep_absence_and_wrong_type_distinct() {
+        let (_owner, root) = fixture();
+        std::fs::write(root.join("marker-file"), b"marker").unwrap();
+        std::fs::create_dir(root.join("marker-directory")).unwrap();
+        let mut discovery = LayoutDiscovery::with_backend(
+            BatchPlatform::default(),
+            LayoutDiscoveryLimits::default(),
+            CancellationToken::new(),
+        );
+        let observed = discovery.directory(&root).unwrap();
+        let admitted = discovery.open_observed(&observed).unwrap();
+        let synthetic = child_record(&root, std::ffi::OsStr::new("marker-file")).unwrap();
+        assert!(
+            sweepx_platform::inspect_bound_child(
+                &discovery.backend,
+                &admitted.directory,
+                &root,
+                &synthetic,
+                &discovery.cancel
+            )
+            .is_err(),
+            "the fixture independently refuses synthesized tokens"
+        );
+        drop(admitted);
+        assert!(discovery.has_markers(
+            &observed,
+            &[
+                "marker-file".into(),
+                "marker-directory".into(),
+                "marker-file".into()
+            ]
+        ));
+        assert_eq!(discovery.backend.inspections.load(Ordering::SeqCst), 2);
+        assert!(discovery.enumerated >= 2);
+        assert!(discovery.has_directory(&observed, "marker-directory"));
+        assert!(!discovery.has_directory(&observed, "marker-file"));
+        assert!(!discovery.has_markers(&observed, &["absent".into()]));
+        assert!(discovery.failure.is_none());
+    }
+
+    #[test]
+    fn current_batch_marker_lookup_obeys_shared_bounds_and_cancellation() {
+        let (_owner, root) = fixture();
+        for name in ["first", "second"] {
+            std::fs::create_dir(root.join(name)).unwrap();
+        }
+        let mut bounded = LayoutDiscovery::with_backend(
+            BatchPlatform::default(),
+            LayoutDiscoveryLimits {
+                max_enumerated_entries: 1,
+                ..LayoutDiscoveryLimits::default()
+            },
+            CancellationToken::new(),
+        );
+        let observed = bounded.directory(&root).unwrap();
+        assert!(!bounded.has_markers(&observed, &["first".into(), "second".into()]));
+        assert_eq!(bounded.enumerated, 1);
+        assert_eq!(bounded.failure, Some(LayoutDiscoveryFailure::ResourceLimit));
+        let mut no_retention = LayoutDiscovery::with_backend(
+            BatchPlatform::default(),
+            LayoutDiscoveryLimits::default(),
+            CancellationToken::new(),
+        );
+        let observed = no_retention.directory(&root).unwrap();
+        no_retention.limits.max_retained_bytes = no_retention.retained;
+        assert!(!no_retention.has_directory(&observed, "first"));
+        assert_eq!(no_retention.enumerated, 0);
+        assert_eq!(
+            no_retention.failure,
+            Some(LayoutDiscoveryFailure::ResourceLimit)
+        );
+        for (backend, failure) in [
+            (
+                BatchPlatform {
+                    cancel_after_batch: true,
+                    ..BatchPlatform::default()
+                },
+                LayoutDiscoveryFailure::Cancelled,
+            ),
+            (
+                BatchPlatform {
+                    invalid_record: true,
+                    ..BatchPlatform::default()
+                },
+                LayoutDiscoveryFailure::ObservationUnavailable,
+            ),
+            (
+                BatchPlatform {
+                    empty_unfinished_batch: true,
+                    ..BatchPlatform::default()
+                },
+                LayoutDiscoveryFailure::ObservationUnavailable,
+            ),
+        ] {
+            let mut discovery = LayoutDiscovery::with_backend(
+                backend,
+                LayoutDiscoveryLimits::default(),
+                CancellationToken::new(),
+            );
+            let observed = discovery.directory(&root).unwrap();
+            assert!(!discovery.has_directory(&observed, "first"));
+            assert_eq!(discovery.failure, Some(failure));
+            assert_eq!(discovery.backend.inspections.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[test]
+    fn exact_shards_inspect_current_batches_and_require_eof_within_the_shared_budget() {
+        let (_owner, root) = fixture();
+        for name in ["00", "01", "02"] {
+            std::fs::create_dir(root.join(name)).unwrap();
+        }
+        std::fs::write(root.join(".DS_Store"), b"Finder metadata").unwrap();
+        let expected = std::fs::read_dir(&root)
+            .unwrap()
+            .map(|entry| entry.unwrap())
+            .filter(|entry| entry.file_type().unwrap().is_dir())
+            .count();
+        assert_eq!(expected, 3);
+        let mut discovery = LayoutDiscovery::with_backend(
+            BatchPlatform::default(),
+            LayoutDiscoveryLimits::default(),
+            CancellationToken::new(),
+        );
+        let observed = discovery.directory(&root).unwrap();
+        assert!(discovery.has_hex_shards(&observed, expected));
+        assert_eq!(discovery.backend.inspections.load(Ordering::SeqCst), 4);
+        assert_eq!(discovery.directories.len(), 1);
+        assert_eq!(discovery.enumerations, 1);
+        let mut bounded = LayoutDiscovery::with_backend(
+            BatchPlatform::default(),
+            LayoutDiscoveryLimits {
+                max_enumerated_entries: 3,
+                ..LayoutDiscoveryLimits::default()
+            },
+            CancellationToken::new(),
+        );
+        let observed = bounded.directory(&root).unwrap();
+        assert!(!bounded.has_hex_shards(&observed, expected));
+        assert_eq!(bounded.failure, Some(LayoutDiscoveryFailure::ResourceLimit));
+        std::fs::remove_dir(root.join("00")).unwrap();
+        std::fs::write(root.join("00"), b"user file").unwrap();
+        let mut wrong_type = LayoutDiscovery::with_backend(
+            BatchPlatform::default(),
+            LayoutDiscoveryLimits::default(),
+            CancellationToken::new(),
+        );
+        let observed = wrong_type.directory(&root).unwrap();
+        assert!(!wrong_type.has_hex_shards(&observed, expected));
+        assert!(wrong_type.failure.is_none());
+    }
 
     #[test]
     fn progressing_layout_work_outlives_the_original_deadline() {

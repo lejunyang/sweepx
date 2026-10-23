@@ -438,7 +438,7 @@ mod tests {
         (temp, root)
     }
     fn log(root: &Path) -> PathBuf {
-        let logs = root.join("archive/.npm/_logs");
+        let logs = root.join("archive").join(".npm").join("_logs");
         fs::create_dir_all(&logs).unwrap();
         fs::write(
             logs.join("2026-10-21T01_02_03_004Z-debug-0.log"),
@@ -468,6 +468,8 @@ mod tests {
         let scanned = Scanner::new(
             HostPlatformScanner::new(),
             ScannerOptions {
+                // Tool-cache fixtures interpret native markers and totals, not previews.
+                accelerated_preview: false,
                 retain_directory_index: false,
                 ..ScannerOptions::default()
             },
@@ -517,16 +519,20 @@ mod tests {
     fn offline_old_locations_split_downloads_logs_npx_and_unknown_data_with_native_totals() {
         let (_temp, root) = fixture();
         let logs = log(&root);
-        let cache = root.join("archive/.npm/_cacache");
+        let cache = root.join("archive").join(".npm").join("_cacache");
         fs::create_dir_all(cache.join("content-v2")).unwrap();
         fs::create_dir(cache.join("index-v5")).unwrap();
         fs::write(
-            cache.join("content-v2/payload"),
+            cache.join("content-v2").join("payload"),
             b"independent cached bytes",
         )
         .unwrap();
-        let slot = root.join("archive/.npm/_npx/0123456789abcdef");
-        fs::create_dir_all(slot.join("node_modules/tool")).unwrap();
+        let slot = root
+            .join("archive")
+            .join(".npm")
+            .join("_npx")
+            .join("0123456789abcdef");
+        fs::create_dir_all(slot.join("node_modules").join("tool")).unwrap();
         fs::write(
             slot.join("package.json"),
             br#"{"dependencies":{"tool":"1.0.0"}}"#,
@@ -534,11 +540,14 @@ mod tests {
         .unwrap();
         fs::write(slot.join("package-lock.json"), b"{}").unwrap();
         fs::write(
-            slot.join("node_modules/tool/package.json"),
+            slot.join("node_modules").join("tool").join("package.json"),
             br#"{"name":"tool","version":"1.0.0"}"#,
         )
         .unwrap();
-        let unknown = root.join("archive/.npm/old-binary-downloads");
+        let unknown = root
+            .join("archive")
+            .join(".npm")
+            .join("old-binary-downloads");
         fs::create_dir(&unknown).unwrap();
         fs::write(
             unknown.join("personal-notes"),
@@ -546,7 +555,7 @@ mod tests {
         )
         .unwrap();
         // A same-named ordinary file cannot satisfy a directory-format marker.
-        let lookalike = root.join("lookalike/_cacache");
+        let lookalike = root.join("lookalike").join("_cacache");
         fs::create_dir_all(lookalike.join("content-v2")).unwrap();
         fs::write(lookalike.join("index-v5"), b"file, not a directory").unwrap();
         let (mut rows, rules, scanned) = scan(&root);
@@ -767,10 +776,10 @@ mod tests {
         use std::os::unix::fs::symlink;
         let (_temp, root) = fixture();
         fs::create_dir(root.join("real")).unwrap();
-        let cache = root.join("custom/_cacache");
+        let cache = root.join("custom").join("_cacache");
         fs::create_dir_all(cache.join("index-v5")).unwrap();
         symlink(root.join("real"), cache.join("content-v2")).unwrap();
-        let slot = root.join("custom/_npx/0123456789abcdef");
+        let slot = root.join("custom").join("_npx").join("0123456789abcdef");
         fs::create_dir_all(&slot).unwrap();
         fs::write(slot.join("package.json"), b"{}").unwrap();
         fs::write(slot.join("package-lock.json"), b"{}").unwrap();

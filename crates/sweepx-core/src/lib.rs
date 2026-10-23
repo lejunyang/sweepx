@@ -1040,6 +1040,8 @@ pub fn scan_with_store<S: SnapshotStore>(
 /// typed facts for bounded human rendering or incremental machine export. Invalid analysis
 /// limits fail before filesystem IO. Cancellation preserves incomplete evidence; exporting
 /// results subsequently does not change the scan's terminal state or grant deletion authority.
+/// This completion-only export does not request a provisional whole-volume NTFS preview: no
+/// caller can display it before the authoritative traversal finishes.
 pub fn scan_for_output_with_store<S: SnapshotStore>(
     context: &CoreContext,
     request: &ScanRequest,
@@ -1061,7 +1063,10 @@ pub fn scan_for_output_with_store<S: SnapshotStore>(
         context,
         request,
         store,
-        ScannerOptions::default(),
+        ScannerOptions {
+            accelerated_preview: false,
+            ..ScannerOptions::default()
+        },
         None,
         None,
         None,
@@ -1080,6 +1085,8 @@ pub fn scan_for_output_with_store<S: SnapshotStore>(
 /// scanned tree's entry count.
 ///
 /// Returns the ordinary [`ScanSuccess`] plus the rule id chosen per retained entry id.
+/// Provisional NTFS totals cannot establish junk candidates and are not requested by this
+/// completion-only seam; candidates retain the authoritative native traversal and classification.
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub fn scan_junk_with_store<S: SnapshotStore>(
     context: &CoreContext,
@@ -1093,6 +1100,7 @@ pub fn scan_junk_with_store<S: SnapshotStore>(
         request,
         store,
         ScannerOptions {
+            accelerated_preview: false,
             resource_limits: junk::scan_limits(),
             retain_directory_index: false,
             retain_file_index: reuse.is_some()
@@ -1409,6 +1417,10 @@ fn scan_with_store_options<'a, S: SnapshotStore>(
             HostPlatformScanner::new(),
             ScannerOptions {
                 scan_id: scan_id.clone(),
+                // Completion-only file views discard scanner preview events. Preserve previews
+                // for materialized scan exports, but do not read a whole volume for an unused one.
+                accelerated_preview: !matches!(&projection, ScanProjection::AnalysisObserver)
+                    && scanner_options.accelerated_preview,
                 ..scanner_options
             },
         );
@@ -5853,6 +5865,30 @@ fn current_euid() -> u32 {
 mod tests {
     use super::*;
 
+    // Persistence/history fixtures consume completed traversal facts, not provisional NTFS
+    // volume previews. Keep their cache-preview behavior intact without scanning the volume.
+    fn materialized_fixture_scan<S: SnapshotStore>(
+        context: &CoreContext,
+        request: &ScanRequest,
+        store: Option<&S>,
+    ) -> Result<ScanSuccess, CoreError> {
+        scan_with_store_options(
+            context,
+            request,
+            store,
+            ScannerOptions {
+                accelerated_preview: false,
+                ..ScannerOptions::default()
+            },
+            None,
+            None,
+            None,
+            None,
+            ScanProjection::Materialized,
+        )
+        .map(|work| work.scan)
+    }
+
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     #[test]
     fn scan_status_preserves_failures_and_cancellation_without_progress_detail() {
@@ -6676,7 +6712,7 @@ mod tests {
             Locale::EnUs,
             sweepx_i18n::LocaleSource::Explicit,
         ));
-        let first = scan_with_store::<MemorySnapshotStore>(
+        let first = materialized_fixture_scan::<MemorySnapshotStore>(
             &context,
             &ScanRequest {
                 roots: vec![first_root.clone()],
@@ -6699,7 +6735,7 @@ mod tests {
         legacy.generation = "legacy_partial_scope".into();
         store.write_generation(&legacy).unwrap();
         fs::write(first_root.join("first.bin"), b"changed contents").unwrap();
-        let current = scan_with_store::<MemorySnapshotStore>(
+        let current = materialized_fixture_scan::<MemorySnapshotStore>(
             &context,
             &ScanRequest {
                 roots: vec![first_root.clone(), new_root.clone()],
@@ -6917,13 +6953,16 @@ mod tests {
         ));
         let request = ScanRequest {
             roots: vec![root],
-            state_dir: Some(state.clone()),
+            state_dir: None,
         };
-        let first = scan_with_store::<MemorySnapshotStore>(&context, &request, None).unwrap();
-        assert_eq!(
-            first.output.summary["cachePreview"]["storeStatus"],
-            "written"
+        let first =
+            materialized_fixture_scan::<MemorySnapshotStore>(&context, &request, None).unwrap();
+        let initial = store_stale_preview(
+            Some(&state),
+            &first.summary.roots[0].scan_id,
+            &first.summary,
         );
+        assert_eq!(initial.status, CACHE_STORE_MODE_WRITTEN);
         let store = preview_generation_store(Some(&state)).unwrap().unwrap();
         let pointer = fs::read(store.root().join("current.json")).unwrap();
         let previous = match store.load_current().unwrap() {
@@ -6940,15 +6979,27 @@ mod tests {
             .create_child("unknown-directory")
             .unwrap();
         fs::write(&file, b"independent new live facts").unwrap();
-        let current = scan_with_store::<MemorySnapshotStore>(&context, &request, None).unwrap();
-        assert_eq!(
-            current.output.summary["cachePreview"]["storeStatus"],
-            "skipped"
+        // Exercise the optional preview writer independently of the mandatory journal:
+        // a durable scan must reject this unsafe state namespace, not silently succeed.
+        let current = materialized_fixture_scan::<MemorySnapshotStore>(
+            &context,
+            &ScanRequest {
+                roots: request.roots.clone(),
+                state_dir: None,
+            },
+            None,
+        )
+        .unwrap();
+        let before = current.summary.clone();
+        let refused = store_stale_preview(
+            Some(&state),
+            &current.summary.roots[0].scan_id,
+            &current.summary,
         );
-        assert_eq!(
-            current.output.summary["cachePreview"]["resourceLimit"],
-            true
-        );
+        assert_eq!(refused.status, CACHE_STORE_MODE_SKIPPED);
+        assert!(refused.resource_limit);
+        assert_eq!(refused.warnings, ["cache.preview.state_accounting_failed"]);
+        assert_eq!(current.summary, before);
         let entry = current
             .summary
             .entries
@@ -7124,15 +7175,17 @@ mod tests {
 
     #[cfg(target_family = "unix")]
     #[test]
-    fn scan_rejects_symlinked_preview_cache_subtree() {
+    fn preview_rejects_symlinked_subtree_without_changing_live_facts() {
         let temp = tempfile::tempdir().unwrap();
         let base = fs::canonicalize(temp.path()).unwrap();
+        let state = base.join("state");
+        sweepx_cache::native::Directory::open(&state, true).unwrap();
         let root = base.join("root");
         fs::create_dir(&root).unwrap();
         fs::write(root.join("file.txt"), b"content").unwrap();
         let real = base.join("real-preview");
-        fs::create_dir(&real).unwrap();
-        std::os::unix::fs::symlink(&real, base.join(PREVIEW_GENERATION_POINTER_DIR)).unwrap();
+        sweepx_cache::native::Directory::open(&real, true).unwrap();
+        std::os::unix::fs::symlink(&real, state.join(PREVIEW_GENERATION_POINTER_DIR)).unwrap();
 
         let context = CoreContext::new(LocaleResolution::new(
             Locale::EnUs,
@@ -7142,16 +7195,26 @@ mod tests {
             &context,
             &ScanRequest {
                 roots: vec![root],
-                state_dir: Some(base.clone()),
+                state_dir: None,
             },
             Option::<&MemorySnapshotStore>::None,
         )
         .unwrap();
 
-        assert_eq!(scan.output.summary["cachePreview"]["loadStatus"], "miss");
-        assert_eq!(
-            scan.output.summary["cachePreview"]["storeStatus"],
-            "skipped"
+        let before = scan.summary.clone();
+        let loaded = load_stale_preview(Some(&state));
+        let stored =
+            store_stale_preview(Some(&state), &scan.summary.roots[0].scan_id, &scan.summary);
+        assert_eq!(loaded.status, CACHE_LOAD_MODE_MISS);
+        assert!(loaded.preview.is_none());
+        assert_eq!(stored.status, CACHE_STORE_MODE_SKIPPED);
+        assert_eq!(scan.summary, before);
+        assert!(fs::read_dir(&real).unwrap().next().is_none());
+        assert!(
+            fs::symlink_metadata(state.join(PREVIEW_GENERATION_POINTER_DIR))
+                .unwrap()
+                .file_type()
+                .is_symlink()
         );
         assert!(scan.output.data.get("stalePreview").is_none());
         assert!(scan.output.data.get("cachePreview").is_none());
@@ -7506,7 +7569,10 @@ mod tests {
         ));
         let invoked = AtomicBool::new(false);
         let temp = tempfile::TempDir::new().unwrap();
+        #[cfg(unix)]
         let base = fs::canonicalize(temp.path()).unwrap();
+        #[cfg(windows)]
+        let base = temp.path().to_path_buf();
         let root = base.join("workspace");
         fs::create_dir(&root).unwrap();
         fs::write(root.join("Cargo.toml"), b"[workspace]\nmembers=[]\n").unwrap();
@@ -7528,7 +7594,11 @@ mod tests {
         .expect("compatible cleaner should scan");
 
         assert_eq!(result.output.data["builtinManifestCompatible"], true);
-        assert_eq!(result.output.summary["hintCount"], "0");
+        assert_eq!(result.output.summary["hintCount"], "1");
+        assert_eq!(result.output.summary["matchCount"], "0");
+        assert_eq!(result.output.data["hints"][0]["disposition"], "report_only");
+        assert_eq!(result.output.data["hints"][0]["executable"], false);
+        assert_eq!(result.output.data["candidateAllowed"], false);
         assert!(invoked.load(Ordering::SeqCst));
     }
 
@@ -7539,7 +7609,10 @@ mod tests {
             sweepx_i18n::LocaleSource::Default,
         ));
         let temp = tempfile::TempDir::new().unwrap();
+        #[cfg(unix)]
         let base = fs::canonicalize(temp.path()).unwrap();
+        #[cfg(windows)]
+        let base = temp.path().to_path_buf();
         let root = base.join("workspace");
         fs::create_dir(&root).unwrap();
         fs::write(root.join("Cargo.toml"), b"[workspace]\nmembers=[]\n").unwrap();
@@ -7552,7 +7625,11 @@ mod tests {
 
         for result in [&legacy, &caller_owned] {
             assert_eq!(result.output.data["builtinManifestCompatible"], true);
-            assert_eq!(result.output.summary["hintCount"], "0");
+            assert_eq!(result.output.summary["hintCount"], "1");
+            assert_eq!(result.output.summary["matchCount"], "0");
+            assert_eq!(result.output.data["hints"][0]["disposition"], "report_only");
+            assert_eq!(result.output.data["hints"][0]["executable"], false);
+            assert_eq!(result.output.data["candidateAllowed"], false);
         }
     }
 

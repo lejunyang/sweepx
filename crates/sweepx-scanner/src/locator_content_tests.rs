@@ -14,6 +14,14 @@ fn native(name: &str) -> NativeName {
     }
 }
 
+fn fixture_scanner_options() -> ScannerOptions {
+    ScannerOptions {
+        // These fixtures capture native lineage for content reads, not whole-volume previews.
+        accelerated_preview: false,
+        ..ScannerOptions::default()
+    }
+}
+
 fn fixture() -> (tempfile::TempDir, PathBuf, ScannedEntry) {
     // Explicit content reads reject unknown/FUSE/overlay providers on Linux.
     #[cfg(target_os = "linux")]
@@ -27,7 +35,7 @@ fn fixture() -> (tempfile::TempDir, PathBuf, ScannedEntry) {
     let directory = root.join("captured");
     std::fs::create_dir(&directory).unwrap();
     std::fs::write(directory.join("config.json"), b"{\"version\":2}").unwrap();
-    let summary = Scanner::new(HostPlatformScanner::new(), ScannerOptions::default())
+    let summary = Scanner::new(HostPlatformScanner::new(), fixture_scanner_options())
         .scan(
             &[ScanRoot::new(root.clone()).unwrap()],
             &CancellationToken::new(),
@@ -53,6 +61,10 @@ impl PlatformScanner for ProbeScanner {
     fn platform_name(&self) -> &'static str {
         self.inner.platform_name()
     }
+    fn child_inspection_requires_enumeration(&self) -> bool {
+        self.inner.child_inspection_requires_enumeration()
+    }
+
     fn admit_root(
         &self,
         root: &ScanRoot,
@@ -278,14 +290,24 @@ fn include_parent_normalizes_the_complete_spelling_before_native_lookup() {
     };
     assert_eq!(parent, captured);
     assert_eq!(name, native("input.toml"));
-    let dotted = reader
-        .capture_directory_identity(&directory.join("."), &cancel)
-        .unwrap();
-    let (observed, name) = reader
-        .observe_cargo_config_include_parent(&dotted, Path::new("input.toml"), &cancel)
-        .unwrap();
-    assert_eq!(observed, DirectoryPathObservation::Present(parent));
-    assert_eq!(name, native("input.toml"));
+    #[cfg(unix)]
+    {
+        let dotted = reader
+            .capture_directory_identity(&directory.join("."), &cancel)
+            .unwrap();
+        let (observed, name) = reader
+            .observe_cargo_config_include_parent(&dotted, Path::new("input.toml"), &cancel)
+            .unwrap();
+        assert_eq!(observed, DirectoryPathObservation::Present(parent));
+        assert_eq!(name, native("input.toml"));
+    }
+    // Windows admission deliberately rejects ambiguous Win32 spellings, so such a captured
+    // source cannot exist there. Include normalization must not weaken that boundary.
+    #[cfg(windows)]
+    assert!(matches!(
+        reader.capture_directory_identity(&directory.join("."), &cancel),
+        Err(LocatorReadError::InvalidRequest)
+    ));
     assert!(!directory.join("missing").exists());
 }
 
@@ -442,7 +464,7 @@ fn captured_ancestor_content_uses_full_lineage_and_never_display_parents() {
     std::fs::create_dir(&nested).unwrap();
     std::fs::write(root.join("manifest.toml"), b"root context").unwrap();
     std::fs::write(directory.join("manifest.toml"), b"parent context").unwrap();
-    let summary = Scanner::new(HostPlatformScanner::new(), ScannerOptions::default())
+    let summary = Scanner::new(HostPlatformScanner::new(), fixture_scanner_options())
         .scan(
             &[ScanRoot::new(root.to_path_buf()).unwrap()],
             &CancellationToken::new(),
@@ -852,7 +874,7 @@ fn captured_ancestor_and_configured_spelling_require_native_lineage_and_bounded_
 }
 
 #[test]
-fn fixed_cargo_lookup_does_not_need_unrelated_enumeration_or_convert_a_read_gap_to_absence() {
+fn fixed_cargo_lookup_respects_backend_enumeration_and_does_not_convert_a_gap_to_absence() {
     let (_owner, directory, _) = fixture();
     let reader = new_reader(
         LocatorReadLimits {
@@ -868,14 +890,14 @@ fn fixed_cargo_lookup_does_not_need_unrelated_enumeration_or_convert_a_read_gap_
     let absent = reader
         .read_cargo_config_pair_in_captured_directory(&captured, true, &CancellationToken::new())
         .unwrap();
-    assert!(matches!(
-        absent.config,
+    let expected = if reader.platform.child_inspection_requires_enumeration() {
+        // No batch can be admitted: Windows must not mistake an unobserved name for absence.
+        CargoConfigMemberObservation::Failed(LocatorReadFailure::ResourceLimit)
+    } else {
         CargoConfigMemberObservation::AbsentDuringLookup
-    ));
-    assert!(matches!(
-        absent.config_toml,
-        CargoConfigMemberObservation::AbsentDuringLookup
-    ));
+    };
+    assert_eq!(absent.config, expected);
+    assert_eq!(absent.config_toml, expected);
     assert_eq!(reader.platform.streams.load(Ordering::SeqCst), 0);
     std::fs::create_dir(directory.join(".cargo")).unwrap();
     let captured = reader

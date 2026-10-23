@@ -243,11 +243,27 @@ fn run_scan_oracle() {
         );
         usize::try_from(count).unwrap()
     };
-    let baseline = observed_handles();
-    let directory = Directory::open(&state, true).unwrap();
     let platform = HostPlatformScanner::new();
     let scan_root = ScanRoot::new(root.clone()).unwrap();
     let cancel = CancellationToken::new();
+    #[cfg(windows)]
+    {
+        // The process-wide oracle also counts one-time Windows security/runtime handles.
+        // Initialize both consumers and close their fixture capabilities before the baseline;
+        // the exact live-capability deltas below must still hold on every subsequent open.
+        drop(Directory::open(&state, true).unwrap());
+        drop(platform.admit_root(&scan_root, &cancel).unwrap());
+        let initialized = observed_handles();
+        drop(Directory::open(&state, true).unwrap());
+        drop(platform.admit_root(&scan_root, &cancel).unwrap());
+        assert_eq!(
+            observed_handles(),
+            initialized,
+            "warm-up must not hide leaks"
+        );
+    }
+    let baseline = observed_handles();
+    let directory = Directory::open(&state, true).unwrap();
     let mut roots = (0..16)
         .map(|_| platform.admit_root(&scan_root, &cancel).unwrap())
         .collect::<Vec<_>>();
@@ -287,7 +303,11 @@ fn run_scan_oracle() {
     ));
     let refused = sweepx_scanner::Scanner::new(
         HostPlatformScanner::new(),
-        sweepx_scanner::ScannerOptions::default(),
+        sweepx_scanner::ScannerOptions {
+            // Exercise the exhausted native traversal pool, not optional whole-volume preview.
+            accelerated_preview: false,
+            ..sweepx_scanner::ScannerOptions::default()
+        },
     )
     .scan(std::slice::from_ref(&scan_root), &cancel);
     assert!(matches!(
@@ -378,6 +398,16 @@ fn run_scan_oracle() {
         .read_regular_file_relative(&roots[0].directory, &request, &cancel)
         .unwrap();
     assert_eq!(observed.bytes, b"kept bytes");
+    // This oracle runs alone in a child process. The default panic hook can initialize
+    // process-global Windows symbol/backtrace handles, which are not leaked content handles.
+    // Silence only the expected callback panic while preserving diagnostics for other panics.
+    let previous_hook = std::sync::Arc::new(std::panic::take_hook());
+    let unexpected_panic_hook = previous_hook.clone();
+    std::panic::set_hook(Box::new(move |info| {
+        if info.payload().downcast_ref::<&str>() != Some(&"controlled content callback panic") {
+            unexpected_panic_hook(info);
+        }
+    }));
     let before = observed_handles();
     let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let stream = sweepx_platform::RegularFileStreamRequest::new(
@@ -392,6 +422,10 @@ fn run_scan_oracle() {
             panic!("controlled content callback panic")
         })
     }));
+    drop(std::panic::take_hook());
+    std::panic::set_hook(
+        std::sync::Arc::try_unwrap(previous_hook).unwrap_or_else(|_| unreachable!()),
+    );
     let panic = panic.expect_err("the native content callback must be reached");
     assert_eq!(
         panic.downcast_ref::<&str>(),

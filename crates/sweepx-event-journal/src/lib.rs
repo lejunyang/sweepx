@@ -2023,8 +2023,12 @@ fn configure_connection(connection: &Connection) -> Result<(), JournalError> {
     connection.set_db_config(DbConfig::SQLITE_DBCONFIG_TRUSTED_SCHEMA, false)?;
     connection.set_db_config(DbConfig::SQLITE_DBCONFIG_DQS_DDL, false)?;
     connection.set_db_config(DbConfig::SQLITE_DBCONFIG_DQS_DML, false)?;
+    // A persisted WAL database must enter exclusive locking before any schema-reading
+    // pragma. Otherwise SQLite tries normal-mode shared memory, which this VFS deliberately
+    // does not implement, and reopening an otherwise valid completed journal fails.
+    connection.execute_batch("PRAGMA locking_mode=EXCLUSIVE;")?;
     connection.execute_batch(
-        "PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL; PRAGMA mmap_size=0; PRAGMA trusted_schema=OFF; PRAGMA read_uncommitted=OFF; PRAGMA locking_mode=EXCLUSIVE; PRAGMA temp_store=MEMORY; PRAGMA wal_autocheckpoint=64; PRAGMA journal_size_limit=8388608;",
+        "PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL; PRAGMA mmap_size=0; PRAGMA trusted_schema=OFF; PRAGMA read_uncommitted=OFF; PRAGMA temp_store=MEMORY; PRAGMA wal_autocheckpoint=64; PRAGMA journal_size_limit=8388608;",
     )?;
     connection.pragma_update(None, "max_page_count", MAX_PAGE_COUNT)?;
     connection.pragma_update(None, "journal_size_limit", MAX_WAL_BYTES as i64)?;
@@ -3242,17 +3246,38 @@ mod tests {
         ));
         drop(journal);
 
-        fs::remove_dir(&root).unwrap();
-        fs::rename(&moved, &root).unwrap();
-        let journal = EventJournal::open(&root).unwrap();
-        let replacement = root.join("replacement.db");
-        fs::write(&replacement, b"not sqlite").unwrap();
-        fs::set_permissions(&replacement, fs::Permissions::from_mode(0o600)).unwrap();
-        fs::rename(&replacement, root.join(DATABASE_FILE)).unwrap();
-        assert!(matches!(
-            journal.verify_integrity(),
-            Err(JournalError::StateIdentityChanged)
-        ));
+        for preserve_original_link in [true, false] {
+            let temp = TempDir::new().unwrap();
+            let root = private_root(&temp);
+            let journal = EventJournal::open(&root).unwrap();
+            let database = root.join(DATABASE_FILE);
+            if preserve_original_link {
+                // Keep the retained inode private and linked so the binding comparison,
+                // rather than the stronger unlinked-file refusal, is exercised.
+                fs::rename(&database, root.join("displaced.db")).unwrap();
+            }
+            let replacement = root.join("replacement.db");
+            fs::write(&replacement, b"not sqlite").unwrap();
+            fs::set_permissions(&replacement, fs::Permissions::from_mode(0o600)).unwrap();
+            fs::rename(&replacement, &database).unwrap();
+            let error = journal.verify_integrity().unwrap_err();
+            if preserve_original_link {
+                assert!(
+                    matches!(error, JournalError::StateIdentityChanged),
+                    "{error}"
+                );
+            } else {
+                // Rename-over unlinks the retained inode. Its single-link/private admission
+                // fails before an identity comparison; this must remain a hard refusal.
+                assert!(
+                    matches!(&error, JournalError::UnsafeStateFile(path)
+                    if path == &database.display().to_string()),
+                    "{error}"
+                );
+            }
+            drop(journal);
+            assert_eq!(fs::read(&database).unwrap(), b"not sqlite");
+        }
     }
 
     #[cfg(target_os = "linux")]

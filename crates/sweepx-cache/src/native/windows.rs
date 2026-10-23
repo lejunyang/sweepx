@@ -33,11 +33,10 @@ use windows_sys::Win32::Foundation::{
 use windows_sys::Win32::Storage::FileSystem::{
     DELETE, FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS,
     FILE_ATTRIBUTE_RECALL_ON_OPEN, FILE_ATTRIBUTE_REPARSE_POINT, FILE_BASIC_INFO, FILE_DEVICE_DISK,
-    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FILE_LIST_DIRECTORY,
-    FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    FILE_STANDARD_INFO, FILE_TYPE_DISK, FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, FileBasicInfo,
-    FileIdInfo, FileStandardInfo, GetDriveTypeW, GetFileInformationByHandleEx, GetFileType,
-    READ_CONTROL, ReOpenFile, SYNCHRONIZE, SetFileTime,
+    FILE_ID_INFO, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_DELETE,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STANDARD_INFO, FILE_TYPE_DISK, FILE_WRITE_ATTRIBUTES,
+    FILE_WRITE_DATA, FileBasicInfo, FileIdInfo, FileStandardInfo, GetDriveTypeW,
+    GetFileInformationByHandleEx, GetFileType, READ_CONTROL, SYNCHRONIZE, SetFileTime,
 };
 use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 use windows_sys::Win32::System::Ioctl::FILE_DEVICE_DISK_FILE_SYSTEM;
@@ -430,16 +429,21 @@ impl Directory {
         let mut published = false;
         let result = (|| {
             self.valid_file(&file)?;
-            encode(&mut file)?;
+            encode(&mut file)
+                .map_err(|error| native_error("state/cache temporary encoding", error))?;
             if sync {
-                file.sync_all()?;
+                file.sync_all()
+                    .map_err(|error| native_error("state file pre-publication flush", error))?;
             }
             self.private()?;
             self.valid_file(&file)?;
             rename(&file, &self.file, &destination)?;
             published = true;
             if sync {
-                commit_sync(|| file.sync_all())?;
+                commit_sync(|| {
+                    file.sync_all()
+                        .map_err(|error| native_error("state file post-publication flush", error))
+                })?;
             }
             Ok(())
         })();
@@ -492,24 +496,18 @@ impl Directory {
         mut visit: impl FnMut(Option<&str>) -> io::Result<()>,
     ) -> io::Result<()> {
         self.private()?;
-        // ReOpenFile creates an independent cursor on the same retained object. A duplicate
-        // handle would share the cursor, and reopening a display path could reach a replacement.
+        // An empty NT name reopens the retained object with an independent cursor. ReOpenFile
+        // rejects directories even with BACKUP_SEMANTICS (Wine's kernel32 file conformance test
+        // covers this); a duplicate shares its cursor, and a display path can reach a replacement.
         let original: FILE_ID_INFO = query(&self.file, FileIdInfo)?;
-        let io_lease = Lease::acquire_io()?;
-        // SAFETY: the handle is live and the flags request an ordinary synchronous directory
-        // handle. Reparse/provider attributes and native identity are checked before enumeration.
-        let raw = unsafe {
-            ReOpenFile(
-                self.file.as_raw_handle().cast(),
-                DIR_ACCESS | SYNCHRONIZE,
-                SHARE_ALL,
-                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
-            )
-        };
-        if raw.is_null() || raw == INVALID_HANDLE_VALUE {
-            return Err(io::Error::last_os_error());
-        }
-        let directory = NativeFile::new(unsafe { File::from_raw_handle(raw.cast()) }, io_lease);
+        let directory = self.open_relative(
+            &[],
+            DIR_ACCESS,
+            FILE_DIRECTORY_FILE,
+            FILE_OPEN,
+            SHARE_ALL,
+            None,
+        )?;
         let reopened: FILE_ID_INFO = query(&directory, FileIdInfo)?;
         if reopened.VolumeSerialNumber != original.VolumeSerialNumber
             || reopened.FileId.Identifier != original.FileId.Identifier
@@ -519,6 +517,7 @@ impl Directory {
             ));
         }
         ordinary(&directory, true, Some(self.volume))?;
+        private(&directory)?;
         let mut page = vec![0usize; (64 * 1024) / size_of::<usize>()];
         let mut remaining = super::ENUMERATION_ENTRY_LIMIT;
         // One extra query allows the terminal NO_MORE_FILES status at the entry cap. Zero-byte
@@ -545,7 +544,7 @@ impl Directory {
             if status == STATUS_NO_MORE_FILES {
                 return Ok(());
             }
-            nt_result(status)?;
+            nt_result(status, "NtQueryDirectoryFile")?;
             let length = status_block.Information;
             if length == 0 || length > 64 * 1024 {
                 return Err(io::Error::other("invalid cache enumeration completion"));
@@ -636,7 +635,10 @@ fn open_native(
         )
     };
     if status < 0 {
-        nt_result(status)?;
+        nt_result(
+            status,
+            &format!("NtCreateFile(kind={kind:#x}, disposition={disposition}, access={access:#x})"),
+        )?;
     }
     if file.is_null() || file == INVALID_HANDLE_VALUE {
         return Err(io::Error::other("Windows returned no cache handle"));
@@ -645,11 +647,34 @@ fn open_native(
     let file = NativeFile::new(unsafe { File::from_raw_handle(file.cast()) }, io_lease);
     // NT_SUCCESS can include informational statuses. Own the returned handle before refusing
     // an unexpected positive completion, so conservative cache failure cannot leak it.
-    nt_result(status)?;
+    nt_result(status, "NtCreateFile completion")?;
     Ok(file)
 }
 
-fn nt_result(status: i32) -> io::Result<()> {
+#[derive(Debug, thiserror::Error)]
+#[error("{operation}: {source}")]
+struct NativeIoError {
+    operation: String,
+    #[source]
+    source: io::Error,
+}
+
+// Preserve error kinds used by not-found/permission admission and the native source while
+// identifying the failing phase. Do not flatten typed handle-budget or link refusals.
+fn native_error(operation: &str, error: io::Error) -> io::Error {
+    if error.raw_os_error().is_none() {
+        return error;
+    }
+    io::Error::new(
+        error.kind(),
+        NativeIoError {
+            operation: operation.to_owned(),
+            source: error,
+        },
+    )
+}
+
+fn nt_result(status: i32, operation: &str) -> io::Result<()> {
     if status == 0 {
         return Ok(());
     }
@@ -657,8 +682,9 @@ fn nt_result(status: i32) -> io::Result<()> {
         return Err(io::Error::other("unexpected asynchronous cache completion"));
     }
     // SAFETY: converts an integer status without borrowing native memory.
-    Err(io::Error::from_raw_os_error(
-        unsafe { RtlNtStatusToDosError(status) } as i32,
+    Err(native_error(
+        operation,
+        io::Error::from_raw_os_error(unsafe { RtlNtStatusToDosError(status) } as i32),
     ))
 }
 
@@ -675,7 +701,10 @@ fn query<T>(file: &File, class: i32) -> io::Result<T> {
         )
     } == 0
     {
-        return Err(io::Error::last_os_error());
+        return Err(native_error(
+            &format!("GetFileInformationByHandleEx(class={class})"),
+            io::Error::last_os_error(),
+        ));
     }
     Ok(unsafe { result.assume_init() })
 }
@@ -685,15 +714,18 @@ fn ordinary(file: &File, directory: bool, volume: Option<u64>) -> io::Result<FIL
     let mut completion = IO_STATUS_BLOCK::default();
     // SAFETY: exact SDK class/type, naturally aligned fixed output and a live synchronous handle.
     // Checking the opened device closes the drive-alias race in the earlier pathname precheck.
-    nt_result(unsafe {
-        NtQueryVolumeInformationFile(
-            file.as_raw_handle().cast(),
-            &mut completion,
-            device.as_mut_ptr().cast(),
-            size_of::<FILE_FS_DEVICE_INFORMATION>() as u32,
-            FileFsDeviceInformation,
-        )
-    })?;
+    nt_result(
+        unsafe {
+            NtQueryVolumeInformationFile(
+                file.as_raw_handle().cast(),
+                &mut completion,
+                device.as_mut_ptr().cast(),
+                size_of::<FILE_FS_DEVICE_INFORMATION>() as u32,
+                FileFsDeviceInformation,
+            )
+        },
+        "NtQueryVolumeInformationFile(FileFsDeviceInformation)",
+    )?;
     if completion.Information != size_of::<FILE_FS_DEVICE_INFORMATION>() {
         return Err(io::Error::other("incomplete cache device information"));
     }
@@ -705,7 +737,9 @@ fn ordinary(file: &File, directory: bool, volume: Option<u64>) -> io::Result<FIL
     {
         return Err(io::Error::other("cache object belongs to a remote device"));
     }
-    let metadata = file.metadata()?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| native_error("retained file metadata", error))?;
     if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
         return Err(linked_object());
     }
@@ -728,7 +762,9 @@ fn ordinary(file: &File, directory: bool, volume: Option<u64>) -> io::Result<FIL
 }
 
 fn private(file: &File) -> io::Result<()> {
-    if !is_private_owned_handle(file)? {
+    if !is_private_owned_handle(file)
+        .map_err(|error| native_error("retained file security validation", error))?
+    {
         return Err(io::Error::other("cache object is not current-user private"));
     }
     Ok(())
@@ -791,30 +827,36 @@ fn rename(file: &File, parent: &File, name: &[u16]) -> io::Result<()> {
         );
     }
     let mut status = IO_STATUS_BLOCK::default();
-    nt_result(unsafe {
-        NtSetInformationFile(
-            file.as_raw_handle().cast(),
-            &mut status,
-            rename.cast(),
-            length as u32,
-            FileRenameInformation,
-        )
-    })
+    nt_result(
+        unsafe {
+            NtSetInformationFile(
+                file.as_raw_handle().cast(),
+                &mut status,
+                rename.cast(),
+                length as u32,
+                FileRenameInformation,
+            )
+        },
+        "NtSetInformationFile(FileRenameInformation)",
+    )
 }
 
 fn dispose(file: &File) -> io::Result<()> {
     let disposition = FILE_DISPOSITION_INFORMATION { DeleteFile: true };
     let mut status = IO_STATUS_BLOCK::default();
     // SAFETY: live DELETE handle and correctly sized, initialized SDK disposition structure.
-    nt_result(unsafe {
-        NtSetInformationFile(
-            file.as_raw_handle().cast(),
-            &mut status,
-            (&disposition as *const FILE_DISPOSITION_INFORMATION).cast(),
-            size_of::<FILE_DISPOSITION_INFORMATION>() as u32,
-            FileDispositionInformation,
-        )
-    })
+    nt_result(
+        unsafe {
+            NtSetInformationFile(
+                file.as_raw_handle().cast(),
+                &mut status,
+                (&disposition as *const FILE_DISPOSITION_INFORMATION).cast(),
+                size_of::<FILE_DISPOSITION_INFORMATION>() as u32,
+                FileDispositionInformation,
+            )
+        },
+        "NtSetInformationFile(FileDispositionInformation)",
+    )
 }
 
 #[cfg(test)]
@@ -836,6 +878,79 @@ mod tests {
         let path = guard.path().join("cache");
         let directory = Directory::open(&path, true).unwrap();
         (guard, path, directory)
+    }
+
+    #[test]
+    fn durable_state_reservation_and_synced_publication_survive_reopening() {
+        use crate::state_directory::{StateUsage, StateWriteSession};
+        let (_guard, path, root) = fixture();
+        let mut session = StateWriteSession::capture(&root)
+            .expect("capture state lock and enumerate the empty retained directory");
+        session
+            .reserve(9, 2)
+            .expect("reserve a child directory and snapshot before creating them");
+        let operations = session
+            .root()
+            .create_child("operations")
+            .expect("create the protected operations directory");
+        operations
+            .write_synced_bytes("snapshot.json", b"old bytes", 9)
+            .expect("create, flush, rename and flush the first snapshot");
+        assert_eq!(
+            fs::read(path.join("operations/snapshot.json")).unwrap(),
+            b"old bytes"
+        );
+        drop(operations);
+        drop(session);
+        drop(root);
+
+        // Reopen through the public state path as a later CLI invocation does. This also
+        // exercises independent enumeration and metadata-only accounting of published files.
+        let mut session = StateWriteSession::open(&path, false)
+            .expect("reopen state and account the existing ordinary private snapshot");
+        assert_eq!(
+            session.usage(),
+            StateUsage {
+                bytes: 9,
+                entries: 3
+            }
+        );
+        session
+            .reserve(9, 1)
+            .expect("reserve temporary coexistence with the previous snapshot");
+        let operations = session
+            .root()
+            .child("operations")
+            .expect("reopen the retained operations directory");
+        operations
+            .write_synced_bytes("snapshot.json", b"new bytes", 9)
+            .expect("atomically replace and flush the existing snapshot");
+        assert_eq!(
+            fs::read(path.join("operations/snapshot.json")).unwrap(),
+            b"new bytes"
+        );
+        assert_eq!(fs::read_dir(path.join("operations")).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn native_diagnostics_preserve_admission_error_kinds_and_typed_refusals() {
+        let error = native_error("native phase", io::Error::from_raw_os_error(5));
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(error.to_string().starts_with("native phase: "));
+        let source = error
+            .get_ref()
+            .unwrap()
+            .source()
+            .unwrap()
+            .downcast_ref::<io::Error>()
+            .unwrap();
+        assert_eq!(source.raw_os_error(), Some(5));
+        let missing = native_error("native open", io::Error::from_raw_os_error(2));
+        assert_eq!(missing.kind(), io::ErrorKind::NotFound);
+        assert!(super::super::is_link_refusal(&native_error(
+            "phase",
+            linked_object()
+        )));
     }
 
     #[test]
@@ -897,6 +1012,50 @@ mod tests {
         directory.remove("fact").unwrap();
         assert!(!retained.join("fact").exists());
         assert_eq!(fs::read(path.join("other")).unwrap(), br#""replacement""#);
+    }
+
+    #[test]
+    fn reentrant_enumeration_has_independent_cursors_after_path_replacement() {
+        let (guard, path, directory) = fixture();
+        // More than one 64 KiB names page is required: if everything fits in the first page,
+        // an inner enumeration could exhaust a shared cursor without truncating the outer one.
+        for index in 0..300 {
+            let name = format!("entry-{index:04}-{}", "x".repeat(128));
+            fs::write(path.join(name), []).unwrap();
+        }
+        let retained = guard.path().join("retained");
+        fs::rename(&path, &retained).unwrap();
+        let replacement = Directory::open(&path, true).unwrap();
+        replacement.write_json("replacement", &true, 16).unwrap();
+        let expected: BTreeSet<_> = fs::read_dir(&retained)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(expected.len(), 300);
+
+        // retain() duplicates authority, not the underlying file-object enumeration cursor.
+        // Reenter through that alias while the outer enumerator still has pages left to read.
+        let alias = directory.retain().unwrap();
+        let mut outer = BTreeSet::new();
+        let mut inner = None;
+        directory
+            .entries(|name| {
+                outer.insert(name.to_owned());
+                if inner.is_none() {
+                    let mut names = BTreeSet::new();
+                    alias.entries(|name| {
+                        names.insert(name.to_owned());
+                        Ok(())
+                    })?;
+                    inner = Some(names);
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(outer, expected);
+        assert_eq!(inner.unwrap(), expected);
+        assert_eq!(fs::read_dir(&path).unwrap().count(), 1);
+        assert_eq!(fs::read(path.join("replacement")).unwrap(), b"true");
     }
 
     #[test]

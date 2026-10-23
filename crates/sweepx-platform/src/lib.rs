@@ -1130,6 +1130,15 @@ pub trait PlatformScanner: Send + Sync {
 
     fn platform_name(&self) -> &'static str;
 
+    /// Whether inspection requires a token from this handle's most recent enumeration batch.
+    ///
+    /// Windows binds each child to its enumerated full file ID and exact native name. Named
+    /// reopens must obtain that evidence before inspection rather than synthesizing a token.
+    /// Wrappers must forward this requirement when delegating to another backend.
+    fn child_inspection_requires_enumeration(&self) -> bool {
+        false
+    }
+
     fn admit_root(
         &self,
         root: &ScanRoot,

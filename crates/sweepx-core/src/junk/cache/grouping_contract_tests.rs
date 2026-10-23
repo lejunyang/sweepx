@@ -44,18 +44,25 @@ impl NativeFixture {
     }
 
     fn scan(&self) -> ClassifiedScan {
-        Scanner::new(HostPlatformScanner::new(), ScannerOptions::default())
-            .scan_classified(
-                &self
-                    .roots
-                    .iter()
-                    .map(|root| ScanRoot::new(root.clone()).unwrap())
-                    .collect::<Vec<_>>(),
-                &CancellationToken::new(),
-                &JunkService::built_in().unwrap(),
-                None,
-            )
-            .unwrap()
+        Scanner::new(
+            HostPlatformScanner::new(),
+            ScannerOptions {
+                // Native attribution facts seed this fixture, not whole-volume previews.
+                accelerated_preview: false,
+                ..ScannerOptions::default()
+            },
+        )
+        .scan_classified(
+            &self
+                .roots
+                .iter()
+                .map(|root| ScanRoot::new(root.clone()).unwrap())
+                .collect::<Vec<_>>(),
+            &CancellationToken::new(),
+            &JunkService::built_in().unwrap(),
+            None,
+        )
+        .unwrap()
     }
 
     fn expected_candidates(&self) -> BTreeMap<usize, BTreeSet<PathBuf>> {
@@ -129,10 +136,11 @@ fn ordinary_file_lengths(path: &Path) -> BTreeMap<String, u128> {
             let entry = entry.unwrap();
             let metadata = fs::symlink_metadata(entry.path()).unwrap();
             metadata.file_type().is_file().then(|| {
-                (
-                    entry.file_name().into_string().unwrap(),
-                    u128::from(metadata.len()),
-                )
+                let name = entry.file_name().into_string().unwrap();
+                // The listing index uses ASCII-folded Windows rule-marker keys.
+                #[cfg(windows)]
+                let name = name.to_ascii_lowercase();
+                (name, u128::from(metadata.len()))
             })
         })
         .collect()

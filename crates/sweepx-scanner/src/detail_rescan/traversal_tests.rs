@@ -33,12 +33,14 @@ struct Handle {
     // Native owner closes before test instrumentation counts a released capability.
     native: NativeHandle,
     path: PathBuf,
+    inspection_batch: Vec<DirectoryEntryRecord>,
     _lease: Lease,
 }
 struct ProbedPlatform {
     native: HostPlatformScanner,
     probe: Arc<Probe>,
     bad_batch: bool,
+    require_enumerated_inspection: bool,
     mount_boundaries: BTreeSet<PathBuf>,
     changed_root_mount: bool,
     force_full_file_observations: bool,
@@ -55,6 +57,7 @@ impl ProbedPlatform {
             native: HostPlatformScanner::new(),
             probe,
             bad_batch: false,
+            require_enumerated_inspection: false,
             mount_boundaries: BTreeSet::new(),
             changed_root_mount: false,
             force_full_file_observations: false,
@@ -72,10 +75,24 @@ impl ProbedPlatform {
         let handle = Handle {
             native,
             path,
+            inspection_batch: Vec::new(),
             _lease: Lease(Arc::clone(&self.probe)),
         };
         self.observe();
         handle
+    }
+    fn check_child(
+        &self,
+        parent: &Handle,
+        child: &DirectoryEntryRecord,
+    ) -> Result<(), PlatformError> {
+        if self.require_enumerated_inspection && !parent.inspection_batch.contains(child) {
+            return Err(PlatformError::InvalidDirectoryEntry {
+                parent: parent.path.clone(),
+                detail: "child was not in this handle's current enumeration batch".into(),
+            });
+        }
+        Ok(())
     }
     fn observed(&self, mut entry: WalkEntry<NativeHandle>) -> WalkEntry<Handle> {
         match &mut entry {
@@ -124,6 +141,10 @@ impl PlatformScanner for ProbedPlatform {
     fn platform_name(&self) -> &'static str {
         self.native.platform_name()
     }
+    fn child_inspection_requires_enumeration(&self) -> bool {
+        self.require_enumerated_inspection || self.native.child_inspection_requires_enumeration()
+    }
+
     fn admit_root(
         &self,
         root: &ScanRoot,
@@ -165,6 +186,7 @@ impl PlatformScanner for ProbedPlatform {
         let batch = self
             .native
             .enumerate_children(&mut directory.native, cancel, limits)?;
+        directory.inspection_batch = batch.entries.clone();
         for child in &batch.entries {
             if self
                 .mount_boundaries
@@ -185,6 +207,7 @@ impl PlatformScanner for ProbedPlatform {
         child: &DirectoryEntryRecord,
         cancel: &CancellationToken,
     ) -> Result<WalkEntry<Handle>, PlatformError> {
+        self.check_child(parent, child)?;
         self.native
             .inspect_child(&parent.native, child, cancel)
             .map(|entry| self.observed(entry))
@@ -196,6 +219,7 @@ impl PlatformScanner for ProbedPlatform {
         cancel: &CancellationToken,
         admission: DirectoryHandleAdmission,
     ) -> Result<WalkEntry<Handle>, PlatformError> {
+        self.check_child(parent, child)?;
         self.native
             .inspect_child_with_directory_admission(&parent.native, child, cancel, admission)
             .map(|entry| self.observed(entry))
@@ -206,6 +230,7 @@ impl PlatformScanner for ProbedPlatform {
         child: &DirectoryEntryRecord,
         cancel: &CancellationToken,
     ) -> Result<WalkEntry<Handle>, PlatformError> {
+        self.check_child(parent, child)?;
         self.native
             .inspect_child_with_mount_identity(&parent.native, child, cancel)
             .map(|entry| self.observed(entry))
@@ -217,6 +242,7 @@ impl PlatformScanner for ProbedPlatform {
         cancel: &CancellationToken,
         admission: DirectoryHandleAdmission,
     ) -> Result<WalkEntry<Handle>, PlatformError> {
+        self.check_child(parent, child)?;
         if !self.file_delay.is_zero()
             && fs::symlink_metadata(&child.path).is_ok_and(|metadata| metadata.is_file())
         {
@@ -259,6 +285,19 @@ impl PlatformScanner for ProbedPlatform {
         }
         self.probe.native_lengths.fetch_add(1, Ordering::SeqCst);
         Some(file)
+    }
+    fn stream_regular_file_relative(
+        &self,
+        parent: &Handle,
+        request: &sweepx_platform::RegularFileStreamRequest,
+        cancel: &CancellationToken,
+        consume: &mut dyn FnMut(&[u8]) -> Result<(), sweepx_platform::BoundedRegularFileReadError>,
+    ) -> Result<
+        sweepx_platform::RegularFileStreamResult,
+        sweepx_platform::BoundedRegularFileReadError,
+    > {
+        self.native
+            .stream_regular_file_relative(&parent.native, request, cancel, consume)
     }
     fn is_same_mount(
         &self,
@@ -359,6 +398,8 @@ fn source(root: &Path) -> (ScanId, ScannedEntry) {
         HostPlatformScanner::new(),
         ScannerOptions {
             scan_id: scan_id.clone(),
+            // These fixtures validate native traversal, not a volume-wide NTFS preview.
+            accelerated_preview: false,
             ..ScannerOptions::default()
         },
     )
@@ -400,6 +441,219 @@ fn released(probe: &Probe) {
     assert_eq!(probe.live.load(Ordering::SeqCst), 0);
     #[cfg(unix)]
     assert_eq!(probe.descriptors(), 0);
+}
+
+#[test]
+fn named_reopens_obtain_current_batch_evidence_for_details_content_and_manifests() {
+    use crate::{CargoConfigMemberObservation, LocatorReadLimits, LocatorReader};
+
+    let (_temp, root) = fixture();
+    let nested = root.join("nested");
+    fs::create_dir(&nested).unwrap();
+    fs::write(nested.join("payload"), b"abcde").unwrap();
+    fs::write(nested.join("manifest.json"), b"{}").unwrap();
+    fs::create_dir(root.join(".cargo")).unwrap();
+    fs::write(root.join(".cargo/config.toml"), b"[build]\n").unwrap();
+    let cancel = CancellationToken::new();
+    let summary = Scanner::new(
+        HostPlatformScanner::new(),
+        ScannerOptions {
+            accelerated_preview: false,
+            ..ScannerOptions::default()
+        },
+    )
+    .scan(&[ScanRoot::new(&root).unwrap()], &cancel)
+    .unwrap();
+    let directory = summary
+        .entries
+        .iter()
+        .find(|row| Path::new(&row.display_path) == nested)
+        .unwrap();
+    let file = summary
+        .entries
+        .iter()
+        .find(|row| Path::new(&row.display_path) == nested.join("payload"))
+        .unwrap();
+    let request = DetailRescanRequest {
+        source_scan_id: &directory.scan_id,
+        source_root_identity: summary.roots[0].identity.as_ref().unwrap(),
+        source_directory_identity: directory.identity.as_ref().unwrap(),
+        directory_locator: directory.executable_native_locator().unwrap().unwrap(),
+        revision: 1.into(),
+        max_rows: 20,
+    };
+    let platform = || {
+        let mut platform = ProbedPlatform::new(Arc::default());
+        // Model Windows' strict native contract even on Unix CI. The wrapper refuses fabricated
+        // tokens, so this exercises the caller/backend mismatch rather than trusting a flag.
+        platform.require_enumerated_inspection = true;
+        platform
+    };
+    let strict = platform();
+    let admitted = strict
+        .admit_root(&ScanRoot::new(&root).unwrap(), &cancel)
+        .unwrap();
+    let fabricated =
+        DirectoryEntryRecord::from_parent_and_name(&root, directory.native_basename.clone())
+            .unwrap();
+    assert!(matches!(
+        sweepx_platform::inspect_bound_child(
+            &strict,
+            &admitted.directory,
+            &root,
+            &fabricated,
+            &cancel,
+        ),
+        Err(PlatformError::InvalidDirectoryEntry { .. })
+    ));
+    drop(admitted);
+    let limits = ScanResourceLimits {
+        max_directory_batch_entries: 1,
+        ..limits()
+    };
+    let reader = DetailRescanner::new(platform(), limits);
+    let mut ids = DetailEntryIdAllocator::new(directory.scan_id.clone()).unwrap();
+    let observed = reader
+        .observe_child(request, &file.native_basename, &mut ids, &cancel)
+        .unwrap();
+    assert_eq!(observed.logical_bytes, known_u128(5));
+    let mut payload = Vec::new();
+    reader
+        .stream_file(
+            FileContentRequest {
+                entry: file,
+                offset: 0,
+                max_bytes: 5,
+                previous: None,
+            },
+            &cancel,
+            &mut |bytes| {
+                payload.extend_from_slice(bytes);
+                Ok(())
+            },
+        )
+        .unwrap();
+    assert_eq!(payload, fs::read(nested.join("payload")).unwrap());
+    fs::write(nested.join("payload"), b"updated-current").unwrap();
+    let refreshed = reader.rescan(request, &mut ids, &cancel).unwrap();
+    assert!(refreshed.aggregate.coverage.complete);
+    assert_eq!(refreshed.aggregate.apparent_logical_bytes, known_u128(17));
+
+    let locator = LocatorReader::new(
+        platform(),
+        LocatorReadLimits {
+            max_components_per_request: 64,
+            max_total_components: 128,
+            max_directory_batch_entries: 1,
+            ..LocatorReadLimits::default()
+        },
+    );
+    let captured = locator.capture_directory_identity(&root, &cancel).unwrap();
+    let captured_child = locator
+        .capture_child_directory(&captured, &directory.native_basename, &cancel)
+        .unwrap();
+    let manifest = summary
+        .entries
+        .iter()
+        .find(|row| Path::new(&row.display_path) == nested.join("manifest.json"))
+        .unwrap();
+    let bytes = locator.read_cargo_config_include_in_captured_directory(
+        &captured_child,
+        &manifest.native_basename,
+        &cancel,
+    );
+    assert_eq!(bytes.observed_bytes().unwrap(), b"{}");
+    let pair = locator
+        .read_cargo_config_pair_in_captured_directory(&captured, true, &cancel)
+        .unwrap();
+    assert_eq!(pair.config_toml.observed_bytes().unwrap(), b"[build]\n");
+    assert_eq!(
+        pair.config,
+        CargoConfigMemberObservation::AbsentDuringEnumeration
+    );
+
+    let limited_locator = LocatorReader::new(
+        platform(),
+        LocatorReadLimits {
+            max_components_per_request: 64,
+            max_total_components: 128,
+            max_directory_entries: 0,
+            ..LocatorReadLimits::default()
+        },
+    );
+    assert_eq!(
+        limited_locator.capture_child_directory(&captured, &directory.native_basename, &cancel),
+        Err(crate::LocatorDirectoryLookupFailure::Read(
+            crate::LocatorReadFailure::ResourceLimit
+        ))
+    );
+    let pair = limited_locator
+        .read_cargo_config_pair_in_captured_directory(&captured, true, &cancel)
+        .unwrap();
+    assert_eq!(
+        pair.config,
+        CargoConfigMemberObservation::Failed(crate::LocatorReadFailure::ResourceLimit)
+    );
+    assert_eq!(pair.config_toml, pair.config);
+
+    // Resource refusal and a replaced parent remain failures, never accepted content or rows.
+    let limited = DetailRescanner::new(
+        platform(),
+        ScanResourceLimits {
+            max_directory_entries: 0,
+            ..limits
+        },
+    );
+    assert!(matches!(
+        limited.rescan(request, &mut ids, &cancel),
+        Err(DetailRescanError::ResourceLimit)
+    ));
+    let mut malformed = platform();
+    malformed.bad_batch = true;
+    assert!(matches!(
+        DetailRescanner::new(malformed, ScanResourceLimits::default())
+            .rescan(request, &mut ids, &cancel),
+        Err(DetailRescanError::Unavailable)
+    ));
+    fs::rename(&nested, root.join("original")).unwrap();
+    fs::create_dir(&nested).unwrap();
+    fs::write(nested.join("payload"), b"abcde").unwrap();
+    assert!(matches!(
+        reader.rescan(request, &mut ids, &cancel),
+        Err(DetailRescanError::IdentityMismatch)
+    ));
+}
+
+#[test]
+fn captured_cargo_lookup_rejects_case_alias_when_enumeration_is_required() {
+    use crate::{
+        CargoConfigMemberObservation, LocatorReadFailure, LocatorReadLimits, LocatorReader,
+    };
+
+    let (_temp, root) = fixture();
+    fs::create_dir(root.join(".CARGO")).unwrap();
+    fs::write(root.join(".CARGO/config.toml"), b"[build]\n").unwrap();
+    let mut platform = ProbedPlatform::new(Arc::default());
+    platform.require_enumerated_inspection = true;
+    let reader = LocatorReader::new(
+        platform,
+        LocatorReadLimits {
+            max_components_per_request: 64,
+            max_total_components: 128,
+            max_directory_batch_entries: 1,
+            ..LocatorReadLimits::default()
+        },
+    );
+    let cancel = CancellationToken::new();
+    let captured = reader.capture_directory_identity(&root, &cancel).unwrap();
+    let pair = reader
+        .read_cargo_config_pair_in_captured_directory(&captured, true, &cancel)
+        .unwrap();
+    assert_eq!(
+        pair.config,
+        CargoConfigMemberObservation::Failed(LocatorReadFailure::AmbiguousAlias)
+    );
+    assert_eq!(pair.config_toml, pair.config);
 }
 
 #[test]
@@ -648,7 +902,7 @@ fn completed_directory_observations_match_each_independent_subtree_walk() {
     let directories = [
         root.clone(),
         root.join("first"),
-        root.join("first/deep"),
+        root.join("first").join("deep"),
         root.join("second"),
         root.join("empty"),
     ];
@@ -717,7 +971,7 @@ fn active_nested_progress_includes_unfinished_descendants_without_double_countin
     oracle.walk(&root, true);
     let (scan_id, observed) = source(&root);
     let (_, child) = source(&root.join("child"));
-    let (_, deep) = source(&root.join("child/deep"));
+    let (_, deep) = source(&root.join("child").join("deep"));
     let probe = Arc::new(Probe::default());
     let mut platform = ProbedPlatform::new(Arc::clone(&probe));
     // A controlled native file observation exceeds the measured 120 ms presentation interval.

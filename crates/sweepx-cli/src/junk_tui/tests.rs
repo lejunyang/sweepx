@@ -133,7 +133,7 @@ fn directory_inspection_drills_native_children_without_promoting_project_trash()
     reducer.reduce(&mut model, BrowserAction::ReturnToParent);
     assert_eq!(
         model.current_directory(),
-        Some(root.join("target/debug").to_str().unwrap())
+        Some(root.join("target").join("debug").to_str().unwrap())
     );
     drop(reducer);
     assert!(
@@ -795,6 +795,26 @@ fn bridge_refreshes_current_native_evidence_and_refuses_replaced_object_before_t
     let events = complete(&mut provider);
     assert!(
         matches!(events.first().unwrap(), JunkEvent::Started { revision: 2, keys: Some(keys) } if keys == std::slice::from_ref(&key))
+    );
+    assert!(
+        matches!(
+            events.last(),
+            Some(JunkEvent::Completed {
+                outcome: JunkOutcome::Complete,
+                replaced: true,
+                ..
+            })
+        ),
+        "selected refresh failed: {:?}",
+        events
+            .iter()
+            .filter_map(|event| match event {
+                JunkEvent::Error { message, .. } => Some(message.clone()),
+                JunkEvent::Issue { detail, .. } => Some(detail.clone()),
+                JunkEvent::Completed { outcome, .. } => Some(format!("{outcome:?}")),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
     );
     assert_eq!(
         provider.rows[&key]

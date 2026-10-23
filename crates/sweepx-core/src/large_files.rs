@@ -435,6 +435,66 @@ mod tests {
     }
 
     #[test]
+    fn completion_export_omits_provisional_acceleration_without_losing_native_facts() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture_root(&fixture);
+        for name in ["one", "two"] {
+            fs::write(root.join(name), b"abc").unwrap();
+        }
+        let request = ScanRequest {
+            roots: vec![root.clone()],
+            state_dir: None,
+        };
+        let duplicates = DuplicateOptions {
+            minimum_logical_bytes: 0.into(),
+            ..Default::default()
+        };
+        let large = LargeFileOptions {
+            minimum_logical_bytes: 0.into(),
+            ..Default::default()
+        };
+        for analysis in [
+            None,
+            Some(FileAnalysisOptions::Large(&large)),
+            Some(FileAnalysisOptions::Duplicates(&duplicates)),
+        ] {
+            let output = scan_for_output_with_store::<MemorySnapshotStore>(
+                &context(),
+                &request,
+                None,
+                analysis,
+                &CancellationToken::new(),
+            )
+            .unwrap();
+            assert_eq!(output.metadata().status, OutputStatus::Ok);
+            assert!(output.summary().progress.iter().all(|event| !matches!(
+                event,
+                ProgressEvent::AcceleratedPreview { .. }
+                    | ProgressEvent::AccelerationUnavailable { .. }
+            )));
+            for entry in &output.summary().entries {
+                assert!(entry.validated_native_locator().unwrap().is_some());
+                assert_eq!(
+                    entry.logical_bytes,
+                    sweepx_platform::known_u128(u128::from(
+                        fs::metadata(&entry.display_path).unwrap().len()
+                    ))
+                );
+            }
+            assert_eq!(output.summary().entries.len(), 2);
+            if matches!(analysis, Some(FileAnalysisOptions::Duplicates(_))) {
+                let report = &output.metadata().data["duplicates"];
+                assert_eq!(report["complete"], true);
+                assert_eq!(report["groups"].as_array().unwrap().len(), 1);
+                assert_eq!(
+                    report["groups"][0]["sha256"],
+                    "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn a_final_ranking_callback_does_not_hide_a_later_state_failure() {
         struct RejectState;
         impl SnapshotStore for RejectState {
@@ -566,6 +626,11 @@ mod tests {
         assert_eq!(work.scan.output.data, json!({}));
         assert!(work.scan.events.is_empty());
         assert!(!work.scan.summary.entries.is_empty());
+        assert!(work.scan.summary.progress.iter().all(|event| !matches!(
+            event,
+            ProgressEvent::AcceleratedPreview { .. }
+                | ProgressEvent::AccelerationUnavailable { .. }
+        )));
         assert!(!legacy.output.data["entries"].as_array().unwrap().is_empty());
         assert!(!legacy.events.is_empty());
         assert_eq!(work.analysis_incomplete_reasons, Some(Vec::new()));
@@ -746,6 +811,8 @@ mod tests {
             },
             Option::<&MemorySnapshotStore>::None,
             ScannerOptions {
+                // Ranking fixtures consume completed native file facts, not volume previews.
+                accelerated_preview: false,
                 resource_limits: limits,
                 ..Default::default()
             },

@@ -1902,7 +1902,11 @@ mod tests {
         let scan = |path: PathBuf| {
             let scanned = sweepx_scanner::Scanner::new(
                 sweepx_scanner::HostPlatformScanner::new(),
-                sweepx_scanner::ScannerOptions::default(),
+                sweepx_scanner::ScannerOptions {
+                    // This fixture asserts native anchor scope, not provisional volume totals.
+                    accelerated_preview: false,
+                    ..sweepx_scanner::ScannerOptions::default()
+                },
             )
             .scan_classified(
                 &[sweepx_platform::ScanRoot::new(path).unwrap()],
@@ -2323,7 +2327,10 @@ mod tests {
     #[test]
     fn system_root_selection_reuses_the_classifiers_tool_probe() {
         let fixture = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
         let cache = fixture.path().canonicalize().unwrap();
+        #[cfg(windows)]
+        let cache = fixture.path().to_path_buf();
         std::fs::create_dir(cache.join("wheels")).unwrap();
         let rule = load_platform_junk_rules()
             .unwrap()

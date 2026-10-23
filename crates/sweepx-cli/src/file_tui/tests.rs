@@ -64,7 +64,19 @@ fn duplicates(root: &Path) -> Provider {
     fs::write(root.join("two"), b"same payload").unwrap();
     let mut provider = provider(root.to_path_buf(), duplicate_options());
     let events = finish(&mut provider);
-    assert!(provider.complete, "{}", events.len());
+    assert!(
+        provider.complete,
+        "analysis was incomplete: {:?}",
+        events
+            .iter()
+            .filter_map(|event| match event {
+                JunkEvent::Error { message, .. } => Some(message.clone()),
+                JunkEvent::Issue { detail, .. } => Some(detail.clone()),
+                JunkEvent::Completed { outcome, .. } => Some(format!("{outcome:?}")),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    );
     assert_eq!(provider.rows.len(), 2);
     provider
 }

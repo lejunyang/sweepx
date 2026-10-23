@@ -230,7 +230,7 @@ fn configured_home_lookup_distinguishes_missing_components_and_current_directori
         panic!("new directory was not observed")
     };
     let ordinary = reader
-        .capture_directory_identity(&root.join("missing/deep"), &cancel)
+        .capture_directory_identity(&root.join("missing").join("deep"), &cancel)
         .unwrap();
     assert!(
         reader
@@ -252,7 +252,7 @@ fn cargo_home_output_base_preserves_lexical_parent_before_native_resolution() {
     for (input, expected, comparable) in [
         ("home", root.join("project"), true),
         (".", root.clone(), true),
-        ("home/..", root.join("project/home"), true),
+        ("home/..", root.join("project").join("home"), true),
         ("../home", root.clone(), false),
     ] {
         let (base, actual_comparable) = reader

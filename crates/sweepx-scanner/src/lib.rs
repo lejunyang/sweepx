@@ -69,6 +69,10 @@ pub struct ScannerOptions {
     pub resource_limits: ScanResourceLimits,
     /// Requested number of directory workers. Values above 32 are capped at 32.
     pub max_workers: usize,
+    /// Emit an optional non-authoritative NTFS preview before native traversal.
+    /// Disable when the consumer does not display these progress events: qualification and
+    /// preview read the whole volume even when the requested root is a tiny subtree.
+    pub accelerated_preview: bool,
     /// Retains optional ordinary-file names and lengths for a later file-cache generation.
     /// Directory coverage, native root observations and required classification markers remain
     /// available when disabled. Callers with current native length observations can avoid building
@@ -87,6 +91,7 @@ impl Default for ScannerOptions {
             scan_id: ScanId::new("scan-p1"),
             resource_limits: ScanResourceLimits::default(),
             max_workers: 4,
+            accelerated_preview: true,
             retain_file_index: true,
             retain_directory_index: true,
         }
@@ -2219,48 +2224,50 @@ where
             && !sink.wants_file_observations()
             && self.platform.supports_file_length_observation();
 
-        // Qualify the accelerated path before traversing.
-        //
-        // When it qualifies, a bulk NTFS read produces a *preview* of the root: totals in about a
-        // second where the handle-relative walk needs minutes. The walk still runs and still
-        // produces every authoritative record, because only a live handle yields the reopen
-        // recipe that a delete is allowed to act on. The preview is emitted first so a caller can
-        // show a provisional size immediately and replace it when the walk finishes.
-        let acceleration = qualify_acceleration(&root_path, cancel);
-        if let Some(refusal) = acceleration.refusal() {
-            // Reported as progress, not a boundary. A boundary means filesystem coverage was lost;
-            // declining an optimization loses nothing, and recording it as a boundary would make
-            // every ordinary unelevated scan look partial.
-            sink.push_progress(
-                &root_path,
-                ProgressEvent::AccelerationUnavailable {
-                    path: root_path.clone(),
-                    reason: refusal.code(),
-                    elevation_might_help: refusal.elevation_might_help(),
-                },
-            )?;
-        } else {
-            match read_accelerated_preview(&root_path, cancel) {
-                Ok(preview) => sink.push_progress(
-                    &root_path,
-                    ProgressEvent::AcceleratedPreview {
-                        path: root_path.clone(),
-                        entry_count: preview.entry_count,
-                        logical_bytes: preview.logical_bytes,
-                        complete: preview.complete,
-                        elapsed_micros: preview.elapsed.as_micros(),
-                    },
-                )?,
-                // A preview failure is never fatal: the authoritative walk below is unaffected,
-                // so this degrades to exactly the unaccelerated experience.
-                Err(refusal) => sink.push_progress(
+        if self.options.accelerated_preview {
+            // Qualify the accelerated path before traversing.
+            //
+            // When it qualifies, a bulk NTFS read produces a *preview* of the root: totals in about a
+            // second where the handle-relative walk needs minutes. The walk still runs and still
+            // produces every authoritative record, because only a live handle yields the reopen
+            // recipe that a delete is allowed to act on. The preview is emitted first so a caller can
+            // show a provisional size immediately and replace it when the walk finishes.
+            let acceleration = qualify_acceleration(&root_path, cancel);
+            if let Some(refusal) = acceleration.refusal() {
+                // Reported as progress, not a boundary. A boundary means filesystem coverage was lost;
+                // declining an optimization loses nothing, and recording it as a boundary would make
+                // every ordinary unelevated scan look partial.
+                sink.push_progress(
                     &root_path,
                     ProgressEvent::AccelerationUnavailable {
                         path: root_path.clone(),
                         reason: refusal.code(),
                         elevation_might_help: refusal.elevation_might_help(),
                     },
-                )?,
+                )?;
+            } else {
+                match read_accelerated_preview(&root_path, cancel) {
+                    Ok(preview) => sink.push_progress(
+                        &root_path,
+                        ProgressEvent::AcceleratedPreview {
+                            path: root_path.clone(),
+                            entry_count: preview.entry_count,
+                            logical_bytes: preview.logical_bytes,
+                            complete: preview.complete,
+                            elapsed_micros: preview.elapsed.as_micros(),
+                        },
+                    )?,
+                    // A preview failure is never fatal: the authoritative walk below is unaffected,
+                    // so this degrades to exactly the unaccelerated experience.
+                    Err(refusal) => sink.push_progress(
+                        &root_path,
+                        ProgressEvent::AccelerationUnavailable {
+                            path: root_path.clone(),
+                            reason: refusal.code(),
+                            elevation_might_help: refusal.elevation_might_help(),
+                        },
+                    )?,
+                }
             }
         }
 
@@ -3785,6 +3792,15 @@ mod tests {
         Scanner::new(HostPlatformScanner::new(), options)
     }
 
+    /// Traversal fixtures assert native facts, scheduling and classification, not volume previews.
+    /// Even a fake C:\root backend would otherwise query the real C: volume on Windows.
+    fn fixture_scanner_options() -> ScannerOptions {
+        ScannerOptions {
+            accelerated_preview: false,
+            ..ScannerOptions::default()
+        }
+    }
+
     fn test_native_name(name: &str) -> NativeName {
         #[cfg(unix)]
         {
@@ -3828,6 +3844,47 @@ mod tests {
     }
 
     #[test]
+    fn disabling_unused_accelerated_preview_keeps_authoritative_entries_and_totals() {
+        assert!(ScannerOptions::default().accelerated_preview);
+        let root = test_path("root");
+        let file = root.join("payload");
+        let mut metadata = test_metadata(file.clone(), "payload", EntryKind::File, Some(1));
+        metadata.logical_bytes = known_u128(37);
+        let platform = FakePlatform::new(
+            root.clone(),
+            vec![test_entry(&root, "payload")],
+            BTreeMap::from([(file.clone(), WalkEntry::File(metadata))]),
+        );
+        let inspections = Arc::clone(&platform.inspect_calls);
+        let summary = Scanner::new(
+            platform,
+            ScannerOptions {
+                accelerated_preview: false,
+                ..ScannerOptions::default()
+            },
+        )
+        .scan(
+            &[ScanRoot::new(root.clone()).unwrap()],
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        assert_eq!(inspections.load(Ordering::SeqCst), 1);
+        assert_eq!(summary.entries.len(), 1);
+        assert_eq!(summary.entries[0].display_path, file.to_string_lossy());
+        assert_eq!(summary.entries[0].logical_bytes, known_u128(37));
+        assert!(summary.entries[0].native_locator.is_some());
+        let aggregate = aggregate_for_path(&summary, &root);
+        assert_eq!(aggregate.apparent_logical_bytes, known_u128(37));
+        assert!(aggregate.coverage.complete);
+        assert!(summary.boundaries.is_empty());
+        assert!(summary.progress.iter().all(|event| !matches!(
+            event,
+            ProgressEvent::AcceleratedPreview { .. }
+                | ProgressEvent::AccelerationUnavailable { .. }
+        )));
+    }
+
+    #[test]
     fn bounded_scheduler_honors_worker_count_and_caps_it_at_32() {
         let serial_probe = Arc::new(SchedulerProbe::new(1));
         let serial = SchedulingPlatform::new(4, Arc::clone(&serial_probe));
@@ -3836,7 +3893,7 @@ mod tests {
             serial,
             ScannerOptions {
                 max_workers: 1,
-                ..ScannerOptions::default()
+                ..fixture_scanner_options()
             },
         )
         .scan(
@@ -3854,7 +3911,7 @@ mod tests {
             parallel,
             ScannerOptions {
                 max_workers: 4,
-                ..ScannerOptions::default()
+                ..fixture_scanner_options()
             },
         )
         .scan(
@@ -3878,7 +3935,7 @@ mod tests {
                     max_frontier_entries: 256,
                     ..ScanResourceLimits::default()
                 },
-                ..ScannerOptions::default()
+                ..fixture_scanner_options()
             },
         )
         .scan(
@@ -3908,7 +3965,7 @@ mod tests {
                         max_frontier_entries: 3,
                         ..ScanResourceLimits::default()
                     },
-                    ..ScannerOptions::default()
+                    ..fixture_scanner_options()
                 },
             )
             .scan(&[ScanRoot::new(root).unwrap()], &CancellationToken::new())
@@ -3945,7 +4002,7 @@ mod tests {
             ScannerOptions {
                 scan_id: ScanId::new("stable-scheduler"),
                 max_workers: 2,
-                ..ScannerOptions::default()
+                ..fixture_scanner_options()
             },
         )
         .scan(
@@ -4008,7 +4065,7 @@ mod tests {
                 platform,
                 ScannerOptions {
                     max_workers: 4,
-                    ..ScannerOptions::default()
+                    ..fixture_scanner_options()
                 },
             )
             .scan(&[ScanRoot::new(root).unwrap()], &CancellationToken::new());
@@ -4044,7 +4101,7 @@ mod tests {
             platform,
             ScannerOptions {
                 max_workers,
-                ..ScannerOptions::default()
+                ..fixture_scanner_options()
             },
         )
         .scan(&[ScanRoot::new(root.clone()).unwrap()], &cancel)
@@ -4124,7 +4181,7 @@ mod tests {
                     max_frontier_entries: frontier_permits,
                     ..ScanResourceLimits::default()
                 },
-                ..ScannerOptions::default()
+                ..fixture_scanner_options()
             },
         )
         .scan(
@@ -4192,7 +4249,7 @@ mod tests {
                     max_retained_entries: retained_entries,
                     ..ScanResourceLimits::default()
                 },
-                ..ScannerOptions::default()
+                ..fixture_scanner_options()
             },
         )
         .scan(
@@ -4270,7 +4327,7 @@ mod tests {
                     max_retained_entries: retained_entries,
                     ..ScanResourceLimits::default()
                 },
-                ..ScannerOptions::default()
+                ..fixture_scanner_options()
             },
         )
         .scan(&[ScanRoot::new(root).unwrap()], &CancellationToken::new())
@@ -4309,12 +4366,9 @@ mod tests {
                 entry: &ScannedEntry,
                 _markers: &BTreeMap<ScanEntryId, BTreeSet<String>>,
             ) -> Option<String> {
-                match &entry.native_basename {
-                    NativeName::UnixBytes(bytes) if bytes.starts_with(b"dir-") => {
-                        Some("rule:branch".to_string())
-                    }
-                    _ => None,
-                }
+                native_basename_marker(&entry.native_basename)
+                    .is_some_and(|name| name.starts_with("dir-"))
+                    .then(|| "rule:branch".to_string())
             }
         }
 
@@ -4323,7 +4377,7 @@ mod tests {
             ScannerOptions {
                 scan_id: ScanId::new("classified"),
                 max_workers: 4,
-                ..ScannerOptions::default()
+                ..fixture_scanner_options()
             },
         )
         .scan_classified(
@@ -4347,19 +4401,18 @@ mod tests {
                 .all(|rule_id| rule_id == "rule:branch")
         );
         assert_eq!(result.summary.entries.len(), fan_out);
-        assert!(result.summary.entries.iter().all(|entry| {
-            matches!(&entry.native_basename,
-                NativeName::UnixBytes(bytes) if bytes.starts_with(b"dir-"))
-        }));
-        // Leaf directories must not have been retained as rows.
-        assert!(
-            !result
-                .summary
-                .entries
-                .iter()
-                .any(|entry| matches!(&entry.native_basename,
-                NativeName::UnixBytes(bytes) if bytes.as_slice() == b"leaf"))
-        );
+        // Compare every native fixture name rather than repeating the classifier's predicate.
+        // With the exact row count above, this also proves no root or leaf row was retained.
+        for index in 0..fan_out {
+            let expected = test_native_name(&format!("dir-{index:03}"));
+            assert!(
+                result
+                    .summary
+                    .entries
+                    .iter()
+                    .any(|entry| entry.native_basename == expected)
+            );
+        }
     }
 
     struct ObservedBranches;
@@ -4489,7 +4542,7 @@ mod tests {
                         max_directory_entries: directory_limit,
                         ..Default::default()
                     },
-                    ..Default::default()
+                    ..fixture_scanner_options()
                 },
             )
             .scan_classified_with_observer(
@@ -4534,7 +4587,7 @@ mod tests {
     fn live_classified_observations_preserve_results_and_final_candidates() {
         let platform = NestedFanOutPlatform::new(8);
         let roots = [ScanRoot::new(platform.root.clone()).unwrap()];
-        let scanner = Scanner::new(platform, ScannerOptions::default());
+        let scanner = Scanner::new(platform, fixture_scanner_options());
         let ordinary = scanner
             .scan_classified(&roots, &CancellationToken::new(), &ObservedBranches, None)
             .unwrap();
@@ -4589,7 +4642,7 @@ mod tests {
             platform,
             ScannerOptions {
                 max_workers: 1,
-                ..ScannerOptions::default()
+                ..fixture_scanner_options()
             },
         )
         .scan_classified_with_observer(&roots, &cancel, &ObservedBranches, None, &mut observed)
@@ -4622,7 +4675,7 @@ mod tests {
     fn progress_log_omissions_preserve_classified_results_and_live_observations() {
         let platform = NestedFanOutPlatform::new(8);
         let roots = [ScanRoot::new(platform.root.clone()).unwrap()];
-        let ordinary = Scanner::new(platform, ScannerOptions::default())
+        let ordinary = Scanner::new(platform, fixture_scanner_options())
             .scan_classified(&roots, &CancellationToken::new(), &ObservedBranches, None)
             .unwrap();
         for cap in [0, 1, 4] {
@@ -4634,7 +4687,7 @@ mod tests {
                         max_progress_events: cap,
                         ..ScanResourceLimits::default()
                     },
-                    ..ScannerOptions::default()
+                    ..fixture_scanner_options()
                 },
             )
             .scan_classified_with_observer(
@@ -4724,7 +4777,7 @@ mod tests {
                     max_progress_events: 0,
                     ..ScanResourceLimits::default()
                 },
-                ..ScannerOptions::default()
+                ..fixture_scanner_options()
             },
         )
         .scan(
@@ -4754,7 +4807,7 @@ mod tests {
                     max_retained_boundaries: 0,
                     ..ScanResourceLimits::default()
                 },
-                ..ScannerOptions::default()
+                ..fixture_scanner_options()
             },
         )
         .scan_classified_with_observer(
@@ -4798,7 +4851,7 @@ mod tests {
             platform,
             ScannerOptions {
                 max_workers: 1,
-                ..ScannerOptions::default()
+                ..fixture_scanner_options()
             },
         )
         .scan_classified_with_observer(
@@ -4853,7 +4906,7 @@ mod tests {
                     max_classified_metadata_bytes: 0,
                     ..ScanResourceLimits::default()
                 },
-                ..ScannerOptions::default()
+                ..fixture_scanner_options()
             },
         )
         .scan_classified(
@@ -4891,7 +4944,7 @@ mod tests {
     fn required_evidence_evicts_optional_root_observations_and_releases_their_vector() {
         let platform = NestedFanOutPlatform::new(0);
         let root = platform.root.clone();
-        let source = Scanner::new(platform, ScannerOptions::default())
+        let source = Scanner::new(platform, fixture_scanner_options())
             .scan(
                 &[ScanRoot::new(root.clone()).unwrap()],
                 &CancellationToken::new(),
@@ -4914,6 +4967,11 @@ mod tests {
 
     #[test]
     fn required_marker_evicts_optional_file_indexes_within_the_shared_budget() {
+        let expected_marker = if cfg!(windows) {
+            "cargo.toml"
+        } else {
+            "Cargo.toml"
+        };
         struct MarkerOnly;
         impl JunkClassifier for MarkerOnly {
             fn needs_file_marker(&self, name: &NativeName) -> bool {
@@ -4960,7 +5018,7 @@ mod tests {
                 logical_bytes: 123,
             },
         );
-        assert!(sink.file_markers[&parent].contains("Cargo.toml"));
+        assert!(sink.file_markers[&parent].contains(expected_marker));
         assert!(
             !sink.metadata_lost,
             "optional cache pressure must not lose required evidence"
@@ -4971,7 +5029,7 @@ mod tests {
             sink.dir_listings
                 .values()
                 .flat_map(|listing| listing.files.keys())
-                .all(|name| name == "Cargo.toml")
+                .all(|name| name == expected_marker)
         );
     }
 
@@ -5005,7 +5063,7 @@ mod tests {
                     max_retained_boundaries: 2,
                     ..ScanResourceLimits::default()
                 },
-                ..ScannerOptions::default()
+                ..fixture_scanner_options()
             },
         )
         .scan(
@@ -5095,7 +5153,7 @@ mod tests {
         fs::write(sub.join("beta.txt"), b"123456").unwrap();
         std::os::unix::fs::symlink(&alpha, root.join("alpha-link")).unwrap();
 
-        let scanner = linux_scanner(ScannerOptions::default());
+        let scanner = linux_scanner(fixture_scanner_options());
         let result = scanner
             .scan(
                 &[ScanRoot::new(root.clone()).unwrap()],
@@ -5244,7 +5302,7 @@ mod tests {
         fs::create_dir(&root).unwrap();
         fs::create_dir(root.join("child")).unwrap();
 
-        let scanner = linux_scanner(ScannerOptions::default());
+        let scanner = linux_scanner(fixture_scanner_options());
         let cancel = CancellationToken::new();
         cancel.cancel();
         let result = scanner
@@ -5259,7 +5317,7 @@ mod tests {
         );
         let root_aggregate = result.aggregates.first().unwrap();
         let cancelled_identity = root_aggregate.scan_entry_id().unwrap();
-        assert!(cancelled_identity.belongs_to(&ScannerOptions::default().scan_id));
+        assert!(cancelled_identity.belongs_to(&fixture_scanner_options().scan_id));
         assert_ne!(
             root_aggregate.directory_identity,
             root.display().to_string()
@@ -5280,7 +5338,7 @@ mod tests {
         let cancel = CancellationToken::new();
         cancel.cancel();
 
-        let result = linux_scanner(ScannerOptions::default())
+        let result = linux_scanner(fixture_scanner_options())
             .scan(
                 &[
                     ScanRoot::new(first.clone()).unwrap(),
@@ -5315,7 +5373,7 @@ mod tests {
         fs::create_dir(&root).unwrap();
         fs::write(root.join("child"), b"payload").unwrap();
 
-        let result = linux_scanner(ScannerOptions::default())
+        let result = linux_scanner(fixture_scanner_options())
             .scan_roots_only(
                 &[ScanRoot::new(root.clone()).unwrap()],
                 &CancellationToken::new(),
@@ -5357,7 +5415,7 @@ mod tests {
                 max_progress_events: 16_384,
                 ..ScanResourceLimits::default()
             },
-            ..ScannerOptions::default()
+            ..fixture_scanner_options()
         });
         let result = scanner
             .scan(&[ScanRoot::new(root).unwrap()], &CancellationToken::new())
@@ -5393,7 +5451,7 @@ mod tests {
                     max_frontier_entries,
                     ..ScanResourceLimits::default()
                 },
-                ..ScannerOptions::default()
+                ..fixture_scanner_options()
             },
         )
         .scan(
@@ -5448,7 +5506,7 @@ mod tests {
                     max_frontier_entries: 1,
                     ..ScanResourceLimits::default()
                 },
-                ..ScannerOptions::default()
+                ..fixture_scanner_options()
             },
         )
         .scan(&[ScanRoot::new(root).unwrap()], &CancellationToken::new())
@@ -5489,7 +5547,7 @@ mod tests {
                     max_frontier_entries: 0,
                     ..ScanResourceLimits::default()
                 },
-                ..ScannerOptions::default()
+                ..fixture_scanner_options()
             },
         )
         .scan(&[ScanRoot::new(root).unwrap()], &CancellationToken::new());
@@ -5560,7 +5618,7 @@ mod tests {
                     max_frontier_entries: 1,
                     ..ScanResourceLimits::default()
                 },
-                ..ScannerOptions::default()
+                ..fixture_scanner_options()
             },
         );
 
@@ -5605,7 +5663,7 @@ mod tests {
         fs::write(&original, b"1234").unwrap();
         fs::hard_link(&original, right.join("shared.txt")).unwrap();
 
-        let scanner = linux_scanner(ScannerOptions::default());
+        let scanner = linux_scanner(fixture_scanner_options());
         let result = scanner
             .scan(
                 &[ScanRoot::new(root.clone()).unwrap()],
@@ -5696,7 +5754,7 @@ mod tests {
                     ),
                 ]),
             ),
-            ScannerOptions::default(),
+            fixture_scanner_options(),
         );
 
         let result = scanner
@@ -5750,7 +5808,7 @@ mod tests {
                 max_progress_events: 16_384,
                 ..ScanResourceLimits::default()
             },
-            ..ScannerOptions::default()
+            ..fixture_scanner_options()
         });
         let result = scanner
             .scan(&[ScanRoot::new(root).unwrap()], &CancellationToken::new())
@@ -5787,7 +5845,7 @@ mod tests {
                 max_progress_events: 8,
                 ..ScanResourceLimits::default()
             },
-            ..ScannerOptions::default()
+            ..fixture_scanner_options()
         });
         let result = scanner
             .scan(
@@ -5851,7 +5909,7 @@ mod tests {
                     }),
                 )]),
             ),
-            ScannerOptions::default(),
+            fixture_scanner_options(),
         );
 
         let result = scanner
@@ -5905,7 +5963,7 @@ mod tests {
                 vec![test_entry(&root, "file")],
                 BTreeMap::from([(file, WalkEntry::File(metadata))]),
             ),
-            ScannerOptions::default(),
+            fixture_scanner_options(),
         );
         let mut sink = CollectingScanSink::new(ScanResourceLimits::default());
         scanner
@@ -5986,7 +6044,7 @@ mod tests {
                     max_directory_batch_entries: 2,
                     ..ScanResourceLimits::default()
                 },
-                ..ScannerOptions::default()
+                ..fixture_scanner_options()
             },
         );
         let mut sink = CollectingScanSink::new(ScanResourceLimits::default());
@@ -6019,6 +6077,11 @@ mod tests {
 
     #[test]
     fn cached_files_keep_markers_and_survive_the_next_generation() {
+        let expected_marker = if cfg!(windows) {
+            "cargo.toml"
+        } else {
+            "Cargo.toml"
+        };
         struct NoCandidates;
         impl JunkClassifier for NoCandidates {
             fn classify(
@@ -6039,9 +6102,10 @@ mod tests {
             logical_bytes: 123,
         };
         sink.note_cached_file(&parent, &file);
-        assert!(sink.file_markers[&parent].contains("Cargo.toml"));
+        assert!(sink.file_markers[&parent].contains(expected_marker));
         assert_eq!(
-            sink.finish_classified().dir_listings[&root.display().to_string()].files["Cargo.toml"],
+            sink.finish_classified().dir_listings[&root.display().to_string()].files
+                [expected_marker],
             123
         );
     }
@@ -6154,7 +6218,7 @@ mod tests {
                     }),
                 )]),
             ),
-            ScannerOptions::default(),
+            fixture_scanner_options(),
         );
 
         let result = scanner
@@ -6222,7 +6286,7 @@ mod tests {
             ),
             ScannerOptions {
                 scan_id: ScanId::new("identity-test"),
-                ..ScannerOptions::default()
+                ..fixture_scanner_options()
             },
         );
 
@@ -6289,7 +6353,7 @@ mod tests {
                 vec![test_entry(&root, "file")],
                 BTreeMap::from([(child.clone(), WalkEntry::File(metadata))]),
             ),
-            ScannerOptions::default(),
+            fixture_scanner_options(),
         );
 
         let result = scanner
@@ -6324,7 +6388,7 @@ mod tests {
             },
             ScannerOptions {
                 scan_id: ScanId::new("multi-root"),
-                ..ScannerOptions::default()
+                ..fixture_scanner_options()
             },
         );
 
@@ -6377,7 +6441,7 @@ mod tests {
             },
             ScannerOptions {
                 scan_id: ScanId::new("denied-root"),
-                ..ScannerOptions::default()
+                ..fixture_scanner_options()
             },
         );
         let roots = [
@@ -6458,7 +6522,7 @@ mod tests {
                 )]),
             )
             .with_inspect_calls(inspect_calls.clone()),
-            ScannerOptions::default(),
+            fixture_scanner_options(),
         );
 
         let error = scanner
@@ -6495,7 +6559,7 @@ mod tests {
                 )]),
             )
             .with_inspect_calls(inspect_calls.clone()),
-            ScannerOptions::default(),
+            fixture_scanner_options(),
         );
 
         let error = scanner
@@ -6527,7 +6591,7 @@ mod tests {
                     WalkEntry::File(test_metadata(outside, "evil", EntryKind::File, Some(1))),
                 )]),
             ),
-            ScannerOptions::default(),
+            fixture_scanner_options(),
         );
 
         let error = scanner
@@ -6595,7 +6659,7 @@ mod tests {
         );
         let replacement_flag = platform.replace_child_path_after_open.clone();
         replacement_flag.store(true, Ordering::SeqCst);
-        let scanner = Scanner::new(platform, ScannerOptions::default());
+        let scanner = Scanner::new(platform, fixture_scanner_options());
 
         let result = scanner
             .scan(&[ScanRoot::new(root).unwrap()], &CancellationToken::new())
@@ -6635,7 +6699,7 @@ mod tests {
                     }),
                 )]),
             ),
-            ScannerOptions::default(),
+            fixture_scanner_options(),
         );
 
         let result = scanner
@@ -6674,7 +6738,7 @@ mod tests {
             FakePlatform::new(root.clone(), Vec::new(), BTreeMap::new()).with_enumeration_failure(
                 PlatformError::ResourceLimit("adversarial byte budget".to_string()),
             ),
-            ScannerOptions::default(),
+            fixture_scanner_options(),
         );
 
         let result = scanner
@@ -6705,7 +6769,7 @@ mod tests {
                     io_kind: Some(std::io::ErrorKind::PermissionDenied),
                 },
             ),
-            ScannerOptions::default(),
+            fixture_scanner_options(),
         );
 
         let result = scanner
@@ -6753,7 +6817,7 @@ mod tests {
                 BTreeMap::new(),
             )
             .with_cancel_on_inspect(),
-            ScannerOptions::default(),
+            fixture_scanner_options(),
         );
 
         let result = scanner
@@ -6799,7 +6863,7 @@ mod tests {
             .collect();
         let scanner = Scanner::new(
             FakePlatform::new(root.clone(), entries, walk_entries).with_batch_size(1),
-            ScannerOptions::default(),
+            fixture_scanner_options(),
         );
 
         let result = scanner
@@ -6888,7 +6952,7 @@ mod tests {
                     max_retained_aggregates: 2,
                     ..ScanResourceLimits::default()
                 },
-                ..ScannerOptions::default()
+                ..fixture_scanner_options()
             },
         );
 
@@ -6940,7 +7004,7 @@ mod tests {
                     max_directory_batch_entries: 1,
                     ..ScanResourceLimits::default()
                 },
-                ..ScannerOptions::default()
+                ..fixture_scanner_options()
             },
         );
 
